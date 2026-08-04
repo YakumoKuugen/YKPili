@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- iOS 应用显示名称(用户在主屏幕上看到的名字) -->
+	<key>CFBundleDisplayName</key>
+	<string>YKPili</string>
+	<!-- iOS 应用唯一标识(发布到 App Store 前需改为正式的 Bundle Identifier) -->
+	<key>CFBundleIdentifier</key>
+	<string>companyName.YKPili</string>
+	<!-- 营销版本号 -->
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<!-- 构建版本号 -->
+	<key>CFBundleVersion</key>
+	<string>1.0</string>
+	<!-- 声明此应用只能在 iOS 设备上运行(不能在 iPadOS 模拟器/旧设备) -->
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<!-- 最低支持 iOS 版本 -->
+	<key>MinimumOSVersion</key>
+	<string>13.0</string>
+	<!-- 设备类型:iPhone(1) + iPad(2) -->
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+		<integer>2</integer>
+	</array>
+	<!-- 启动故事板(LaunchScreen.storyboard) -->
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<!-- 设备能力要求:armv7 指令集 -->
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>armv7</string>
+	</array>
+	<!-- iPhone 支持的屏幕方向 -->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<!-- iPad 支持的屏幕方向 -->
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

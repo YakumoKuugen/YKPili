@@ -1,0 +1,27 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:sys="using:System"
+             xmlns:local="using:YKPili"
+             x:Class="YKPili.App"
+             RequestedThemeVariant="Default">
+             <!-- "Default" ThemeVariant 跟随系统主题;"Dark" 或 "Light" 则是强制指定固定主题。 -->
+
+    <!-- 全局资源:定义滚动条宽度,用于统一应用内所有滚动条的外观 -->
+    <Application.Resources>
+        <sys:Double x:Key="ScrollBarSize">6</sys:Double>
+    </Application.Resources>
+
+    <!-- 数据模板集合:注册自定义 ViewLocator,根据 ViewModel 类型自动匹配对应 View -->
+    <Application.DataTemplates>
+        <local:ViewLocator/>
+    </Application.DataTemplates>
+
+    <!-- 应用全局样式:Fluent 主题 + 隐藏滚动条两端的 Line Up/Down 按钮(让外观更简洁) -->
+    <Application.Styles>
+        <FluentTheme />
+        <Style Selector="ScrollBar /template/ RepeatButton#PART_LineUpButton,
+                         ScrollBar /template/ RepeatButton#PART_LineDownButton">
+            <Setter Property="IsVisible" Value="False" />
+        </Style>
+    </Application.Styles>
+</Application>

@@ -1,0 +1,11 @@
+{
+    "chat.mcp.serverSampling": {
+        "YKPili/.mcp.json: avalonia": {
+            "allowedModels": [
+                "copilotcli/auto",
+                "copilot/auto",
+                "customendpoint/DeepSeek/deepseek-v4-flash"
+            ]
+        }
+    }
+}

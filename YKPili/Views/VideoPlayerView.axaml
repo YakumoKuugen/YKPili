@@ -1,0 +1,120 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:YKPili.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="550"
+             x:Class="YKPili.Views.VideoPlayerView"
+             x:DataType="vm:VideoPlayerViewModel"
+             IsVisible="{Binding IsVisible}">
+
+  <!--
+    播放器布局:
+      Overlay(全屏黑色半透明背景) - 整个浮层
+      Panel(900x550 圆角深色面板) - 实际播放区域
+        - Title Bar: 顶部标题 + 关闭按钮
+        - Video Area: 中间视频区域,NativeControlHost 在代码后台插入
+        - Bottom Bar: 底部播放/暂停按钮
+  -->
+  <Grid x:Name="Overlay"
+        Background="#AA000000"
+        IsVisible="{Binding IsVisible}">
+
+    <Border x:Name="Panel"
+            Width="900"
+            Height="550"
+            CornerRadius="12"
+            Background="#1E1E1E"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center">
+
+      <Grid RowDefinitions="Auto,*,Auto">
+
+        <!-- 标题栏 -->
+        <Border Grid.Row="0"
+                Padding="16,10"
+                Background="#2A2A2A"
+                CornerRadius="12,12,0,0">
+          <Grid ColumnDefinitions="*,Auto">
+            <TextBlock Text="{Binding Title}"
+                       FontFamily="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif"
+                       FontSize="16"
+                       Foreground="White"
+                       TextTrimming="CharacterEllipsis"
+                       VerticalAlignment="Center" />
+            <Button Grid.Column="1"
+                    Content="X"
+                    Width="32" Height="32"
+                    Background="Transparent"
+                    Foreground="#AAA"
+                    FontSize="16"
+                    Command="{Binding CloseCommand}" />
+          </Grid>
+        </Border>
+
+        <!-- 视频区域:NativeControlHost 会在代码后台被插入到 Children[0] -->
+        <Panel Grid.Row="1"
+               x:Name="VideoArea"
+               Background="Transparent">
+
+          <!-- NativeControlHost added at index 0 in code-behind -->
+
+          <!-- 暗色遮罩:暂停时半透明,恢复时透明 -->
+          <Border Background="Black"
+                  Opacity="{Binding DimOpacity}"
+                  IsHitTestVisible="False" />
+
+          <!-- 加载中提示 -->
+          <Border IsVisible="{Binding IsLoading}"
+                  HorizontalAlignment="Center"
+                  VerticalAlignment="Center"
+                  Background="#CC000000"
+                  CornerRadius="8"
+                  Padding="20,12">
+            <TextBlock Text="{Binding StatusText}"
+                       Foreground="White"
+                       FontSize="14" />
+          </Border>
+
+          <!-- 暂停图标(中央圆形按钮) -->
+          <Border IsVisible="{Binding IsPausedOverlay}"
+                  HorizontalAlignment="Center"
+                  VerticalAlignment="Center"
+                  IsHitTestVisible="False"
+                  Background="#66000000"
+                  CornerRadius="999"
+                  Width="80" Height="80">
+            <TextBlock Text="⏸"
+                       FontSize="40"
+                       Foreground="White"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center" />
+          </Border>
+
+          <!-- 调试用:绿色边框标识 NativeControlHost 所在区域 -->
+          <Border BorderBrush="Lime"
+                  BorderThickness="2"
+                  IsHitTestVisible="False" />
+        </Panel>
+
+        <!-- 底部控制栏 -->
+        <Border Grid.Row="2"
+                Padding="12,8"
+                Background="#2A2A2A"
+                CornerRadius="0,0,12,12">
+          <StackPanel Orientation="Horizontal"
+                      HorizontalAlignment="Center"
+                      Spacing="8">
+            <Button Width="48" Height="36"
+                    Background="#FF6B6B"
+                    Foreground="White"
+                    FontSize="16"
+                    Command="{Binding TogglePlayPauseCommand}"
+                    Content="⏯" />
+          </StackPanel>
+        </Border>
+
+      </Grid>
+    </Border>
+  </Grid>
+</UserControl>

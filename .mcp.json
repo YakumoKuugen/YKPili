@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "avalonia": {
+      "command": "avalonia-mcp",
+      "args": [
+        "--pid",
+        "${AVALONIA_PID}"
+      ]
+    }
+  }
+}

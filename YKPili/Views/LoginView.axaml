@@ -1,0 +1,58 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:YKPili.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="400" d:DesignHeight="500"
+             x:Class="YKPili.Views.LoginView"
+             x:DataType="vm:LoginViewModel">
+
+  <!-- 设计时 DataContext:便于在 IDE 预览时显示样式 -->
+  <Design.DataContext>
+    <vm:LoginViewModel />
+  </Design.DataContext>
+
+  <!-- 登录页布局:垂直居中的卡片式 -->
+  <StackPanel HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              Spacing="16"
+              Width="300">
+
+    <!-- 标题 -->
+    <TextBlock Text="Bilibili Login"
+               FontSize="24"
+               FontWeight="Bold"
+               HorizontalAlignment="Center" />
+
+    <!-- 二维码区域:仅在轮询时可见 -->
+    <Border Width="220" Height="220"
+            CornerRadius="8"
+            Background="#FFFFFF"
+            IsVisible="{Binding IsPolling}"
+            HorizontalAlignment="Center">
+      <Image Source="{Binding QrCodeImage}"
+             Width="200" Height="200" />
+    </Border>
+
+    <!-- 状态文本:展示扫码阶段提示 -->
+    <TextBlock Text="{Binding StatusMessage}"
+               HorizontalAlignment="Center"
+               TextWrapping="Wrap"
+               FontSize="14" />
+
+    <!-- 登录按钮:仅在未轮询时显示 -->
+    <Button Content="Login"
+            Command="{Binding StartLoginCommand}"
+            IsVisible="{Binding !IsPolling}"
+            HorizontalAlignment="Center"
+            Width="120" />
+
+    <!-- 取消按钮:仅在轮询中显示 -->
+    <Button Content="Cancel"
+            Command="{Binding CancelLoginCommand}"
+            IsVisible="{Binding IsPolling}"
+            HorizontalAlignment="Center"
+            Width="120" />
+
+  </StackPanel>
+</UserControl>
