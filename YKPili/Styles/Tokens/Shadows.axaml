@@ -1,0 +1,90 @@
+<!--
+  Shadows.axaml —— 阴影与玻璃边缘光（随亮暗主题变化）
+  移植自 BewlyCat variables.scss 的 Shadows 区段。
+
+  【这是整套材质的关键文件】
+  BewlyCat 的「磨砂玻璃」观感有一半来自 bew-shadow-edge-glow-*：
+  它并非真的有背景模糊，而是用三层 inset 白色高光在面板内侧勾出一圈玻璃倒角。
+  Avalonia 的 BoxShadow 支持 IsInset，因此这部分可以 1:1 精确复刻。
+
+  使用建议（对应 BewlyCat 原文）：
+    Shadow1  —— 卡片、按钮等轻微抬升的元素
+    Shadow2  —— 顶栏、吸顶元素、固定悬浮按钮
+    Shadow3  —— 浮层、下拉菜单
+    Shadow4  —— 仅用于对话框
+    EdgeGlow1 —— 配合玻璃材质的中小面板（除对话框外）
+    EdgeGlow2 —— 配合玻璃材质的对话框
+-->
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <ResourceDictionary.ThemeDictionaries>
+
+    <!-- ================= 亮色 ================= -->
+    <ResourceDictionary x:Key="Light">
+
+      <!-- 0 4px 6px -1px rgb(0 0 0 / 0.08), 0 2px 4px -2px rgb(0 0 0 / 0.04) -->
+      <BoxShadows x:Key="Shadow1">0 4 6 -1 #14000000, 0 2 4 -2 #0A000000</BoxShadows>
+
+      <!-- 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.06) -->
+      <BoxShadows x:Key="Shadow2">0 10 15 -3 #1A000000, 0 4 6 -4 #0F000000</BoxShadows>
+
+      <!-- 0 20px 25px -5px rgb(0 0 0 / 0.12), 0 8px 10px -6px rgb(0 0 0 / 0.08) -->
+      <BoxShadows x:Key="Shadow3">0 20 25 -5 #1F000000, 0 8 10 -6 #14000000</BoxShadows>
+
+      <!-- 0 34px 50px -20px rgb(0 0 0 / 0.14), 0 32px 45px -12px rgb(0 0 0 / 0.1), 0 30px 40px -8px rgb(0 0 0 / 0.12) -->
+      <BoxShadows x:Key="Shadow4">0 34 50 -20 #24000000, 0 32 45 -12 #1A000000, 0 30 40 -8 #1F000000</BoxShadows>
+
+      <!--
+        bew-shadow-edge-glow-1:
+        inset 1px 1px 1px -0.5px rgba(255,255,255,0.34),
+        inset -1px -1px 1px -0.5px rgba(255,255,255,0.14),
+        inset 0 0 10px rgba(255,255,255,0.6)
+      -->
+      <BoxShadows x:Key="EdgeGlow1">inset 1 1 1 -0.5 #57FFFFFF, inset -1 -1 1 -0.5 #24FFFFFF, inset 0 0 10 0 #99FFFFFF</BoxShadows>
+
+      <!-- bew-shadow-edge-glow-2: 同上，内发光扩散到 14px / 0.62 -->
+      <BoxShadows x:Key="EdgeGlow2">inset 1 1 1 -0.5 #57FFFFFF, inset -1 -1 1 -0.5 #24FFFFFF, inset 0 0 14 0 #9EFFFFFF</BoxShadows>
+
+      <!--
+        卡片悬停时的组合阴影：抬升 + 边缘光。
+        对应 Phase 3 中封面卡片的 hover 浮起效果（BewlyCat 卡片同样靠阴影加深表达抬升）。
+      -->
+      <BoxShadows x:Key="ShadowCardHover">0 10 15 -3 #1F000000, 0 4 6 -4 #14000000, inset 1 1 1 -0.5 #57FFFFFF, inset -1 -1 1 -0.5 #24FFFFFF</BoxShadows>
+
+      <!-- ===== 玻璃组合阴影：外阴影定层次 + inset 定玻璃质感，一次引用到位 ===== -->
+      <!-- 中小玻璃面板（登录卡片） -->
+      <BoxShadows x:Key="ShadowGlassCard">0 4 6 -1 #14000000, 0 2 4 -2 #0A000000, inset 1 1 1 -0.5 #57FFFFFF, inset -1 -1 1 -0.5 #24FFFFFF, inset 0 0 10 0 #99FFFFFF</BoxShadows>
+      <!-- 悬浮玻璃面板（播放器浮层、下拉） -->
+      <BoxShadows x:Key="ShadowGlassElevated">0 20 25 -5 #1F000000, 0 8 10 -6 #14000000, inset 1 1 1 -0.5 #57FFFFFF, inset -1 -1 1 -0.5 #24FFFFFF, inset 0 0 10 0 #99FFFFFF</BoxShadows>
+      <!-- 对话框级玻璃面板（对应 EdgeGlow2 的更强内发光） -->
+      <BoxShadows x:Key="ShadowGlassModal">0 34 50 -20 #24000000, 0 32 45 -12 #1A000000, 0 30 40 -8 #1F000000, inset 1 1 1 -0.5 #57FFFFFF, inset -1 -1 1 -0.5 #24FFFFFF, inset 0 0 14 0 #9EFFFFFF</BoxShadows>
+
+    </ResourceDictionary>
+
+    <!-- ================= 暗色 ================= -->
+    <ResourceDictionary x:Key="Dark">
+
+      <BoxShadows x:Key="Shadow1">0 4 6 -1 #14000000, 0 2 4 -2 #0F000000</BoxShadows>
+      <BoxShadows x:Key="Shadow2">0 10 15 -3 #1A000000, 0 4 6 -4 #14000000</BoxShadows>
+      <BoxShadows x:Key="Shadow3">0 20 25 -5 #1F000000, 0 8 10 -6 #1A000000</BoxShadows>
+      <BoxShadows x:Key="Shadow4">0 34 50 -20 #24000000, 0 32 45 -12 #1F000000, 0 30 40 -8 #24000000</BoxShadows>
+
+      <!--
+        暗色下玻璃边缘光大幅收敛（0.06 / 0.03 / 0.02），
+        否则面板内圈会出现一圈灰白描边，观感很脏。
+      -->
+      <BoxShadows x:Key="EdgeGlow1">inset 1 1 1 -0.5 #0FFFFFFF, inset -1 -1 1 -0.5 #08FFFFFF, inset 0 0 10 0 #05FFFFFF</BoxShadows>
+      <BoxShadows x:Key="EdgeGlow2">inset 1 1 1 -0.5 #0FFFFFFF, inset -1 -1 1 -0.5 #08FFFFFF, inset 0 0 14 0 #08FFFFFF</BoxShadows>
+
+      <BoxShadows x:Key="ShadowCardHover">0 10 15 -3 #1F000000, 0 4 6 -4 #1A000000, inset 1 1 1 -0.5 #0FFFFFFF, inset -1 -1 1 -0.5 #08FFFFFF</BoxShadows>
+
+      <!-- ===== 玻璃组合阴影（暗色版） ===== -->
+      <BoxShadows x:Key="ShadowGlassCard">0 4 6 -1 #14000000, 0 2 4 -2 #0F000000, inset 1 1 1 -0.5 #0FFFFFFF, inset -1 -1 1 -0.5 #08FFFFFF, inset 0 0 10 0 #05FFFFFF</BoxShadows>
+      <BoxShadows x:Key="ShadowGlassElevated">0 20 25 -5 #1F000000, 0 8 10 -6 #1A000000, inset 1 1 1 -0.5 #0FFFFFFF, inset -1 -1 1 -0.5 #08FFFFFF, inset 0 0 10 0 #05FFFFFF</BoxShadows>
+      <BoxShadows x:Key="ShadowGlassModal">0 34 50 -20 #24000000, 0 32 45 -12 #1F000000, 0 30 40 -8 #24000000, inset 1 1 1 -0.5 #0FFFFFFF, inset -1 -1 1 -0.5 #08FFFFFF, inset 0 0 14 0 #08FFFFFF</BoxShadows>
+
+    </ResourceDictionary>
+
+  </ResourceDictionary.ThemeDictionaries>
+</ResourceDictionary>

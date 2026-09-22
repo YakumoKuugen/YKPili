@@ -1,0 +1,67 @@
+<!--
+  Palette.axaml —— 原始色板
+  移植自 BewlyCat 的 src/styles/variables.scss（品牌色 / 状态色 / 主题色梯度）。
+
+  这一层只放「不随亮暗主题变化」的颜色。
+  会随主题变化的语义色（文字、表面、边框等）在 Surfaces.axaml 中按 ThemeDictionary 定义。
+
+  命名对应关系：
+    bew-bili-blue          -> BiliBlueBrush
+    bew-theme-color        -> ThemePrimaryBrush
+    bew-theme-color-{n}    -> ThemePrimary{n}Brush   （n 表示颜色保留的百分比）
+    bew-{status}-color     -> {Status}Brush
+-->
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- ================= 品牌色 ================= -->
+  <!-- bew-bili-blue: hsl(195 100% 42%) -->
+  <SolidColorBrush x:Key="BiliBlueBrush" Color="#00A1D6" />
+  <!-- bew-bili-pink: hsl(343 94% 72%) -->
+  <SolidColorBrush x:Key="BiliPinkBrush" Color="#FB749A" />
+
+  <!-- ================= 主题色 ================= -->
+  <!--
+    当前固定为 B 站蓝。Token 层已预留切换能力：
+    切换主题色时只需替换本段与下方梯度段的色值，无需改动任何视图。
+  -->
+  <Color x:Key="ThemePrimaryColor">#FF00A1D6</Color>
+  <SolidColorBrush x:Key="ThemePrimaryBrush" Color="#00A1D6" />
+
+  <!-- 主题色透明度梯度（对应 bew-theme-color-10 … -90，数字=保留的不透明度） -->
+  <SolidColorBrush x:Key="ThemePrimary10Brush" Color="#1A00A1D6" />
+  <SolidColorBrush x:Key="ThemePrimary20Brush" Color="#3300A1D6" />
+  <SolidColorBrush x:Key="ThemePrimary30Brush" Color="#4D00A1D6" />
+  <SolidColorBrush x:Key="ThemePrimary40Brush" Color="#6600A1D6" />
+  <SolidColorBrush x:Key="ThemePrimary50Brush" Color="#8000A1D6" />
+  <SolidColorBrush x:Key="ThemePrimary60Brush" Color="#9900A1D6" />
+  <SolidColorBrush x:Key="ThemePrimary70Brush" Color="#B300A1D6" />
+  <SolidColorBrush x:Key="ThemePrimary80Brush" Color="#CC00A1D6" />
+  <SolidColorBrush x:Key="ThemePrimary90Brush" Color="#E600A1D6" />
+
+  <!-- ================= 状态色 ================= -->
+  <!-- bew-info-color: hsl(198 93% 60%) -->
+  <SolidColorBrush x:Key="StatusInfoBrush" Color="#3ABFF8" />
+  <SolidColorBrush x:Key="StatusInfo10Brush" Color="#1A3ABFF8" />
+  <SolidColorBrush x:Key="StatusInfo20Brush" Color="#333ABFF8" />
+  <SolidColorBrush x:Key="StatusInfo30Brush" Color="#4D3ABFF8" />
+
+  <!-- bew-success-color: hsl(164 60% 40%) -->
+  <SolidColorBrush x:Key="StatusSuccessBrush" Color="#29A383" />
+  <SolidColorBrush x:Key="StatusSuccess10Brush" Color="#1A29A383" />
+  <SolidColorBrush x:Key="StatusSuccess20Brush" Color="#3329A383" />
+  <SolidColorBrush x:Key="StatusSuccess30Brush" Color="#4D29A383" />
+
+  <!-- bew-warning-color: #f59e0b -->
+  <SolidColorBrush x:Key="StatusWarningBrush" Color="#F59E0B" />
+  <SolidColorBrush x:Key="StatusWarning10Brush" Color="#1AF59E0B" />
+  <SolidColorBrush x:Key="StatusWarning20Brush" Color="#33F59E0B" />
+  <SolidColorBrush x:Key="StatusWarning30Brush" Color="#4DF59E0B" />
+
+  <!-- bew-error-color: hsl(358 75% 59%) -->
+  <SolidColorBrush x:Key="StatusErrorBrush" Color="#E5484D" />
+  <SolidColorBrush x:Key="StatusError10Brush" Color="#1AE5484D" />
+  <SolidColorBrush x:Key="StatusError20Brush" Color="#33E5484D" />
+  <SolidColorBrush x:Key="StatusError30Brush" Color="#4DE5484D" />
+
+</ResourceDictionary>

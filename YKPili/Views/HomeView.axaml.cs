@@ -7,10 +7,12 @@ using System.Threading;
 using System.Threading.Tasks;
 // 引入 Avalonia 布局与媒体类型
 using Avalonia;
+using Avalonia.Animation;
 using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
+using Avalonia.Media.Transformation;
 // 引入项目内模型、缓存与 ViewModel
 using YKPili.Models;
 using YKPili.Services.Cache;
@@ -57,6 +59,34 @@ public partial class HomeView : UserControl
         InitializeComponent();
     }
 
+    /// <summary>
+    /// 主题(亮/暗)切换回调:
+    /// 卡片控件是在代码后台按当时的 token 值创建的,主题切换后必须重建,
+    /// 否则圆角、阴影、文字色会停留在旧主题。
+    /// </summary>
+    private void OnThemeVariantChanged(object? sender, EventArgs e)
+    {
+        if (_initialized)
+            RebuildAllControls();
+    }
+
+    /// <summary>
+    /// 从设计 token 读取一个资源值,找不到时回退到调用方给的默认值。
+    /// 卡片是在代码后台动态创建的,无法在 XAML 里用 DynamicResource,
+    /// 因此这里统一走资源查找,保证几何与排版仍然只有一个来源。
+    ///
+    /// 注意:必须显式传入 ActualThemeVariant。
+    /// 不带主题变体的重载使用 ThemeVariant.Default 解析,
+    /// 而 token 定义在 Light/Dark 两个 ThemeDictionary 中,
+    /// 会导致所有随主题变化的资源(阴影、文字色等)全部查找失败。
+    /// </summary>
+    private T Res<T>(string key, T fallback)
+    {
+        if (this.TryFindResource(key, ActualThemeVariant, out var value) && value is T typed)
+            return typed;
+        return fallback;
+    }
+
     // DataContext 变化时绑定事件
     protected override void OnDataContextChanged(EventArgs e)
     {
@@ -74,6 +104,8 @@ public partial class HomeView : UserControl
             // 监听容器布局:首次布局时完成初始化
             ContainerCanvas.LayoutUpdated += OnInitialLayout;
             vm.DataChanged += OnDataChanged;
+            // 主题切换后卡片需要重建才能取到新的 token 值(几何/阴影是创建时读取的)
+            ActualThemeVariantChanged += OnThemeVariantChanged;
         }
     }
 
@@ -130,14 +162,25 @@ public partial class HomeView : UserControl
     ///   - 下方:标题(2 行省略)
     /// 整个外层 Border 响应点击,触发播放。
     /// </summary>
-    private static Control CreateCoverControl(CoverItem item)
+    private Control CreateCoverControl(CoverItem item)
     {
+        // ---- 从设计 token 读取几何与排版(避免魔法数字) ----
+        CornerRadius mediaRadius = Res("MediaRadius", new CornerRadius(12));
+        CornerRadius cardRadius = Res("CardRadius", new CornerRadius(12));
+        double titleFontSize = Res("FontSizeControl", 13.0);
+        double titleLineHeight = Res("LineHeightControl", 18.0);
+        double titleGap = Res("Space1", 4.0);
+        BoxShadows shadowHover = Res("ShadowCardHover", default(BoxShadows));
+        TimeSpan hoverDuration = Res("DurationFast", TimeSpan.FromMilliseconds(150));
+
         // 封面容器:圆角矩形,带占位色作为加载前的背景
         var imageContainer = new Border
         {
             Height = HomeViewModel.ItemHeight,
             Width = HomeViewModel.ItemWidth,
-            CornerRadius = new CornerRadius(6),
+            CornerRadius = mediaRadius,
+            // 让封面图按圆角裁剪——原先未开启,导致圆角只作用于占位底色而图片仍是方角
+            ClipToBounds = true,
             HorizontalAlignment = HorizontalAlignment.Center
         };
         // 把字符串形式的占位色绑定到 Border 背景(由 HexColorConverter 转为 SolidColorBrush)
@@ -157,19 +200,17 @@ public partial class HomeView : UserControl
         coverImage.IsHitTestVisible = false; // 不参与命中测试,由外层 Border 处理点击
         imageContainer.Child = coverImage;
 
-        // 标题文本
+        // 标题文本(字体族与前景色由全局 TextBlock 样式统一提供,此处只设卡片专用尺寸)
         var titleBlock = new TextBlock
         {
             HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 6, 0, 0),
-            // 中文字体优先
-            FontFamily = "PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif",
-            FontSize = 13,
+            Margin = new Thickness(0, titleGap + 2, 0, 0),
+            FontSize = titleFontSize,
+            LineHeight = titleLineHeight,
             TextWrapping = TextWrapping.Wrap,
             MaxWidth = HomeViewModel.ItemWidth,
-            MaxHeight = 36,     // 限制 2 行(行高约 18px)
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            LineHeight = 18
+            MaxHeight = titleLineHeight * 2,   // 限制 2 行
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
         titleBlock.Bind(TextBlock.TextProperty,
             new Avalonia.Data.Binding("Title"));
@@ -181,16 +222,35 @@ public partial class HomeView : UserControl
             Children = { imageContainer, titleBlock }
         };
 
-        // 外层 Border:接收点击,显示手型光标
+        // 外层 Border:接收点击,显示手型光标,并负责 hover 浮起
         var outerBorder = new Border
         {
             Margin = new Thickness(8),
             Padding = new Thickness(0),
-            CornerRadius = new CornerRadius(6),
+            CornerRadius = cardRadius,
             Background = Brushes.Transparent,
             Child = stack,
             DataContext = item,
-            Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand)
+            Cursor = new Avalonia.Input.Cursor(Avalonia.Input.StandardCursorType.Hand),
+            // 静止态无阴影;悬停时抬升并加深阴影(BewlyCat 卡片同样以阴影表达抬升)
+            RenderTransform = TransformOperations.Parse("scale(1)"),
+            Transitions = new Transitions
+            {
+                new BoxShadowsTransition { Property = Border.BoxShadowProperty, Duration = hoverDuration },
+                new TransformOperationsTransition { Property = Visual.RenderTransformProperty, Duration = hoverDuration }
+            }
+        };
+
+        // hover 浮起:阴影加深 + 轻微放大。缩放不参与布局,因此不影响 Canvas 定位与虚拟列表计算。
+        outerBorder.PointerEntered += (_, _) =>
+        {
+            outerBorder.BoxShadow = shadowHover;
+            outerBorder.RenderTransform = TransformOperations.Parse("scale(1.03)");
+        };
+        outerBorder.PointerExited += (_, _) =>
+        {
+            outerBorder.BoxShadow = default;
+            outerBorder.RenderTransform = TransformOperations.Parse("scale(1)");
         };
         outerBorder.Tapped += (_, _) =>
         {

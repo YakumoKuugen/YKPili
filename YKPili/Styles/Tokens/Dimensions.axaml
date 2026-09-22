@@ -1,0 +1,94 @@
+<!--
+  Dimensions.axaml —— 圆角 / 间距 / 控件几何
+  移植自 BewlyCat variables.scss 的 Radius、Spacing、Compact controls 三个区段。
+
+  原文设计约定：
+    · 布局使用 4px 网格；
+    · 2px 这一档保留给边框、描边与视觉微调，不用于常规间距或容器内边距；
+    · 圆角分「基础阶」与「语义别名」两级，组件应引用语义别名，
+      这样卡片、媒体、弹层可以各自演进而不必逐页覆盖。
+-->
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- ================= 圆角基础阶 ================= -->
+  <CornerRadius x:Key="RadiusSm">4</CornerRadius>
+  <CornerRadius x:Key="RadiusHalf">6</CornerRadius>
+  <CornerRadius x:Key="RadiusMd">8</CornerRadius>
+  <CornerRadius x:Key="RadiusLg">12</CornerRadius>
+  <CornerRadius x:Key="RadiusXl">16</CornerRadius>
+  <CornerRadius x:Key="Radius2xl">24</CornerRadius>
+  <CornerRadius x:Key="Radius3xl">32</CornerRadius>
+  <CornerRadius x:Key="RadiusFull">9999</CornerRadius>
+
+  <!-- ================= 圆角语义别名 ================= -->
+  <!-- bew-card-radius / bew-card-continuous-radius -->
+  <CornerRadius x:Key="CardRadius">12</CornerRadius>
+  <CornerRadius x:Key="CardRadiusContinuous">16</CornerRadius>
+  <!-- bew-media-radius / bew-media-continuous-radius -->
+  <CornerRadius x:Key="MediaRadius">12</CornerRadius>
+  <CornerRadius x:Key="MediaRadiusContinuous">16</CornerRadius>
+  <!-- bew-panel-radius -->
+  <CornerRadius x:Key="PanelRadius">12</CornerRadius>
+  <!-- bew-modal-radius -->
+  <CornerRadius x:Key="ModalRadius">24</CornerRadius>
+  <!-- bew-popover-radius / bew-popover-surface-radius -->
+  <CornerRadius x:Key="PopoverRadius">16</CornerRadius>
+  <CornerRadius x:Key="PopoverSurfaceRadius">12</CornerRadius>
+  <!-- bew-interactive-radius -->
+  <CornerRadius x:Key="InteractiveRadius">8</CornerRadius>
+  <!-- bew-badge-radius -->
+  <CornerRadius x:Key="BadgeRadius">9999</CornerRadius>
+  <!-- 顶栏缩略图：比全尺寸媒体卡片更收敛（bew-top-bar-media-radius） -->
+  <CornerRadius x:Key="TopBarMediaRadius">6</CornerRadius>
+
+  <!-- 常用局部圆角（用于标题栏/控制栏贴合面板） -->
+  <CornerRadius x:Key="CornerTopOnly">12,12,0,0</CornerRadius>
+  <CornerRadius x:Key="CornerBottomOnly">0,0,12,12</CornerRadius>
+
+  <!-- ================= 间距（4px 网格） ================= -->
+  <x:Double x:Key="Space0_5">2</x:Double>
+  <x:Double x:Key="Space1">4</x:Double>
+  <x:Double x:Key="Space2">8</x:Double>
+  <x:Double x:Key="Space3">12</x:Double>
+  <x:Double x:Key="Space4">16</x:Double>
+  <x:Double x:Key="Space5">20</x:Double>
+  <x:Double x:Key="Space6">24</x:Double>
+  <x:Double x:Key="Space8">32</x:Double>
+  <x:Double x:Key="Space10">40</x:Double>
+  <x:Double x:Key="Space12">48</x:Double>
+
+  <!-- 间距的 Thickness 形式（Setter 直接可用） -->
+  <Thickness x:Key="PaddingControlX">12,0</Thickness>
+  <Thickness x:Key="PaddingCard">16</Thickness>
+  <Thickness x:Key="PaddingPanelHeader">16,10</Thickness>
+  <Thickness x:Key="PaddingPanelFooter">12,8</Thickness>
+  <Thickness x:Key="PaddingButton">16,8</Thickness>
+
+  <!-- ================= 控件几何 ================= -->
+  <!-- bew-control-height: 34px -->
+  <x:Double x:Key="ControlHeight">34</x:Double>
+  <!-- 顶栏搜索与 Logo 比常规控件再大一档（bew-top-bar-primary-control-height） -->
+  <x:Double x:Key="TopBarControlHeight">46</x:Double>
+  <!-- bew-top-bar-height: 64px -->
+  <x:Double x:Key="TopBarHeight">64</x:Double>
+  <!-- 滚动条宽度：沿用项目原有设定并纳入 token -->
+  <x:Double x:Key="ScrollBarSize">6</x:Double>
+
+  <!-- ================= 播放器面板 ================= -->
+  <!-- 播放器浮层原有的固定尺寸，纳入 token 便于统一调整 -->
+  <x:Double x:Key="PlayerPanelWidth">900</x:Double>
+  <x:Double x:Key="PlayerPanelHeight">550</x:Double>
+  <x:Double x:Key="PlayerIconButtonSize">32</x:Double>
+  <x:Double x:Key="PlayerTransportButtonWidth">48</x:Double>
+  <x:Double x:Key="PlayerTransportButtonHeight">36</x:Double>
+  <x:Double x:Key="PlayerPauseIndicatorSize">80</x:Double>
+
+  <!-- ================= 封面网格（首页） ================= -->
+  <!-- 与 HomeViewModel 的布局常量保持同一来源，避免样式与布局各改一半 -->
+  <x:Double x:Key="CoverItemWidth">192</x:Double>
+  <x:Double x:Key="CoverItemHeight">108</x:Double>
+  <x:Double x:Key="CoverCellWidth">208</x:Double>
+  <x:Double x:Key="CoverCellHeight">166</x:Double>
+
+</ResourceDictionary>

@@ -1,0 +1,179 @@
+<!--
+  FluentOverrides.axaml —— 覆盖 Fluent 主题的资源键
+
+  【为什么用这种方式换肤】
+  Avalonia 的 Fluent 主题把每个控件的外观都拆成了一组资源键
+  （例如 Button 的常态/悬停/按下/禁用四种背景各占一个键）。
+  在 Application.Resources 中定义同名键即可全局替换控件外观——
+  这比逐个状态手写 /template/ selector 更可靠，也不会漏掉状态。
+
+  本文件覆盖 YKPILI 实际用到的两类控件：Button、ScrollBar。
+  （项目其余控件为 TextBlock / Border / Grid / StackPanel / Canvas / Image，
+   它们不含 ControlTheme，直接由 token 与样式类驱动。）
+
+  取值的 BewlyCat 依据：
+    · 按钮底色用灰阶 fill-1，悬停升到 fill-2，按下升到 fill-3
+    · 悬停/按下的主题色采用 color-80 / color-70（BewlyCat 原文约定：
+      base 用 -color，hover 用 -color-80）
+    · 控件边框宽度为 0、边框色透明（bew-control-border-width / -color）
+    · 按钮为胶囊形（bew-control-radius: var(bew-radius-full)）
+    · 滚动条轨道完全透明，只留一条细滑块
+-->
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <ResourceDictionary.ThemeDictionaries>
+
+    <!-- ============================================================
+         亮色主题
+         ============================================================ -->
+    <ResourceDictionary x:Key="Light">
+
+      <!-- ===== 全局控件圆角（影响所有 TemplatedControl） ===== -->
+      <CornerRadius x:Key="ControlCornerRadius">8</CornerRadius>
+
+      <!-- ===== 普通按钮：灰阶填充，胶囊形 ===== -->
+      <SolidColorBrush x:Key="ButtonBackground" Color="#26838391" />
+      <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#4D838391" />
+      <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#73838391" />
+      <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#14838391" />
+
+      <SolidColorBrush x:Key="ButtonForeground" Color="#15181E" />
+      <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#15181E" />
+      <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#CC323B49" />
+      <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="#664A596D" />
+
+      <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent" />
+      <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="Transparent" />
+      <Thickness x:Key="ButtonBorderThemeThickness">0</Thickness>
+      <Thickness x:Key="ButtonPadding">16,8</Thickness>
+
+      <!-- ===== 主按钮（Classes="accent"）：主题色实心 ===== -->
+      <SolidColorBrush x:Key="AccentButtonBackground" Color="#00A1D6" />
+      <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#CC00A1D6" />
+      <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#B300A1D6" />
+      <SolidColorBrush x:Key="AccentButtonBackgroundDisabled" Color="#4D00A1D6" />
+
+      <SolidColorBrush x:Key="AccentButtonForeground" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="AccentButtonForegroundDisabled" Color="#B3FFFFFF" />
+
+      <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="AccentButtonBorderBrushPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="AccentButtonBorderBrushPressed" Color="Transparent" />
+      <SolidColorBrush x:Key="AccentButtonBorderBrushDisabled" Color="Transparent" />
+
+      <!-- ===== 滚动条：轨道全透明，只留细滑块 ===== -->
+      <SolidColorBrush x:Key="ScrollBarBackground" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarBackgroundPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarForeground" Color="#993A4555" />
+
+      <SolidColorBrush x:Key="ScrollBarTrackFill" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarTrackFillPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarTrackStroke" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarTrackStrokePointerOver" Color="Transparent" />
+      <x:Double x:Key="ScrollBarTrackBorderThemeThickness">0</x:Double>
+
+      <!-- 滑块：常态半透明灰，悬停/按下加深（BewlyCat 的 fill 阶梯） -->
+      <SolidColorBrush x:Key="ScrollBarPanningThumbBackground" Color="#73838391" />
+      <SolidColorBrush x:Key="ScrollBarThumbBackgroundColor" Color="#73838391" />
+      <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="#99838391" />
+      <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="#99838391" />
+      <SolidColorBrush x:Key="ScrollBarThumbFillDisabled" Color="#26838391" />
+
+      <!-- 滚动条两端的翻页/箭头按钮：隐藏线按钮后仍然存在，统一压暗 -->
+      <SolidColorBrush x:Key="ScrollBarButtonBackground" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBackgroundPointerOver" Color="#26838391" />
+      <SolidColorBrush x:Key="ScrollBarButtonBackgroundPressed" Color="#4D838391" />
+      <SolidColorBrush x:Key="ScrollBarButtonBackgroundDisabled" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBorderBrushPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBorderBrushPressed" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBorderBrushDisabled" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonArrowForeground" Color="#993A4555" />
+      <SolidColorBrush x:Key="ScrollBarButtonArrowForegroundPointerOver" Color="#15181E" />
+      <SolidColorBrush x:Key="ScrollBarButtonArrowForegroundPressed" Color="#15181E" />
+      <SolidColorBrush x:Key="ScrollBarButtonArrowForegroundDisabled" Color="#664A596D" />
+
+    </ResourceDictionary>
+
+    <!-- ============================================================
+         暗色主题
+         ============================================================ -->
+    <ResourceDictionary x:Key="Dark">
+
+      <CornerRadius x:Key="ControlCornerRadius">8</CornerRadius>
+
+      <!-- ===== 普通按钮 ===== -->
+      <SolidColorBrush x:Key="ButtonBackground" Color="#1A838391" />
+      <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#33838391" />
+      <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#4D838391" />
+      <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#0D838391" />
+
+      <SolidColorBrush x:Key="ButtonForeground" Color="#F1F2F4" />
+      <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#F1F2F4" />
+      <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#E6D4D7DE" />
+      <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="#8C9AA2B1" />
+
+      <SolidColorBrush x:Key="ButtonBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="Transparent" />
+      <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="Transparent" />
+      <Thickness x:Key="ButtonBorderThemeThickness">0</Thickness>
+      <Thickness x:Key="ButtonPadding">16,8</Thickness>
+
+      <!-- ===== 主按钮 ===== -->
+      <SolidColorBrush x:Key="AccentButtonBackground" Color="#00A1D6" />
+      <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#CC00A1D6" />
+      <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#B300A1D6" />
+      <SolidColorBrush x:Key="AccentButtonBackgroundDisabled" Color="#4D00A1D6" />
+
+      <SolidColorBrush x:Key="AccentButtonForeground" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="AccentButtonForegroundDisabled" Color="#B3FFFFFF" />
+
+      <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="AccentButtonBorderBrushPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="AccentButtonBorderBrushPressed" Color="Transparent" />
+      <SolidColorBrush x:Key="AccentButtonBorderBrushDisabled" Color="Transparent" />
+
+      <!-- ===== 滚动条 ===== -->
+      <SolidColorBrush x:Key="ScrollBarBackground" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarBackgroundPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarForeground" Color="#BFB7BCC8" />
+
+      <SolidColorBrush x:Key="ScrollBarTrackFill" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarTrackFillPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarTrackStroke" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarTrackStrokePointerOver" Color="Transparent" />
+      <x:Double x:Key="ScrollBarTrackBorderThemeThickness">0</x:Double>
+
+      <SolidColorBrush x:Key="ScrollBarPanningThumbBackground" Color="#4D838391" />
+      <SolidColorBrush x:Key="ScrollBarThumbBackgroundColor" Color="#4D838391" />
+      <SolidColorBrush x:Key="ScrollBarThumbFillPointerOver" Color="#66838391" />
+      <SolidColorBrush x:Key="ScrollBarThumbFillPressed" Color="#66838391" />
+      <SolidColorBrush x:Key="ScrollBarThumbFillDisabled" Color="#1A838391" />
+
+      <SolidColorBrush x:Key="ScrollBarButtonBackground" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBackgroundPointerOver" Color="#1A838391" />
+      <SolidColorBrush x:Key="ScrollBarButtonBackgroundPressed" Color="#33838391" />
+      <SolidColorBrush x:Key="ScrollBarButtonBackgroundDisabled" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBorderBrush" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBorderBrushPointerOver" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBorderBrushPressed" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonBorderBrushDisabled" Color="Transparent" />
+      <SolidColorBrush x:Key="ScrollBarButtonArrowForeground" Color="#BFB7BCC8" />
+      <SolidColorBrush x:Key="ScrollBarButtonArrowForegroundPointerOver" Color="#F1F2F4" />
+      <SolidColorBrush x:Key="ScrollBarButtonArrowForegroundPressed" Color="#F1F2F4" />
+      <SolidColorBrush x:Key="ScrollBarButtonArrowForegroundDisabled" Color="#8C9AA2B1" />
+
+    </ResourceDictionary>
+
+  </ResourceDictionary.ThemeDictionaries>
+</ResourceDictionary>

@@ -14,16 +14,31 @@
   </Design.DataContext>
 
   <!--
-    三层布局:
-      - 登录页:未登录时显示
-      - 首页:已登录时显示
-      - 播放器:始终叠加在最上层,通过内部 IsVisible 控制实际显隐
+    四层布局:
+      - 背景渐变层:主题色柔和渐变,为上层玻璃材质提供低频底色
+      - 背景光晕层:左上角主题色光晕,制造纵深
+      - 内容层:登录页(未登录) / 首页(已登录),按登录态二选一
+      - 浮层:播放器始终叠加在最上层,通过内部 IsVisible 控制实际显隐
+
+    设计说明:
+      Avalonia 12 没有 backdrop-filter,无法对控件后方内容做实时模糊,
+      因此玻璃材质的观感由两层背景(低频渐变 + 光晕)配合面板的半透明填充
+      与 inset 边缘高光共同实现,详见 Styles/Controls/GlassSurface.axaml。
   -->
   <Grid>
+    <!-- ===== 背景渐变层 ===== -->
+    <Border Background="{DynamicResource BgGradientBrush}" />
+
+    <!-- ===== 背景光晕层 ===== -->
+    <Border Background="{DynamicResource BgAccentGlowBrush}" />
+
+    <!-- ===== 内容层 ===== -->
     <views:LoginView DataContext="{Binding Login}"
                      IsVisible="{Binding !#Root.DataContext.IsLoggedIn}" />
     <views:HomeView DataContext="{Binding Home}"
                     IsVisible="{Binding #Root.DataContext.IsLoggedIn}" />
+
+    <!-- ===== 浮层(始终在最上层) ===== -->
     <views:VideoPlayerView DataContext="{Binding VideoPlayer}" />
   </Grid>
 </UserControl>

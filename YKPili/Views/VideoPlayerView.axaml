@@ -10,49 +10,55 @@
 
   <!--
     播放器布局:
-      Overlay(全屏黑色半透明背景) - 整个浮层
-      Panel(900x550 圆角深色面板) - 实际播放区域
+      Overlay(全屏遮罩) - 整个浮层
+      Panel(900x550 玻璃面板) - 实际播放区域
         - Title Bar: 顶部标题 + 关闭按钮
         - Video Area: 中间视频区域,NativeControlHost 在代码后台插入
         - Bottom Bar: 底部播放/暂停按钮
+
+    设计说明:
+      面板使用 glass / elevated 样式类(见 Styles/Controls/GlassSurface.axaml),
+      标题栏与底栏保持透明并改用 1px 分隔线划分区域——
+      这样玻璃质感可以贯穿整个面板,而不是被两块实色条切断。
+
+    注意:
+      Panel / VideoArea / Overlay 三个 x:Name 被 VideoPlayerView.axaml.cs 引用
+      (原生播放器宿主定位依赖它们),布局尺寸与内边距的改动需重新验证原生视图贴合。
   -->
   <Grid x:Name="Overlay"
-        Background="#AA000000"
+        Background="{DynamicResource OverlayScrim}"
         IsVisible="{Binding IsVisible}">
 
     <Border x:Name="Panel"
-            Width="900"
-            Height="550"
-            CornerRadius="12"
-            Background="#1E1E1E"
+            Classes="glass elevated on-content"
+            Width="{DynamicResource PlayerPanelWidth}"
+            Height="{DynamicResource PlayerPanelHeight}"
             HorizontalAlignment="Center"
             VerticalAlignment="Center">
 
       <Grid RowDefinitions="Auto,*,Auto">
 
-        <!-- 标题栏 -->
+        <!-- ===== 标题栏 ===== -->
         <Border Grid.Row="0"
-                Padding="16,10"
-                Background="#2A2A2A"
-                CornerRadius="12,12,0,0">
+                Padding="16,12"
+                CornerRadius="{DynamicResource CornerTopOnly}"
+                BorderBrush="{DynamicResource BorderSubtle}"
+                BorderThickness="0,0,0,1">
           <Grid ColumnDefinitions="*,Auto">
             <TextBlock Text="{Binding Title}"
-                       FontFamily="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif"
-                       FontSize="16"
-                       Foreground="White"
+                       Classes="title"
                        TextTrimming="CharacterEllipsis"
                        VerticalAlignment="Center" />
             <Button Grid.Column="1"
-                    Content="X"
+                    Classes="icon"
+                    Content="✕"
                     Width="32" Height="32"
-                    Background="Transparent"
-                    Foreground="#AAA"
-                    FontSize="16"
+                    FontSize="14"
                     Command="{Binding CloseCommand}" />
           </Grid>
         </Border>
 
-        <!-- 视频区域:NativeControlHost 会在代码后台被插入到 Children[0] -->
+        <!-- ===== 视频区域:NativeControlHost 会在代码后台被插入到 Children[0] ===== -->
         <Panel Grid.Row="1"
                x:Name="VideoArea"
                Background="Transparent">
@@ -66,14 +72,13 @@
 
           <!-- 加载中提示 -->
           <Border IsVisible="{Binding IsLoading}"
+                  Classes="glass"
                   HorizontalAlignment="Center"
                   VerticalAlignment="Center"
-                  Background="#CC000000"
-                  CornerRadius="8"
                   Padding="20,12">
             <TextBlock Text="{Binding StatusText}"
-                       Foreground="White"
-                       FontSize="14" />
+                       Classes="body"
+                       Foreground="{DynamicResource TextPrimary}" />
           </Border>
 
           <!-- 暂停图标(中央圆形按钮) -->
@@ -81,33 +86,37 @@
                   HorizontalAlignment="Center"
                   VerticalAlignment="Center"
                   IsHitTestVisible="False"
-                  Background="#66000000"
-                  CornerRadius="999"
-                  Width="80" Height="80">
+                  Background="{DynamicResource OverlayScrim}"
+                  BorderBrush="{DynamicResource BorderPopover}"
+                  BorderThickness="1"
+                  CornerRadius="{DynamicResource RadiusFull}"
+                  Width="{DynamicResource PlayerPauseIndicatorSize}"
+                  Height="{DynamicResource PlayerPauseIndicatorSize}">
             <TextBlock Text="⏸"
                        FontSize="40"
-                       Foreground="White"
+                       Foreground="{DynamicResource TextOnAccent}"
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center" />
           </Border>
 
-          <!-- 调试用:绿色边框标识 NativeControlHost 所在区域 -->
-          <Border BorderBrush="Lime"
-                  BorderThickness="2"
-                  IsHitTestVisible="False" />
+          <!--
+            原先此处有一圈 Lime 绿色调试边框用于定位 NativeControlHost 区域,
+            换肤后移除——调试标识不应出现在成品外观中。
+          -->
         </Panel>
 
-        <!-- 底部控制栏 -->
+        <!-- ===== 底部控制栏 ===== -->
         <Border Grid.Row="2"
-                Padding="12,8"
-                Background="#2A2A2A"
-                CornerRadius="0,0,12,12">
+                Padding="12,10"
+                CornerRadius="{DynamicResource CornerBottomOnly}"
+                BorderBrush="{DynamicResource BorderSubtle}"
+                BorderThickness="0,1,0,0">
           <StackPanel Orientation="Horizontal"
                       HorizontalAlignment="Center"
-                      Spacing="8">
-            <Button Width="48" Height="36"
-                    Background="#FF6B6B"
-                    Foreground="White"
+                      Spacing="{DynamicResource Space2}">
+            <Button Classes="accent"
+                    Width="{DynamicResource PlayerTransportButtonWidth}"
+                    Height="{DynamicResource PlayerTransportButtonHeight}"
                     FontSize="16"
                     Command="{Binding TogglePlayPauseCommand}"
                     Content="⏯" />

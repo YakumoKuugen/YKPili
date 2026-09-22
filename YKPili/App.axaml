@@ -1,14 +1,17 @@
 <Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:sys="using:System"
              xmlns:local="using:YKPili"
              x:Class="YKPili.App"
              RequestedThemeVariant="Default">
              <!-- "Default" ThemeVariant 跟随系统主题;"Dark" 或 "Light" 则是强制指定固定主题。 -->
 
-    <!-- 全局资源:定义滚动条宽度,用于统一应用内所有滚动条的外观 -->
+    <!-- 全局资源:设计 Token 层(分层说明见 Styles/Theme.axaml) -->
     <Application.Resources>
-        <sys:Double x:Key="ScrollBarSize">6</sys:Double>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceInclude Source="avares://YKPili/Styles/Theme.axaml" />
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
     </Application.Resources>
 
     <!-- 数据模板集合:注册自定义 ViewLocator,根据 ViewModel 类型自动匹配对应 View -->
@@ -16,12 +19,16 @@
         <local:ViewLocator/>
     </Application.DataTemplates>
 
-    <!-- 应用全局样式:Fluent 主题 + 隐藏滚动条两端的 Line Up/Down 按钮(让外观更简洁) -->
+    <!--
+      应用全局样式。
+      顺序很关键:FluentTheme 必须最先,自定义样式紧随其后才能覆盖它的默认外观。
+    -->
     <Application.Styles>
         <FluentTheme />
-        <Style Selector="ScrollBar /template/ RepeatButton#PART_LineUpButton,
-                         ScrollBar /template/ RepeatButton#PART_LineDownButton">
-            <Setter Property="IsVisible" Value="False" />
-        </Style>
+
+        <StyleInclude Source="avares://YKPili/Styles/Controls/GlassSurface.axaml" />
+        <StyleInclude Source="avares://YKPili/Styles/Controls/TextStyles.axaml" />
+        <StyleInclude Source="avares://YKPili/Styles/Controls/ButtonStyles.axaml" />
+        <StyleInclude Source="avares://YKPili/Styles/Controls/ScrollBarStyles.axaml" />
     </Application.Styles>
 </Application>

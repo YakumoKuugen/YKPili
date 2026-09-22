@@ -6,8 +6,9 @@
         xmlns:views="using:YKPili.Views"
         mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
         x:Class="YKPili.Views.MainWindow"
+        Background="{DynamicResource BgBase}"
         Icon="/Assets/avalonia-logo.ico"
         Title="YKPili">
-        <!-- 窗口内只承载主视图 -->
+        <!-- 窗口背景接入 token;窗口内只承载主视图 -->
         <views:MainView />
 </Window>

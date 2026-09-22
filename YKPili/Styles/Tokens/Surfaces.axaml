@@ -1,0 +1,168 @@
+<!--
+  Surfaces.axaml —— 语义表面层（随亮暗主题变化）
+  移植自 BewlyCat variables.scss 的 Text colors / Background / Content / Elevated / Fill 区段。
+
+  【为什么全部用字面值而不引用其他字典】
+  BewlyCat 用 CSS 的 color-mix() 在运行时派生大量中间色。Avalonia 没有等价能力，
+  因此这里所有值都是预先算好的字面量——跨字典引用在 ThemeDictionary 内解析顺序不确定，
+  字面值是唯一稳妥的写法。
+
+  命名对应关系：
+    bew-text-1..4          -> TextPrimary / TextSecondary / TextTertiary / TextQuaternary
+    bew-bg / bew-homepage-bg -> BgBase / BgHomepage
+    bew-content-*          -> SurfaceContent*        （平面元素：卡片、区块底色）
+    bew-elevated-*         -> SurfaceElevated*       （浮层：弹窗、下拉、播放器面板）
+    bew-fill-1..4          -> Fill1..Fill4           （叠在上层元素上的灰阶，用于按钮/输入框）
+    bew-border-color       -> BorderSubtle
+    bew-popover-border-color -> BorderPopover
+-->
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <ResourceDictionary.ThemeDictionaries>
+
+    <!-- ============================================================
+         亮色主题
+         ============================================================ -->
+    <ResourceDictionary x:Key="Light">
+
+      <!-- ===== 文字（4 级，逐级降低对比度） ===== -->
+      <SolidColorBrush x:Key="TextPrimary" Color="#15181E" />
+      <SolidColorBrush x:Key="TextSecondary" Color="#CC323B49" />
+      <SolidColorBrush x:Key="TextTertiary" Color="#993A4555" />
+      <SolidColorBrush x:Key="TextQuaternary" Color="#664A596D" />
+      <!-- 反色文字：用于主题色/深色底上的前景 -->
+      <SolidColorBrush x:Key="TextOnAccent" Color="#FFFFFF" />
+
+      <!-- ===== 页面背景 ===== -->
+      <SolidColorBrush x:Key="BgBase" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="BgHomepage" Color="#F2F2F8" />
+
+      <!-- ===== 平面表面（bew-content-*，含 0.68 内容不透明度） ===== -->
+      <SolidColorBrush x:Key="SurfaceContent" Color="#ADFFFFFF" />
+      <SolidColorBrush x:Key="SurfaceContentHover" Color="#ADD9D9D9" />
+      <SolidColorBrush x:Key="SurfaceContentAlt" Color="#ADEEEEF6" />
+      <SolidColorBrush x:Key="SurfaceContentAltHover" Color="#ADBCBCDC" />
+      <SolidColorBrush x:Key="SurfaceContentSolid" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="SurfaceContentSolidHover" Color="#D9D9D9" />
+
+      <!-- ===== 浮层表面（bew-elevated-*） ===== -->
+      <SolidColorBrush x:Key="SurfaceElevated" Color="#ADFFFFFF" />
+      <SolidColorBrush x:Key="SurfaceElevatedHover" Color="#ADD9D9D9" />
+      <SolidColorBrush x:Key="SurfaceElevatedSolid" Color="#FFFFFF" />
+      <SolidColorBrush x:Key="SurfaceElevatedSolidHover" Color="#D9D9D9" />
+      <!--
+        高不透明度浮层（0.92）：用于叠加在高频内容（视频网格、图片）之上的面板。
+        BewlyCat 靠 backdrop-filter 把背后内容模糊掉，Avalonia 没有这个能力，
+        因此这类面板必须提高自身不透明度，否则背后的画面会直接干扰阅读。
+      -->
+      <SolidColorBrush x:Key="SurfaceElevatedStrong" Color="#EBFFFFFF" />
+
+      <!-- ===== 灰阶填充（bew-fill-*） ===== -->
+      <SolidColorBrush x:Key="Fill1" Color="#26838391" />
+      <SolidColorBrush x:Key="Fill2" Color="#4D838391" />
+      <SolidColorBrush x:Key="Fill3" Color="#73838391" />
+      <SolidColorBrush x:Key="Fill4" Color="#99838391" />
+      <SolidColorBrush x:Key="FillAlt" Color="#73FFFFFF" />
+
+      <!-- ===== 边框 ===== -->
+      <SolidColorBrush x:Key="BorderSubtle" Color="#2E838391" />
+      <SolidColorBrush x:Key="BorderPopover" Color="#66FFFFFF" />
+      <SolidColorBrush x:Key="BorderStrong" Color="#4D838391" />
+
+      <!-- ===== 控件专用 ===== -->
+      <SolidColorBrush x:Key="SkeletonBrush" Color="#4D838391" />
+      <SolidColorBrush x:Key="SwitchBg" Color="#E3E5E7" />
+      <SolidColorBrush x:Key="IpTagBg" Color="#F1F2F3" />
+      <SolidColorBrush x:Key="IpTagText" Color="#61666D" />
+
+      <!-- ===== 浮层遮罩（播放器、对话框） ===== -->
+      <SolidColorBrush x:Key="OverlayScrim" Color="#8C000000" />
+
+      <!-- ===== 页面背景渐变（BewlyCat 无壁纸时的主题色柔和渐变） ===== -->
+      <LinearGradientBrush x:Key="BgGradientBrush" StartPoint="0%,0%" EndPoint="30%,100%">
+        <GradientStop Color="#DCF1F9" Offset="0" />
+        <GradientStop Color="#EFF2F7" Offset="0.55" />
+        <GradientStop Color="#F2F2F8" Offset="1" />
+      </LinearGradientBrush>
+
+      <!-- 渐变之上的主题色光晕（营造纵深，替代无法实现的真模糊） -->
+      <RadialGradientBrush x:Key="BgAccentGlowBrush" Center="15%,0%" GradientOrigin="15%,0%"
+                           RadiusX="70%" RadiusY="55%">
+        <GradientStop Color="#3300A1D6" Offset="0" />
+        <GradientStop Color="#0000A1D6" Offset="1" />
+      </RadialGradientBrush>
+
+    </ResourceDictionary>
+
+    <!-- ============================================================
+         暗色主题
+         基准色 bew-dark-base-color: #2a2d32，各表面由它与白/黑按比例混合而来
+         ============================================================ -->
+    <ResourceDictionary x:Key="Dark">
+
+      <!-- ===== 文字 ===== -->
+      <SolidColorBrush x:Key="TextPrimary" Color="#F1F2F4" />
+      <SolidColorBrush x:Key="TextSecondary" Color="#E6D4D7DE" />
+      <SolidColorBrush x:Key="TextTertiary" Color="#BFB7BCC8" />
+      <SolidColorBrush x:Key="TextQuaternary" Color="#8C9AA2B1" />
+      <SolidColorBrush x:Key="TextOnAccent" Color="#FFFFFF" />
+
+      <!-- ===== 页面背景（dark-base 与黑混合 20%） ===== -->
+      <SolidColorBrush x:Key="BgBase" Color="#222428" />
+      <SolidColorBrush x:Key="BgHomepage" Color="#222428" />
+
+      <!-- ===== 平面表面（dark-base 与白混合 3%/8%/5%/10%） ===== -->
+      <SolidColorBrush x:Key="SurfaceContent" Color="#AD303338" />
+      <SolidColorBrush x:Key="SurfaceContentHover" Color="#AD3B3E42" />
+      <SolidColorBrush x:Key="SurfaceContentAlt" Color="#AD35383C" />
+      <SolidColorBrush x:Key="SurfaceContentAltHover" Color="#AD3F4247" />
+      <SolidColorBrush x:Key="SurfaceContentSolid" Color="#303338" />
+      <SolidColorBrush x:Key="SurfaceContentSolidHover" Color="#3B3E42" />
+
+      <!-- ===== 浮层表面（dark-base 与白混合 6%/11%） ===== -->
+      <SolidColorBrush x:Key="SurfaceElevated" Color="#AD373A3E" />
+      <SolidColorBrush x:Key="SurfaceElevatedHover" Color="#AD414449" />
+      <SolidColorBrush x:Key="SurfaceElevatedSolid" Color="#373A3E" />
+      <SolidColorBrush x:Key="SurfaceElevatedSolidHover" Color="#414449" />
+      <!-- 高不透明度浮层，理由同亮色主题 -->
+      <SolidColorBrush x:Key="SurfaceElevatedStrong" Color="#EB373A3E" />
+
+      <!-- ===== 灰阶填充 ===== -->
+      <SolidColorBrush x:Key="Fill1" Color="#1A838391" />
+      <SolidColorBrush x:Key="Fill2" Color="#33838391" />
+      <SolidColorBrush x:Key="Fill3" Color="#4D838391" />
+      <SolidColorBrush x:Key="Fill4" Color="#66838391" />
+      <SolidColorBrush x:Key="FillAlt" Color="#1A838391" />
+
+      <!-- ===== 边框 ===== -->
+      <SolidColorBrush x:Key="BorderSubtle" Color="#29838391" />
+      <SolidColorBrush x:Key="BorderPopover" Color="#1FFFFFFF" />
+      <SolidColorBrush x:Key="BorderStrong" Color="#3D838391" />
+
+      <!-- ===== 控件专用 ===== -->
+      <SolidColorBrush x:Key="SkeletonBrush" Color="#33838391" />
+      <SolidColorBrush x:Key="SwitchBg" Color="#4A4D52" />
+      <SolidColorBrush x:Key="IpTagBg" Color="#1A838391" />
+      <SolidColorBrush x:Key="IpTagText" Color="#BFB7BCC8" />
+
+      <!-- ===== 浮层遮罩（暗色下需要更深，否则与面板拉不开层次） ===== -->
+      <SolidColorBrush x:Key="OverlayScrim" Color="#B3000000" />
+
+      <!-- ===== 背景渐变 ===== -->
+      <LinearGradientBrush x:Key="BgGradientBrush" StartPoint="0%,0%" EndPoint="30%,100%">
+        <GradientStop Color="#1B2A33" Offset="0" />
+        <GradientStop Color="#202329" Offset="0.55" />
+        <GradientStop Color="#222428" Offset="1" />
+      </LinearGradientBrush>
+
+      <RadialGradientBrush x:Key="BgAccentGlowBrush" Center="15%,0%" GradientOrigin="15%,0%"
+                           RadiusX="70%" RadiusY="55%">
+        <GradientStop Color="#3300A1D6" Offset="0" />
+        <GradientStop Color="#0000A1D6" Offset="1" />
+      </RadialGradientBrush>
+
+    </ResourceDictionary>
+
+  </ResourceDictionary.ThemeDictionaries>
+</ResourceDictionary>

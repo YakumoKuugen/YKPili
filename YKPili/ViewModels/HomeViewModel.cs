@@ -33,6 +33,22 @@ public partial class HomeViewModel : ViewModelBase
     // 防止并发触发的滚动加载标记
     private bool _isLoadingMore;
 
+    /// <summary>
+    /// 封面占位色调色板(封面图加载完成前显示的底色)。
+    /// 原先这段数组在 GenerateMockDataSource / LoadRecommendVideos / AppendRecommendVideos
+    /// 三处各硬编码一份,现统一为单一来源。
+    /// </summary>
+    private static readonly string[] PlaceholderPalette =
+    [
+        "#E57373", "#F06292", "#BA68C8", "#9575CD", "#7986CB",
+        "#64B5F6", "#4FC3F7", "#4DD0E1", "#4DB6AC", "#81C784",
+        "#AED581", "#DCE775", "#FFF176", "#FFD54F", "#FFB74D",
+        "#FF8A65", "#A1887F", "#E0E0E0", "#90A4AE", "#BCAAA4"
+    ];
+
+    /// <summary>容器池中越界位置的透明占位色(表示该格子没有对应数据)</summary>
+    private const string EmptyPlaceholder = "#00000000";
+
     // 全量数据(逻辑数据源)
     private CoverItem[] _allItems = [];
 
@@ -72,15 +88,6 @@ public partial class HomeViewModel : ViewModelBase
     // ================================================================
     private void GenerateMockDataSource()
     {
-        // 调色板(20 种 Material 风格颜色)
-        string[] colors =
-        [
-            "#E57373", "#F06292", "#BA68C8", "#9575CD", "#7986CB",
-            "#64B5F6", "#4FC3F7", "#4DD0E1", "#4DB6AC", "#81C784",
-            "#AED581", "#DCE775", "#FFF176", "#FFD54F", "#FFB74D",
-            "#FF8A65", "#A1887F", "#E0E0E0", "#90A4AE", "#BCAAA4"
-        ];
-
         // 标题词库
         string[] titles =
         [
@@ -98,7 +105,7 @@ public partial class HomeViewModel : ViewModelBase
             {
                 Index = i,
                 Title = $"{titles[i % titles.Length]} #{i + 1}",
-                PlaceholderColor = colors[i % colors.Length]
+                PlaceholderColor = PlaceholderPalette[i % PlaceholderPalette.Length]
             };
         }
     }
@@ -107,15 +114,6 @@ public partial class HomeViewModel : ViewModelBase
     public void LoadRecommendVideos(List<RecommendVideoItem> videos)
     {
         if (videos.Count == 0) return;
-
-        // 调色板(同上,此处复制一份避免在多处共享可变数组)
-        string[] colors =
-        [
-            "#E57373", "#F06292", "#BA68C8", "#9575CD", "#7986CB",
-            "#64B5F6", "#4FC3F7", "#4DD0E1", "#4DB6AC", "#81C784",
-            "#AED581", "#DCE775", "#FFF176", "#FFD54F", "#FFB74D",
-            "#FF8A65", "#A1887F", "#E0E0E0", "#90A4AE", "#BCAAA4"
-        ];
 
         _allItems = new CoverItem[videos.Count];
         for (int i = 0; i < videos.Count; i++)
@@ -126,7 +124,7 @@ public partial class HomeViewModel : ViewModelBase
                 Index = i,
                 // HTML 实体解码(原标题含 &amp; 等)
                 Title = System.Net.WebUtility.HtmlDecode(v.Title),
-                PlaceholderColor = colors[i % colors.Length],
+                PlaceholderColor = PlaceholderPalette[i % PlaceholderPalette.Length],
                 ImageUrl = v.Pic,
                 Bvid = v.Bvid
             };
@@ -153,7 +151,7 @@ public partial class HomeViewModel : ViewModelBase
         for (int i = maxNeeded; i < VisibleContainers.Count; i++)
         {
             VisibleContainers[i].Title = "";
-            VisibleContainers[i].PlaceholderColor = "#00000000";
+            VisibleContainers[i].PlaceholderColor = EmptyPlaceholder;
         }
 
         // 通知 View 更新画布高度等
@@ -165,15 +163,6 @@ public partial class HomeViewModel : ViewModelBase
     {
         _isLoadingMore = false;
         if (newVideos.Count == 0) return;
-
-        // 调色板
-        string[] colors =
-        [
-            "#E57373", "#F06292", "#BA68C8", "#9575CD", "#7986CB",
-            "#64B5F6", "#4FC3F7", "#4DD0E1", "#4DB6AC", "#81C784",
-            "#AED581", "#DCE775", "#FFF176", "#FFD54F", "#FFB74D",
-            "#FF8A65", "#A1887F", "#E0E0E0", "#90A4AE", "#BCAAA4"
-        ];
 
         int oldLength = _allItems.Length;
         // 真正可追加的条数(受 MaxItemCount 上限约束)
@@ -189,7 +178,7 @@ public partial class HomeViewModel : ViewModelBase
             {
                 Index = oldLength + i,
                 Title = System.Net.WebUtility.HtmlDecode(v.Title),
-                PlaceholderColor = colors[(oldLength + i) % colors.Length],
+                PlaceholderColor = PlaceholderPalette[(oldLength + i) % PlaceholderPalette.Length],
                 ImageUrl = v.Pic,
                 Bvid = v.Bvid
             };
@@ -369,7 +358,7 @@ public partial class HomeViewModel : ViewModelBase
                 // 越界位置用透明占位
                 existing.Index = -1;
                 existing.Title = "";
-                existing.PlaceholderColor = "#00000000";
+                existing.PlaceholderColor = EmptyPlaceholder;
             }
         }
     }
@@ -388,6 +377,6 @@ public partial class HomeViewModel : ViewModelBase
     // 创建一个空(透明占位)的 CoverItem
     private CoverItem MakeEmpty(int poolIndex)
     {
-        return new CoverItem { Index = poolIndex, Title = "", PlaceholderColor = "#00000000" };
+        return new CoverItem { Index = poolIndex, Title = "", PlaceholderColor = EmptyPlaceholder };
     }
 }

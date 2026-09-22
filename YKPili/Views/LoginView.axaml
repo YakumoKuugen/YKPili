@@ -12,47 +12,66 @@
     <vm:LoginViewModel />
   </Design.DataContext>
 
-  <!-- 登录页布局:垂直居中的卡片式 -->
-  <StackPanel HorizontalAlignment="Center"
-              VerticalAlignment="Center"
-              Spacing="16"
-              Width="300">
+  <!--
+    登录页布局:垂直居中的玻璃卡片。
+    glass / modal 样式类的材质配方见 Styles/Controls/GlassSurface.axaml——
+    半透明填充 + 1px 亮边 + inset 玻璃倒角 + 对话框级外阴影。
+  -->
+  <Border Classes="glass modal"
+          Width="380"
+          Padding="32,36"
+          HorizontalAlignment="Center"
+          VerticalAlignment="Center">
 
-    <!-- 标题 -->
-    <TextBlock Text="Bilibili Login"
-               FontSize="24"
-               FontWeight="Bold"
-               HorizontalAlignment="Center" />
+    <StackPanel Spacing="20">
 
-    <!-- 二维码区域:仅在轮询时可见 -->
-    <Border Width="220" Height="220"
-            CornerRadius="8"
-            Background="#FFFFFF"
-            IsVisible="{Binding IsPolling}"
-            HorizontalAlignment="Center">
-      <Image Source="{Binding QrCodeImage}"
-             Width="200" Height="200" />
-    </Border>
+      <!-- ===== 标题区 ===== -->
+      <StackPanel Spacing="4">
+        <TextBlock Text="Bilibili Login"
+                   Classes="heading"
+                   HorizontalAlignment="Center" />
+        <TextBlock Text="扫码登录以同步你的推荐与收藏"
+                   Classes="caption"
+                   HorizontalAlignment="Center" />
+      </StackPanel>
 
-    <!-- 状态文本:展示扫码阶段提示 -->
-    <TextBlock Text="{Binding StatusMessage}"
-               HorizontalAlignment="Center"
-               TextWrapping="Wrap"
-               FontSize="14" />
+      <!--
+        二维码区域:仅在轮询时可见。
+        底色保留纯白——二维码需要足够对比度才能被扫描,
+        因此这里不跟随主题变暗。
+      -->
+      <Border Width="220" Height="220"
+              CornerRadius="{DynamicResource MediaRadius}"
+              Background="White"
+              IsVisible="{Binding IsPolling}"
+              HorizontalAlignment="Center">
+        <Image Source="{Binding QrCodeImage}"
+               Width="200" Height="200" />
+      </Border>
 
-    <!-- 登录按钮:仅在未轮询时显示 -->
-    <Button Content="Login"
-            Command="{Binding StartLoginCommand}"
-            IsVisible="{Binding !IsPolling}"
-            HorizontalAlignment="Center"
-            Width="120" />
+      <!-- 状态文本:展示扫码阶段提示 -->
+      <TextBlock Text="{Binding StatusMessage}"
+                 Classes="body muted"
+                 HorizontalAlignment="Center"
+                 TextAlignment="Center"
+                 TextWrapping="Wrap" />
 
-    <!-- 取消按钮:仅在轮询中显示 -->
-    <Button Content="Cancel"
-            Command="{Binding CancelLoginCommand}"
-            IsVisible="{Binding IsPolling}"
-            HorizontalAlignment="Center"
-            Width="120" />
+      <!-- 登录按钮:主题色主操作 -->
+      <Button Classes="accent large"
+              Content="Login"
+              Command="{Binding StartLoginCommand}"
+              IsVisible="{Binding !IsPolling}"
+              HorizontalAlignment="Stretch"
+              HorizontalContentAlignment="Center" />
 
-  </StackPanel>
+      <!-- 取消按钮:次级样式 -->
+      <Button Classes="large"
+              Content="Cancel"
+              Command="{Binding CancelLoginCommand}"
+              IsVisible="{Binding IsPolling}"
+              HorizontalAlignment="Stretch"
+              HorizontalContentAlignment="Center" />
+
+    </StackPanel>
+  </Border>
 </UserControl>

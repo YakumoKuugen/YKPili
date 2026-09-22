@@ -1,0 +1,57 @@
+<!--
+  ButtonStyles.axaml —— 按钮补充样式
+
+  配色与各状态背景已由 FluentOverrides.axaml 的资源键接管。
+  这里处理资源键覆盖不到的部分：圆角、字体、过渡、图标按钮几何。
+
+  BewlyCat 依据：
+    · 按钮为胶囊形（bew-control-radius: var(bew-radius-full)）
+    · 控件文字 13px（bew-font-size-control）、字重 semibold
+    · 交互过渡 150ms（bew-duration-fast）
+-->
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- ============ 按钮统一：胶囊形 + 中文字体 ============ -->
+  <!--
+    Fluent 的 Button ControlTheme 用 {DynamicResource ControlCornerRadius}（8）设置圆角，
+    应用级 Style 的优先级高于 ControlTheme，因此这里能覆盖为胶囊形。
+  -->
+  <Style Selector="Button">
+    <Setter Property="CornerRadius" Value="{DynamicResource RadiusFull}" />
+    <Setter Property="FontFamily" Value="{DynamicResource FontFamilyUi}" />
+    <Setter Property="FontSize" Value="{DynamicResource FontSizeControl}" />
+    <Setter Property="FontWeight" Value="{DynamicResource FontWeightSemibold}" />
+  </Style>
+
+  <!-- ============ 背景色过渡 ============ -->
+  <!-- Fluent 未给 ContentPresenter 设过渡，hover/pressed 换色是瞬变的；这里补上 -->
+  <Style Selector="Button /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Transitions">
+      <Transitions>
+        <BrushTransition Property="Background" Duration="0:0:0.15">
+          <BrushTransition.Easing>
+            <CubicEaseOut />
+          </BrushTransition.Easing>
+        </BrushTransition>
+      </Transitions>
+    </Setter>
+  </Style>
+
+  <!-- ============ 图标按钮 ============ -->
+  <!-- 尺寸由使用处指定，此处只负责几何：零内边距、内容居中、正圆 -->
+  <Style Selector="Button.icon">
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="CornerRadius" Value="{DynamicResource RadiusFull}" />
+    <Setter Property="FontWeight" Value="{DynamicResource FontWeightRegular}" />
+  </Style>
+
+  <!-- ============ 大号主操作按钮 ============ -->
+  <Style Selector="Button.large">
+    <Setter Property="Padding" Value="20,10" />
+    <Setter Property="FontSize" Value="{DynamicResource FontSizeBody}" />
+  </Style>
+
+</Styles>
