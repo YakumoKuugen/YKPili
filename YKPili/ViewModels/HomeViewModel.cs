@@ -22,7 +22,17 @@ namespace YKPili.ViewModels;
 public partial class HomeViewModel : ViewModelBase
 {
     // ---- 布局常量(全部为 static const 便于外部 View 直接访问) ----
-    public static int ColumnsPerRow { get; set; } = 5;
+    /// <summary>
+    /// 每行可容纳的列数。
+    ///
+    /// 该值是**推导结果**而非固定配置:由 InitializeContainers / RecalculateOnResize
+    /// 按「视口宽度 / CellWidth」计算,窗口尺寸变化时会重新推导
+    /// (例如 1920 宽得 9 列、2560 宽得 12 列、3840 宽得 18 列)。
+    /// 任何其他位置都不应赋值给它。
+    ///
+    /// 初值 1 仅为占位:初始化完成前即便被读到,也不会被误当成有效列数。
+    /// </summary>
+    public static int ColumnsPerRow { get; set; } = 1;
     public const double ItemWidth = 192;   // 16:9 横向:封面宽度
     public const double ItemHeight = 108;  // 16:9 横向:封面高度
     public const double CellWidth = 208;   // ItemWidth(192) + 边距(16)
@@ -132,30 +142,15 @@ public partial class HomeViewModel : ViewModelBase
                 System.Diagnostics.Trace.WriteLine($"[HomeVM] Item {i}: Bvid={v.Bvid} Title={v.Title}");
         }
 
-        // 重新初始化容器池以适配新数据
-        int poolCount = (VisibleRows + 2) * ColumnsPerRow;
-        int maxNeeded = Math.Min(poolCount, videos.Count);
-
-        // 复用现有容器:把前 maxNeeded 个容器重置为新数据
-        for (int i = 0; i < VisibleContainers.Count && i < maxNeeded; i++)
-        {
-            var existing = VisibleContainers[i];
-            existing.Index = i;
-            existing.Title = _allItems[i].Title;
-            existing.PlaceholderColor = _allItems[i].PlaceholderColor;
-            existing.ImageUrl = _allItems[i].ImageUrl;
-            existing.Bvid = _allItems[i].Bvid;
-        }
-
-        // 多余的容器清空(用透明色占位,避免视觉残留)
-        for (int i = maxNeeded; i < VisibleContainers.Count; i++)
-        {
-            VisibleContainers[i].Title = "";
-            VisibleContainers[i].PlaceholderColor = EmptyPlaceholder;
-        }
+        // 用统一的数据填充逻辑刷新容器池:它会按当前视口推导池大小、
+        // 自动扩容并处理越界空位,避免此处再维护一份与 FillContainerData 重复的映射规则。
+        FillContainerData();
 
         // 通知 View 更新画布高度等
         DataChanged?.Invoke();
+
+        // 首屏数据若不足以填满视口,用户没有滚动空间,必须在这里主动请求更多
+        EvaluateLoadMore();
     }
 
     /// <summary>追加更多推荐数据(滚动到底部时由 ViewModel 发起)</summary>
@@ -184,8 +179,17 @@ public partial class HomeViewModel : ViewModelBase
             };
         }
 
-        // 通知 View 数据变化(由 View 重新填充容器)
+        // 数据变多后,池中原本因越界而空置的容器应立即填上新数据。
+        // 这一步不能省:窗口放大后重新计算的容器池会比当时的数据量大,
+        // 那些空容器只有等到下一次滚动跨行才被 FillContainerData 补上,
+        // 表现为"放大后下半部分空白,滚一下才出现"。
+        FillContainerData();
+
+        // 通知 View 数据变化(更新画布高度、重排、加载封面)
         DataChanged?.Invoke();
+
+        // 追加后仍不足一屏时继续请求,直到内容可滚动或达到条数上限
+        EvaluateLoadMore();
     }
 
     /// <summary>由 View 在加载更多请求失败/完成后调用,清除加载中标记</summary>
@@ -206,9 +210,16 @@ public partial class HomeViewModel : ViewModelBase
         VideoPlayRequested?.Invoke(item);
     }
 
-    /// <summary>初始化容器池(视口首次确定时调用)</summary>
-    public void InitializeContainers(double viewportHeight)
+    /// <summary>
+    /// 初始化容器池(视口首次确定时调用)。
+    ///
+    /// 列数与行数都由这里根据视口尺寸推导——View 不应直接写 ColumnsPerRow。
+    /// 该状态若被外部抢先赋值,RecalculateOnResize 里的"列数是否变化"判断会失效,
+    /// 进而导致窗口尺寸变化时容器池不按新列数重建(详见 Views/HomeView.axaml.cs 对应注释)。
+    /// </summary>
+    public void InitializeContainers(double viewportWidth, double viewportHeight)
     {
+        ColumnsPerRow = Math.Max(1, (int)(viewportWidth / CellWidth));
         VisibleRows = Math.Max(1, (int)Math.Ceiling(viewportHeight / CellHeight));
         int poolCount = (VisibleRows + 2) * ColumnsPerRow;
 
@@ -223,39 +234,61 @@ public partial class HomeViewModel : ViewModelBase
     /// 根据新滚动偏移计算 FirstVisibleRowIndex,并视情况触发加载更多。
     /// 返回 CellHeight 以便调用方复用。
     /// </summary>
-    public double UpdateOnScroll(double scrollOffsetY)
+    /// <summary>
+    /// 滚动回调。
+    ///
+    /// 返回值表示"可见起始行是否发生变化":容器内容与屏幕位置只在跨行时才需要更新,
+    /// 未跨行时应由 View 跳过重排。全屏下容器池可达上百个,
+    /// 若每帧无条件重排会直接表现为滚动卡顿。
+    /// </summary>
+    public bool UpdateOnScroll(double scrollOffsetY)
     {
         int newFirstRow = Math.Max(0, (int)Math.Floor(scrollOffsetY / CellHeight));
         int maxReachableRow = Math.Max(0, TotalRows - VisibleRows);
         newFirstRow = Math.Min(newFirstRow, maxReachableRow);
 
-        // 未变化则不重排
-        if (newFirstRow == FirstVisibleRowIndex)
-            return CellHeight;
-
-        FirstVisibleRowIndex = newFirstRow;
-        FillContainerData();
-
-        // 触发更多数据的条件:未在加载 + 未达上限 + 滚动超过 90% 或触底
-        double scrollPercentage = TotalRows > 0 ? (double)FirstVisibleRowIndex / TotalRows : 0;
-        bool atBottom = FirstVisibleRowIndex >= maxReachableRow;
-        bool shouldLoad = !_isLoadingMore && _allItems.Length < MaxItemCount
-                          && (scrollPercentage >= 0.9 || atBottom);
-
-        System.Diagnostics.Trace.WriteLine(
-            $"[HomeVM] Scroll: firstRow={FirstVisibleRowIndex} totalRows={TotalRows} " +
-            $"visibleRows={VisibleRows} scroll%={scrollPercentage:F2} " +
-            $"atBottom={atBottom} isLoading={_isLoadingMore} items={_allItems.Length} " +
-            $"shouldLoad={shouldLoad}");
-
-        if (shouldLoad)
+        bool rowChanged = newFirstRow != FirstVisibleRowIndex;
+        if (rowChanged)
         {
-            _isLoadingMore = true;
-            System.Diagnostics.Trace.WriteLine("[HomeVM] >>> Triggering LoadMoreRequested");
-            LoadMoreRequested?.Invoke();
+            FirstVisibleRowIndex = newFirstRow;
+            FillContainerData();
         }
 
-        return CellHeight;
+        // 行号未变化时同样必须评估加载更多。
+        // 首屏数据不足以填满视口时 maxReachableRow 恒为 0,行号永远停在 0,
+        // 若在此提前 return,加载更多将永远不会触发——用户也因此没有任何可滚动空间。
+        EvaluateLoadMore();
+
+        return rowChanged;
+    }
+
+    /// <summary>
+    /// 评估是否需要追加更多数据。触发情形有两类:
+    ///   1. 已滚动到底部(常规滚动加载);
+    ///   2. 内容不足以填满视口——此时用户根本没有可滚动空间,ScrollChanged 不会发生,
+    ///      必须在数据就绪后主动请求,否则首屏之后永远不会有新内容。
+    /// 由 View 在数据变化与首次布局完成后调用,滚动时也会经过 UpdateOnScroll 调用。
+    /// </summary>
+    public void EvaluateLoadMore()
+    {
+        // 视口尚未确定时无法判断"内容是否够一屏",等布局完成后再评估
+        if (VisibleRows <= 0) return;
+        // 正在加载或已达条数上限时不重复触发
+        if (_isLoadingMore || _allItems.Length >= MaxItemCount) return;
+
+        int maxReachableRow = Math.Max(0, TotalRows - VisibleRows);
+        bool atBottom = FirstVisibleRowIndex >= maxReachableRow;
+        bool contentTooShort = TotalRows <= VisibleRows;
+        double scrollPercentage = TotalRows > 0 ? (double)FirstVisibleRowIndex / TotalRows : 0;
+
+        if (!atBottom && !contentTooShort && scrollPercentage < 0.9) return;
+
+        _isLoadingMore = true;
+        System.Diagnostics.Trace.WriteLine(
+            $"[HomeVM] >>> 触发加载更多: items={_allItems.Length} totalRows={TotalRows} " +
+            $"visibleRows={VisibleRows} firstRow={FirstVisibleRowIndex} " +
+            $"atBottom={atBottom} contentTooShort={contentTooShort}");
+        LoadMoreRequested?.Invoke();
     }
 
     /// <summary>
@@ -355,10 +388,13 @@ public partial class HomeViewModel : ViewModelBase
             }
             else
             {
-                // 越界位置用透明占位
+                // 越界位置用透明占位。
+                // 同时清空图址与 BVID,避免容器复用时残留上一轮的数据。
                 existing.Index = -1;
                 existing.Title = "";
                 existing.PlaceholderColor = EmptyPlaceholder;
+                existing.ImageUrl = string.Empty;
+                existing.Bvid = string.Empty;
             }
         }
     }
@@ -370,7 +406,11 @@ public partial class HomeViewModel : ViewModelBase
         {
             Index = poolIndex,
             Title = _allItems[dataIndex].Title,
-            PlaceholderColor = _allItems[dataIndex].PlaceholderColor
+            PlaceholderColor = _allItems[dataIndex].PlaceholderColor,
+            // 必须同时带上图址与 BVID:列数变化重建容器池时会走这里,
+            // 若漏掉这两个字段,新建的容器永远没有封面可加载(整屏空占位)。
+            ImageUrl = _allItems[dataIndex].ImageUrl,
+            Bvid = _allItems[dataIndex].Bvid
         };
     }
 

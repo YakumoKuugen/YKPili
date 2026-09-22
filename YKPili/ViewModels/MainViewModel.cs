@@ -157,6 +157,10 @@ public partial class MainViewModel : ViewModelBase
 
             if (rec.Code == 0 && rec.Data?.Items is { Count: > 0 })
                 Home.AppendRecommendVideos(rec.Data.Items);
+            else
+                // 没有拿到新数据时也必须解除加载中标记,
+                // 否则 _isLoadingMore 会永久为 true,之后无论怎么滚动都不会再请求
+                Home.OnLoadMoreCompleted();
         }
         catch (Exception ex)
         {

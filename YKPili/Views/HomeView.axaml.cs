@@ -51,8 +51,27 @@ public partial class HomeView : UserControl
     private static readonly SemaphoreSlim _imageLoadSemaphore = new(4, 4);
     // 内存图片缓存:URL -> Bitmap
     private readonly Dictionary<string, Bitmap?> _imageCache = new();
-    // 正在下载中的 URL 集合(避免重复请求)
-    private readonly HashSet<string> _pendingImageUrls = new();
+    // 进行中的下载:URL -> 加载任务。
+    // 用共享任务而非"下载中标记集合",这样多个控件需要同一张图时都能等到结果,
+    // 不会出现"图已下载完、却因为当初被跳过而没有任何控件显示"的漏图。
+    private readonly Dictionary<string, Task<Bitmap?>> _imageLoadTasks = new();
+
+    /// <summary>
+    /// 封面解码目标宽度(像素)。
+    /// 卡片显示宽度为 192 逻辑像素,按 2 倍屏取 384。B 站封面原图通常在 480 以上,
+    /// 按原尺寸解码会在容器池上百个时明显增加解码耗时与内存占用。
+    /// </summary>
+    private const int CoverDecodeWidth = 384;
+
+    /// <summary>
+    /// 记录每个封面 Image 控件当前已绑定的图片 URL。
+    ///
+    /// 容器池会复用控件,因此**不能**用 img.Source 是否为 null 来判断"是否已加载"——
+    /// 复用后 img.Source 上残留的是上一个视频的封面,会把新视频误判成"已加载"
+    /// 而跳过网络请求,导致新封面永远不出现。
+    /// </summary>
+    private static readonly AttachedProperty<string?> BoundImageUrlProperty =
+        AvaloniaProperty.RegisterAttached<HomeView, Image, string?>("BoundImageUrl");
 
     public HomeView()
     {
@@ -124,13 +143,12 @@ public partial class HomeView : UserControl
         _initialized = true;
         ContainerCanvas.LayoutUpdated -= OnInitialLayout;
 
-        // 根据视口宽度计算每行可容纳的列数
-        HomeViewModel.ColumnsPerRow = Math.Max(1, (int)(viewportWidth / _cellWidth));
+        // 让 VM 按视口尺寸推导列数/行数并初始化容器池,然后再创建对应的 Avalonia 控件
+        _vm.InitializeContainers(viewportWidth, viewportHeight);
         ContainerCanvas.Width = _cellWidth * HomeViewModel.ColumnsPerRow;
         ContainerCanvas.Height = _cellHeight * _vm.TotalRows;
-
-        // 让 VM 初始化容器池,然后我们再创建对应的 Avalonia 控件
-        _vm.InitializeContainers(viewportHeight);
+        // 视口确定后立即评估一次:若已有数据不足以填满首屏,需要主动请求更多
+        _vm.EvaluateLoadMore();
         BuildContainerControls();
         RepositionAll();
 
@@ -209,7 +227,11 @@ public partial class HomeView : UserControl
             LineHeight = titleLineHeight,
             TextWrapping = TextWrapping.Wrap,
             MaxWidth = HomeViewModel.ItemWidth,
-            MaxHeight = titleLineHeight * 2,   // 限制 2 行
+            // 用 MaxLines 而不是 MaxHeight 来限制行数:
+            // MaxHeight 与 TextTrimming 组合会触发 Avalonia 文本布局异常
+            // (ShapedTextRun.Split 抛 "requested length N consumes entire run"),
+            // 标题含 emoji 等代理对字符时尤其容易复现。
+            MaxLines = 2,
             TextTrimming = TextTrimming.CharacterEllipsis
         };
         titleBlock.Bind(TextBlock.TextProperty,
@@ -264,15 +286,24 @@ public partial class HomeView : UserControl
         return outerBorder;
     }
 
-    /// <summary>滚动事件:通知 VM 更新起始行,然后重排 + 懒加载</summary>
+    /// <summary>
+    /// 滚动事件。
+    ///
+    /// 只有跨越整行时才重排容器并检查图片:同一行内滚动时,所有容器的数据与相对位置
+    /// 都没有变化,跳过可避免每帧遍历整个容器池。
+    /// 全屏下容器池可达上百个,这是滚动流畅度的关键。
+    /// </summary>
     private void OnScrollChanged(object? sender, ScrollChangedEventArgs e)
     {
         if (_vm == null || _isUpdating) return;
 
         _isUpdating = true;
-        _vm.UpdateOnScroll(ScrollHost.Offset.Y);
-        RepositionAll();
-        LoadMissingImages();
+        bool rowChanged = _vm.UpdateOnScroll(ScrollHost.Offset.Y);
+        if (rowChanged)
+        {
+            RepositionAll();
+            LoadMissingImages();
+        }
         _isUpdating = false;
     }
 
@@ -306,100 +337,166 @@ public partial class HomeView : UserControl
         LoadMissingImages();
     }
 
-    /// <summary>遍历 Canvas 子元素,异步加载尚未缓存的图片</summary>
+    /// <summary>
+    /// 为"确实需要加载封面"的容器启动异步加载。
+    ///
+    /// 结构解析与 URL 判断都放在同步路径上:本方法由滚动与数据变化触发,
+    /// 而绝大多数容器其实无需处理。若一律调用 async 方法,每次都会产生
+    /// 状态机与 Task 分配,容器池上百个时会形成明显的 GC 压力。
+    /// </summary>
     private void LoadMissingImages()
     {
         foreach (var child in ContainerCanvas.Children)
-            _ = LoadImageForControlAsync(child);
+        {
+            if (!TryGetCoverTarget(child, out var outer, out var item, out var img)) continue;
+            if (img.GetValue(BoundImageUrlProperty) == item.ImageUrl) continue;
+            _ = LoadImageForControlAsync(outer, item, img);
+        }
     }
 
     /// <summary>
-    /// 单个控件的图片异步加载流程:
-    ///   1) 内存命中则直接用
-    ///   2) 已经在下载中则跳过
-    ///   3) 尝试磁盘缓存
-    ///   4) 磁盘未命中则从网络下载
-    ///   5) 成功后将图片存到内存缓存(并保存到磁盘)
+    /// 同步解析容器控件结构,取出外层 Border、封面数据与 Image。
+    /// 任一环节不满足(结构不符 / 无数据 / 无图址)都返回 false。
     /// </summary>
-    private async Task LoadImageForControlAsync(Control child)
+    private static bool TryGetCoverTarget(Control child, out Border outer, out CoverItem item, out Image img)
     {
-        // 控件结构守卫
-        if (child is not Border outerBorder) return;
-        if (outerBorder.Child is not StackPanel stack || stack.Children.Count == 0) return;
-        if (stack.Children[0] is not Border imageBorder || imageBorder.Child is not Image img) return;
-        if (outerBorder.DataContext is not CoverItem item) return;
-        if (string.IsNullOrEmpty(item.ImageUrl)) return;
+        outer = null!;
+        item = null!;
+        img = null!;
 
-        // 1) 内存缓存命中
-        if (_imageCache.TryGetValue(item.ImageUrl, out var cached) && cached != null)
+        if (child is not Border outerBorder) return false;
+        if (outerBorder.Child is not StackPanel stack || stack.Children.Count == 0) return false;
+        if (stack.Children[0] is not Border imageBorder || imageBorder.Child is not Image image) return false;
+        if (outerBorder.DataContext is not CoverItem cover) return false;
+        if (string.IsNullOrEmpty(cover.ImageUrl)) return false;
+
+        outer = outerBorder;
+        item = cover;
+        img = image;
+        return true;
+    }
+
+    /// <summary>
+    /// 为单个卡片控件确保封面图就位。
+    ///
+    /// 结构判断已由调用方(TryGetCoverTarget)完成,这里只负责标记与回填。
+    /// 判断依据是控件当前绑定的 URL,而不是 img.Source —— 容器池会复用控件,
+    /// 复用后 img.Source 上残留的是上一个视频的图,会把新封面误判为"已加载"而跳过下载。
+    /// </summary>
+    private async Task LoadImageForControlAsync(Border outerBorder, CoverItem item, Image img)
+    {
+        // 立即占位标记,避免同一控件被并发重复处理
+        img.SetValue(BoundImageUrlProperty, item.ImageUrl);
+
+        var bitmap = await GetOrStartImageLoadAsync(item);
+
+        // 控件在等待期间可能已被复用(滚动),只有仍指向同一 URL 时才回填
+        if (outerBorder.DataContext is CoverItem current && current.ImageUrl == item.ImageUrl)
         {
-            img.Source = cached;
-            return;
+            if (bitmap != null)
+                img.Source = bitmap;
+            else
+                img.SetValue(BoundImageUrlProperty, null); // 失败则清除标记,允许后续滚动时重试
         }
+    }
 
-        // 2) 已在下载中
-        if (_pendingImageUrls.Contains(item.ImageUrl)) return;
+    /// <summary>
+    /// 取得某个 URL 的封面图,必要时启动加载。
+    /// 用共享 Task 去重:多个控件需要同一张图时 await 同一个任务,
+    /// 不会出现"已经有人在下载就跳过、结果谁也没显示"的漏图。
+    /// </summary>
+    private Task<Bitmap?> GetOrStartImageLoadAsync(CoverItem item)
+    {
+        if (_imageCache.TryGetValue(item.ImageUrl, out var cached))
+            return Task.FromResult(cached);
 
-        _pendingImageUrls.Add(item.ImageUrl);
+        if (_imageLoadTasks.TryGetValue(item.ImageUrl, out var running))
+            return running;
+
+        var task = LoadImageCoreAsync(item);
+        _imageLoadTasks[item.ImageUrl] = task;
+        return task;
+    }
+
+    /// <summary>
+    /// 封面图实际加载流程:磁盘缓存 → 网络下载,成功后写入内存与磁盘缓存。
+    /// 返回 null 表示加载失败(调用方保留占位色)。
+    /// </summary>
+    private async Task<Bitmap?> LoadImageCoreAsync(CoverItem item)
+    {
         await _imageLoadSemaphore.WaitAsync();
         try
         {
-            // 3) 尝试磁盘缓存(按 BVID 分子目录)
-            if (!string.IsNullOrEmpty(item.Bvid))
-                TryLoadFromDiskCache(item, img);
-
-            if (img.Source != null)
+            // 1) 磁盘缓存(按 BVID 分子目录)
+            var fromDisk = TryLoadFromDiskCache(item);
+            if (fromDisk != null)
             {
-                return; // 已从磁盘加载
+                _imageCache[item.ImageUrl] = fromDisk;
+                return fromDisk;
             }
 
-            // 4) 网络下载
+            // 2) 网络下载。
+            //    只请求一次:同一份字节既用于解码显示,也用于写入磁盘缓存。
+            //    (原实现为写缓存又单独请求了一次,等于每张封面下载两遍)
             var response = await _httpClient.GetAsync(item.ImageUrl);
             response.EnsureSuccessStatusCode();
-            var stream = await response.Content.ReadAsStreamAsync();
-            var bitmap = new Bitmap(stream);
+            var bytes = await response.Content.ReadAsByteArrayAsync();
+
+            Bitmap bitmap;
+            using (var ms = new MemoryStream(bytes))
+                bitmap = Bitmap.DecodeToWidth(ms, CoverDecodeWidth);
+
             _imageCache[item.ImageUrl] = bitmap;
+            System.Diagnostics.Trace.WriteLine($"[HomeView] 网络下载封面成功 bvid={item.Bvid}");
 
-            // 仅当当前控件仍引用同一 URL 时才更新,避免滚动时旧数据写入
-            if (outerBorder.DataContext is CoverItem currentItem && currentItem.ImageUrl == item.ImageUrl)
-                img.Source = bitmap;
-
-            // 5) 保存到磁盘
+            // 3) 落盘复用刚下载的字节,供下次启动直接命中
             if (!string.IsNullOrEmpty(item.Bvid))
-                _ = SaveCoverToDiskAsync(item.Bvid, item.ImageUrl);
+                _ = SaveCoverBytesAsync(item.Bvid, bytes);
+
+            return bitmap;
         }
-        catch
+        catch (Exception ex)
         {
-            // 失败则保持占位色(用户仍能看到色块)
+            // 失败时保留占位色(用户仍能看到色块)
+            System.Diagnostics.Trace.WriteLine($"[HomeView] 封面加载失败 bvid={item.Bvid}: {ex.Message}");
+            return null;
         }
         finally
         {
             _imageLoadSemaphore.Release();
-            _pendingImageUrls.Remove(item.ImageUrl);
+            _imageLoadTasks.Remove(item.ImageUrl);
         }
     }
 
-    /// <summary>尝试从磁盘加载封面图(路径: CacheRoot/{bvid}/cover.jpg)</summary>
-    private void TryLoadFromDiskCache(CoverItem item, Image img)
+    /// <summary>
+    /// 尝试从磁盘读取封面图(路径: CacheRoot/{bvid}/cover.jpg)。
+    /// 不存在或读取失败均返回 null,由调用方继续走网络下载。
+    /// </summary>
+    private static Bitmap? TryLoadFromDiskCache(CoverItem item)
     {
         try
         {
-            var coverPath = Path.Combine(CacheManager.Instance.CacheRoot, item.Bvid, "cover.jpg");
-            if (!File.Exists(coverPath)) return;
+            if (string.IsNullOrEmpty(item.Bvid)) return null;
 
-            var bitmap = new Bitmap(coverPath);
-            _imageCache[item.ImageUrl] = bitmap;
-            img.Source = bitmap;
-            System.Diagnostics.Trace.WriteLine($"[HomeView] Loaded cover from disk cache: {item.Bvid}");
+            var coverPath = Path.Combine(CacheManager.Instance.CacheRoot, item.Bvid, "cover.jpg");
+            if (!File.Exists(coverPath)) return null;
+
+            System.Diagnostics.Trace.WriteLine($"[HomeView] 命中磁盘缓存 bvid={item.Bvid}");
+            using var fs = File.OpenRead(coverPath);
+            return Bitmap.DecodeToWidth(fs, CoverDecodeWidth);
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Trace.WriteLine($"[HomeView] Disk cache load failed: {ex.Message}");
+            System.Diagnostics.Trace.WriteLine($"[HomeView] 磁盘缓存读取失败 bvid={item.Bvid}: {ex.Message}");
+            return null;
         }
     }
 
-    /// <summary>异步保存封面到磁盘(用于下次快速启动)</summary>
-    private static async Task SaveCoverToDiskAsync(string bvid, string imageUrl)
+    /// <summary>
+    /// 把封面字节写入磁盘缓存(路径: CacheRoot/{bvid}/cover.jpg)。
+    /// 复用调用方已经下载好的字节,不再重复发起网络请求。
+    /// </summary>
+    private static async Task SaveCoverBytesAsync(string bvid, byte[] bytes)
     {
         try
         {
@@ -407,17 +504,12 @@ public partial class HomeView : UserControl
             Directory.CreateDirectory(cacheDir);
             var coverPath = Path.Combine(cacheDir, "cover.jpg");
 
-            var response = await _httpClient.GetAsync(imageUrl);
-            response.EnsureSuccessStatusCode();
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            await using var fileStream = new FileStream(coverPath, FileMode.Create, FileAccess.Write,
-                FileShare.None, 64 * 1024, useAsync: true);
-            await stream.CopyToAsync(fileStream);
-            System.Diagnostics.Trace.WriteLine($"[HomeView] Saved cover to disk cache: {bvid}");
+            await File.WriteAllBytesAsync(coverPath, bytes);
+            System.Diagnostics.Trace.WriteLine($"[HomeView] 封面已写入磁盘缓存 bvid={bvid}");
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Trace.WriteLine($"[HomeView] Disk cache save failed: {ex.Message}");
+            System.Diagnostics.Trace.WriteLine($"[HomeView] 封面落盘失败 bvid={bvid}: {ex.Message}");
         }
     }
 
@@ -467,12 +559,10 @@ public partial class HomeView : UserControl
         bool heightShrunk = viewportHeight < currentRows * _cellHeight;
         bool needHeightRebuild = heightGrown || heightShrunk;
 
-        // 实际没有跨越列/行边界,只做位置调整
+        // 未跨越列/行边界:列数与行数都没变,容器的排列也不会变,直接返回。
+        // (此处原先还会调用一次 RepositionAll,但位置既然没变,那就是一次纯开销的全量遍历)
         if (!needWidthRebuild && !needHeightRebuild)
-        {
-            RepositionAll();
             return;
-        }
 
         _lastRebuildWidth = viewportWidth;
         _lastRebuildHeight = viewportHeight;
@@ -483,13 +573,20 @@ public partial class HomeView : UserControl
 
         if (newCols != currentCols || newRows != currentRows)
         {
-            if (newCols != currentCols)
-            {
-                HomeViewModel.ColumnsPerRow = newCols;
-                ContainerCanvas.Width = _cellWidth * newCols;
-            }
-            // 让 VM 决定如何重建容器池
+            // 注意:不要在这里预先修改 HomeViewModel.ColumnsPerRow。
+            // 一旦外部先改了它,VM 内部的"列数是否变化"判断就恒为 false,
+            // 会错误地走"仅行数变化"分支——导致 FirstVisibleRowIndex 不重置、
+            // 容器池不按新列数重建索引映射,表现为最大化后布局错乱、顶部留白。
+            int colsBefore = HomeViewModel.ColumnsPerRow;
             _vm.RecalculateOnResize(viewportWidth, viewportHeight, _cellWidth, _cellHeight);
+
+            if (HomeViewModel.ColumnsPerRow != colsBefore)
+            {
+                // 列数变化会让整块内容重新排布,旧的滚动偏移已失去意义,
+                // 必须回到顶部,才能与 VM 内部重置的 FirstVisibleRowIndex = 0 保持一致。
+                ContainerCanvas.Width = _cellWidth * HomeViewModel.ColumnsPerRow;
+                ScrollHost.Offset = new Vector(ScrollHost.Offset.X, 0);
+            }
         }
 
         ContainerCanvas.Height = _cellHeight * _vm.TotalRows;
@@ -501,6 +598,10 @@ public partial class HomeView : UserControl
 
         RepositionAll();
         LoadMissingImages();
+
+        // 视口变大后,原有数据可能不足以填满新的一屏(此时用户没有滚动空间,
+        // ScrollChanged 不会发生),需要主动评估一次是否需要追加数据。
+        _vm.EvaluateLoadMore();
     }
 }
 
