@@ -35,6 +35,15 @@
   <!-- bew-base-font-size -->
   <x:Double x:Key="FontSizeBase">15</x:Double>
 
+  <!--
+    两档「小字」。以前封面数据层（播放量 / 弹幕数 / 时长）与角标用的是散落的
+    10px / 11px 魔法数，不在字号阶内，等于绕过令牌层。
+    · FontSizeMicro 10   角标 / 严重度 chip（.sev）
+    · FontSizeDataOverlay 11  封面数据层与状态标签（压在封面图上，配文字阴影）
+  -->
+  <x:Double x:Key="FontSizeMicro">10</x:Double>
+  <x:Double x:Key="FontSizeDataOverlay">11</x:Double>
+
   <!-- ================= 行高 ================= -->
   <x:Double x:Key="LineHeightCaption">16</x:Double>
   <x:Double x:Key="LineHeightControl">18</x:Double>

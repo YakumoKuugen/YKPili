@@ -1,0 +1,8 @@
+[package]
+name = "gpui-surface-spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gpui = "0.2.2"
+core-video = "0.4"

@@ -452,3 +452,17 @@ $RECYCLE.BIN/
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
+
+# Cargo 编译输出
+**/target/
+**/*.rs.bk          # rustfmt 备份文件
+*/.cargo-home/
+
+# 字节码与缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+
+
+/.vscode/

@@ -40,6 +40,24 @@ public interface IPlatformMediaPlayer : IDisposable
     /// <summary>当前是否处于播放状态</summary>
     bool IsPlaying { get; }
 
+    /// <summary>音量(0.0 - 1.0)。平台不支持时读写均为空操作。</summary>
+    double Volume { get; set; }
+
+    /// <summary>播放速率(1.0 = 正常)。平台不支持时读写均为空操作。</summary>
+    double Rate { get; set; }
+
+    /// <summary>
+    /// 当前播放位置。平台无法提供时返回 <see cref="TimeSpan.Zero"/>,
+    /// 此时界面上的进度条应降级显示,而不是停在 0 误导用户。
+    /// </summary>
+    TimeSpan Position { get; }
+
+    /// <summary>
+    /// 媒体总时长。平台无法提供(或尚未解析出)时返回 <see cref="TimeSpan.Zero"/>,
+    /// 调用方需据此降级为"只显示已播放时间"。
+    /// </summary>
+    TimeSpan Duration { get; }
+
     /// <summary>播放开始事件</summary>
     event Action? PlaybackStarted;
 

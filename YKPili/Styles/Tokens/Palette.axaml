@@ -63,5 +63,16 @@
   <SolidColorBrush x:Key="StatusError10Brush" Color="#1AE5484D" />
   <SolidColorBrush x:Key="StatusError20Brush" Color="#33E5484D" />
   <SolidColorBrush x:Key="StatusError30Brush" Color="#4DE5484D" />
+  <!--
+    危险色的两档加深（70 / 80），供危险按钮 hover / 按下态使用。
+    与既有的 10/20/30 透明度梯度同一套换算：10% → 0x1A、20% → 0x33、30% → 0x4D、
+    70% → 0xB3、80% → 0xCC。原设计用 brightness(1.08) 之类的滤镜近似，
+    滤镜在不同底色上的结果不可控；改成显式的两档，行为可预期。
+  -->
+  <SolidColorBrush x:Key="StatusError70Brush" Color="#B3E5484D" />
+  <SolidColorBrush x:Key="StatusError80Brush" Color="#CCE5484D" />
+
+  <!-- 主题色实底上的禁用态文字（白字半透明） -->
+  <SolidColorBrush x:Key="TextOnAccentDisabledBrush" Color="#80FFFFFF" />
 
 </ResourceDictionary>

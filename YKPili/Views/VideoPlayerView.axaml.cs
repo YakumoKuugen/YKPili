@@ -30,6 +30,16 @@ public partial class VideoPlayerView : UserControl
     // 动画期间被推迟的播放请求(动画结束后再播放)
     private (string? videoUrl, string? audioUrl)? _pendingPlayback;
 
+    // 控制栏自动隐藏定时器
+    private Avalonia.Threading.DispatcherTimer? _controlBarTimer;
+    // 非全屏时面板的原始尺寸(进入全屏前记下,退出时还原)
+    private double _normalPanelWidth;
+    private double _normalPanelHeight;
+    private bool _panelSizeCaptured;
+
+    /// <summary>控制栏静止多久后自动隐藏</summary>
+    private static readonly TimeSpan ControlBarIdleTimeout = TimeSpan.FromSeconds(2);
+
     /// <summary>
     /// 播放器工厂:由平台启动入口(如 YKPili.Desktop.Program)注册。
     /// 这里只声明,不构造,避免在跨平台代码中引用平台特定类型。
@@ -55,6 +65,21 @@ public partial class VideoPlayerView : UserControl
         {
             if (_vm != null) _vm.StatusText = err;
         };
+        // 把播放器交给 VM:VM 需要读进度与时长来驱动进度条与时间显示
+        // (音量/倍速仍由本类下发,见 OnVmPropertyChanged)
+        _vm?.AttachPlayer(_player);
+
+        // 播放真正开始/结束时同步 UI 状态。
+        // 这两个事件由后台线程触发(解码/入队任务里),必须切回 UI 线程再改属性。
+        _player.PlaybackStarted += () => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (_vm == null) return;
+            _vm.IsPlaying = true;   // 派生暂停遮罩与进度定时器
+        });
+        _player.PlaybackStopped += () => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            if (_vm != null) _vm.IsPlaying = false;
+        });
 
         // 首次访问 NativeControlHost 会触发原生视图创建(AVPlayer/NSView 等)
         var host = _player.NativeControlHost;
@@ -62,8 +87,9 @@ public partial class VideoPlayerView : UserControl
         {
             host.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch;
             host.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch;
-            // 插入到 Children[0],使其位于所有覆盖层(Loading/暂停/暗色)之下
-            VideoArea.Children.Insert(0, host);
+            // 放进 VideoSurface(视频渲染区),而不是整个 VideoArea——
+            // 该区域已让出控制栏的高度,原生视图不会盖住控制栏
+            VideoSurface.Children.Insert(0, host);
         }
     }
 
@@ -96,6 +122,21 @@ public partial class VideoPlayerView : UserControl
                     _vm?.TogglePlayPauseCommand.Execute(null);
                     e.Handled = true;
                 };
+
+                // ---- 控制栏自动隐藏 ----
+                // 鼠标在画面内移动即显示控制栏并重新计时;
+                // 静止 2 秒、或指针移出播放界面,都隐藏背景与按钮(只留底部进度条)。
+                // 指针停在控制层上时保持显示,避免"正要点击却消失了"。
+                Panel.PointerMoved += (_, _) => ShowControlBarTemporarily();
+                Panel.PointerExited += (_, _) => HideControlBarImmediately();
+                ControlBar.PointerEntered += (_, _) => CancelControlBarTimeout();
+                ControlBar.PointerExited += (_, _) => StartControlBarTimeout();
+
+                // ---- 进度条宽度 ----
+                // 填充宽度 = 轨道实际宽度 × 进度。轨道宽度只有布局完成后才知道,
+                // 因此既要在进度变化时更新,也要在尺寸变化时重算(窗口/全屏切换)。
+                ProgressTrack.SizeChanged += (_, _) => UpdateProgressWidth();
+                UpdateProgressWidth();
             }
         }
     }
@@ -129,6 +170,18 @@ public partial class VideoPlayerView : UserControl
             case nameof(VideoPlayerViewModel.IsPlaying) when _player != null:
                 if (_vm.IsPlaying) _player.Resume();
                 else _player.Pause();
+                break;
+            case nameof(VideoPlayerViewModel.Volume) when _player != null:
+                _player.Volume = _vm.Volume;
+                break;
+            case nameof(VideoPlayerViewModel.PlaybackRate) when _player != null:
+                _player.Rate = _vm.PlaybackRate;
+                break;
+            case nameof(VideoPlayerViewModel.IsFullscreen):
+                ApplyFullscreen(_vm.IsFullscreen);
+                break;
+            case nameof(VideoPlayerViewModel.Progress):
+                UpdateProgressWidth();
                 break;
             case nameof(VideoPlayerViewModel.IsVisible) when _vm.IsVisible:
                 EnsureHostInPanel();
@@ -188,13 +241,13 @@ public partial class VideoPlayerView : UserControl
             return;
         }
 
-        bool wasMissing = !VideoArea.Children.Contains(host);
+        bool wasMissing = !VideoSurface.Children.Contains(host);
         if (wasMissing)
         {
-            System.Diagnostics.Trace.WriteLine("[VideoPlayerView] Host missing from panel, re-adding");
+            System.Diagnostics.Trace.WriteLine("[VideoPlayerView] Host missing from surface, re-adding");
             host.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch;
             host.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch;
-            VideoArea.Children.Insert(0, host);
+            VideoSurface.Children.Insert(0, host);
         }
 
         VideoArea.UpdateLayout();
@@ -207,11 +260,14 @@ public partial class VideoPlayerView : UserControl
         System.Diagnostics.Trace.WriteLine(
             $"[VideoPlayerView] 播放窗口(Panel) Bounds(相对Overlay): X={panelBounds.X:F0} Y={panelBounds.Y:F0} W={panelBounds.Width:F0} H={panelBounds.Height:F0} | RenderTransform偏移: X={panelOffsetX:F0} Y={panelOffsetY:F0}");
 
-        // ---- 调试:打印 VideoArea 坐标(相对 Panel 内部 Grid) ----
-        var size = VideoArea.Bounds.Size;
+        // ---- 调试:打印 VideoSurface 坐标(视频渲染区,已让出控制栏高度) ----
         var videoAreaBounds = VideoArea.Bounds;
+        var surfaceBounds = VideoSurface.Bounds;
+        var size = surfaceBounds.Size;
         System.Diagnostics.Trace.WriteLine(
-            $"[VideoPlayerView] VideoArea Bounds(相对Panel): X={videoAreaBounds.X:F0} Y={videoAreaBounds.Y:F0} W={size.Width:F0} H={size.Height:F0}");
+            $"[VideoPlayerView] VideoArea Bounds(相对Panel): X={videoAreaBounds.X:F0} Y={videoAreaBounds.Y:F0} W={videoAreaBounds.Width:F0} H={videoAreaBounds.Height:F0}");
+        System.Diagnostics.Trace.WriteLine(
+            $"[VideoPlayerView] VideoSurface Bounds(视频渲染区): X={surfaceBounds.X:F0} Y={surfaceBounds.Y:F0} W={size.Width:F0} H={size.Height:F0} (VideoArea 底部 {videoAreaBounds.Height - surfaceBounds.Height:F0}px 留给控制栏)");
 
         if (size.Width > 0 && size.Height > 0)
         {
@@ -285,5 +341,172 @@ public partial class VideoPlayerView : UserControl
                 }
             });
         timer.Start();
+    }
+
+    /// <summary>
+    /// 按当前进度刷新进度条填充宽度。
+    /// 用"实际像素宽度"而不是比例列:细进度条(3px)放在 Grid 的 Auto 行里时,
+    /// 比例列会因为可用宽度被压成 0 而整条不可见。
+    /// </summary>
+    private void UpdateProgressWidth()
+    {
+        if (_vm == null) return;
+        var trackWidth = ProgressTrack.Bounds.Width;
+        if (trackWidth <= 0) return;
+        ProgressFill.Width = Math.Clamp(trackWidth * _vm.Progress, 0, trackWidth);
+    }
+
+    // ================================================================
+    // 控制栏自动隐藏
+    // ================================================================
+
+    /// <summary>显示控制栏并重新计时(鼠标移动时调用)</summary>
+    private void ShowControlBarTemporarily()
+    {
+        if (_vm == null) return;
+        _vm.IsControlBarVisible = true;
+        StartControlBarTimeout();
+    }
+
+    /// <summary>开始"静止即隐藏"倒计时</summary>
+    private void StartControlBarTimeout()
+    {
+        _controlBarTimer ??= new Avalonia.Threading.DispatcherTimer
+        {
+            Interval = ControlBarIdleTimeout
+        };
+        _controlBarTimer.Stop();
+        _controlBarTimer.Tick -= OnControlBarTimeout;
+        _controlBarTimer.Tick += OnControlBarTimeout;
+        _controlBarTimer.Start();
+    }
+
+    /// <summary>取消倒计时(指针停在控制栏上时保持显示)</summary>
+    private void CancelControlBarTimeout()
+    {
+        _controlBarTimer?.Stop();
+    }
+
+    /// <summary>
+    /// 立即隐藏控制栏(指针移出播放界面时调用)。
+    /// 只隐藏背景与按钮,进度条由 XAML 独立于该状态,始终贴在画面最下方。
+    /// </summary>
+    private void HideControlBarImmediately()
+    {
+        _controlBarTimer?.Stop();
+        if (_vm is { IsVisible: true })
+            _vm.IsControlBarVisible = false;
+    }
+
+    private void OnControlBarTimeout(object? sender, EventArgs e)
+    {
+        _controlBarTimer?.Stop();
+        // 播放器已关闭或没有在播放时不必隐藏(避免留下"空面板"观感)
+        if (_vm is { IsVisible: true })
+            _vm.IsControlBarVisible = false;
+    }
+
+    // ================================================================
+    // 键盘快捷键
+    //
+    // 挂到 TopLevel 而不是自身:焦点可能在控制栏按钮上,
+    // 只监听本控件会漏掉这些按键。播放器不可见时直接放行。
+    // ================================================================
+
+    protected override void OnAttachedToVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnAttachedToVisualTree(e);
+        if (Avalonia.Controls.TopLevel.GetTopLevel(this) is { } top)
+            top.KeyDown += OnTopLevelKeyDown;
+    }
+
+    protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
+    {
+        base.OnDetachedFromVisualTree(e);
+        if (Avalonia.Controls.TopLevel.GetTopLevel(this) is { } top)
+            top.KeyDown -= OnTopLevelKeyDown;
+        _controlBarTimer?.Stop();
+    }
+
+    private void OnTopLevelKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (_vm is not { IsVisible: true }) return;
+
+        switch (e.Key)
+        {
+            case Key.Space:
+                _vm.TogglePlayPauseCommand.Execute(null);
+                e.Handled = true;
+                break;
+
+            // 音量:与 B 站一致,↑↓ 每次 5%
+            case Key.Up:
+                _vm.AdjustVolume(0.05);
+                e.Handled = true;
+                break;
+            case Key.Down:
+                _vm.AdjustVolume(-0.05);
+                e.Handled = true;
+                break;
+
+            case Key.M:
+                _vm.ToggleMuteCommand.Execute(null);
+                e.Handled = true;
+                break;
+
+            case Key.F:
+                _vm.ToggleFullscreenCommand.Execute(null);
+                e.Handled = true;
+                break;
+
+            case Key.Escape:
+                // 全屏时先退出全屏,再次按下才关闭播放器
+                if (_vm.IsFullscreen) _vm.ToggleFullscreenCommand.Execute(null);
+                else _vm.CloseCommand.Execute(null);
+                e.Handled = true;
+                break;
+        }
+
+        // 任何按键都顺带唤醒控制栏
+        ShowControlBarTemporarily();
+    }
+
+    // ================================================================
+    // 全屏
+    // ================================================================
+
+    /// <summary>
+    /// 全屏:让面板铺满整个浮层;退出时还原为原尺寸。
+    /// 首次进入前记下 XAML 里的原始尺寸,避免多次切换后尺寸漂移。
+    /// </summary>
+    private void ApplyFullscreen(bool fullscreen)
+    {
+        if (!_panelSizeCaptured)
+        {
+            _normalPanelWidth = Panel.Width;
+            _normalPanelHeight = Panel.Height;
+            _panelSizeCaptured = true;
+        }
+
+        if (fullscreen)
+        {
+            Panel.Width = double.NaN;
+            Panel.Height = double.NaN;
+            Panel.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch;
+            Panel.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch;
+            Panel.Margin = new Avalonia.Thickness(0);
+            Panel.CornerRadius = new Avalonia.CornerRadius(0);
+        }
+        else
+        {
+            Panel.Width = _normalPanelWidth;
+            Panel.Height = _normalPanelHeight;
+            Panel.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center;
+            Panel.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center;
+            Panel.Margin = new Avalonia.Thickness(0);
+        }
+
+        // 原生视图尺寸随宿主变化,需要主动通知重新布局
+        _player?.TriggerLayout();
     }
 }

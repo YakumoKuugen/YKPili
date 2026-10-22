@@ -1,0 +1,2185 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark" data-engine="avalonia">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>YKPili · UX 设计规范与实景预览</title>
+<style>
+/* ============================================================================
+   YKPili UX 设计规范预览
+   本文件是「设计文档 + 实景预览」二合一页面。
+
+   所有色值/字号/间距/圆角/动效均 1:1 抄自项目 Token 层：
+     YKPili/Styles/Tokens/{Palette,Surfaces,Typography,Dimensions,Motion,Shadows}.axaml
+   预览里的每个数值都能在 XAML 中找到同名 token —— 不存在"预览好看但落不了地"的值。
+   ========================================================================== */
+
+/* ---------- 原始色板（不随主题变化，对应 Palette.axaml） ---------- */
+:root {
+  --bili-blue: #00A1D6;
+  --bili-pink: #FB749A;
+  --theme-primary: #00A1D6;
+
+  /* 注意：XAML 的 #AARRGGBB 与 CSS 的 #RRGGBBAA 字节序相反，
+     因此这里必须换算成 rgba() 显式写出，不能直接照抄 hex。 */
+  --theme-10: rgba(0, 161, 214, 0.102); --theme-20: rgba(0, 161, 214, 0.20);
+  --theme-30: rgba(0, 161, 214, 0.302); --theme-40: rgba(0, 161, 214, 0.40);
+  --theme-50: rgba(0, 161, 214, 0.502); --theme-60: rgba(0, 161, 214, 0.60);
+  --theme-70: rgba(0, 161, 214, 0.702); --theme-80: rgba(0, 161, 214, 0.80);
+  --theme-90: rgba(0, 161, 214, 0.902);
+
+  --status-info: #3ABFF8;    --status-success: #29A383;
+  --status-warning: #F59E0B; --status-error: #E5484D;
+
+  /* ---------- 圆角（Dimensions.axaml） ---------- */
+  --radius-sm: 4px;  --radius-half: 6px;  --radius-md: 8px;  --radius-lg: 12px;
+  --radius-xl: 16px; --radius-2xl: 24px;  --radius-3xl: 32px; --radius-full: 9999px;
+  --card-radius: 12px;  --media-radius: 12px; --panel-radius: 12px;
+  --modal-radius: 24px; --popover-radius: 16px; --interactive-radius: 8px;
+  --badge-radius: 9999px; --topbar-media-radius: 6px;
+
+  /* ---------- 间距：4px 网格（Dimensions.axaml） ---------- */
+  --space-0-5: 2px; --space-1: 4px;  --space-2: 8px;  --space-3: 12px;
+  --space-4: 16px;  --space-5: 20px; --space-6: 24px; --space-8: 32px;
+  --space-10: 40px; --space-12: 48px;
+
+  /* ---------- 排版（Typography.axaml） ---------- */
+  --fs-caption: 12px; --fs-control: 13px; --fs-body: 15px; --fs-title: 15px;
+  --fs-heading: 20px; --fs-display: 24px; --fs-data: 28px;
+  --lh-caption: 16px; --lh-control: 18px; --lh-body: 24px; --lh-title: 22px;
+  --lh-heading: 28px; --lh-data: 32px;
+
+  --fw-regular: 400; --fw-medium: 500; --fw-semibold: 600; --fw-bold: 700;
+
+  --icon-sm: 16px; --icon-md: 20px; --icon-lg: 24px; --icon-xl: 32px;
+
+  /* ---------- 控件几何（Dimensions.axaml） ---------- */
+  --topbar-h: 64px; --topbar-control-h: 46px; --control-h: 34px;
+  --cover-w: 192px; --cover-h: 108px; --cell-w: 208px; --cell-h: 166px;
+
+  /* ---------- 动效（Motion.axaml） ---------- */
+  --dur-fast: 150ms; --dur-normal: 200ms; --dur-moderate: 300ms;
+  --ease-standard: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-emphasized: cubic-bezier(0.34, 1.3, 0.64, 1);
+
+  --font-ui: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", system-ui, sans-serif;
+}
+
+/* ---------- 语义表面：暗色（Surfaces.axaml / Dark） ---------- */
+[data-theme="dark"] {
+  --text-1: #F1F2F4;
+  --text-2: rgba(212, 215, 222, 0.902);
+  --text-3: rgba(183, 188, 200, 0.749);
+  --text-4: rgba(154, 162, 177, 0.549);
+  --text-on-accent: #FFFFFF;
+
+  --bg-base: #222428; --bg-homepage: #222428;
+  --bg-gradient: linear-gradient(160deg, #1B2A33 0%, #202329 55%, #222428 100%);
+  --bg-glow: radial-gradient(70% 55% at 15% 0%, rgba(0,161,214,0.20) 0%, rgba(0,161,214,0) 100%);
+
+  --surface-content: rgba(48, 51, 56, 0.68);
+  --surface-content-hover: rgba(59, 62, 66, 0.68);
+  --surface-content-alt: rgba(53, 56, 60, 0.68);
+  --surface-solid: #303338; --surface-solid-hover: #3B3E42;
+
+  --surface-elevated: rgba(55, 58, 62, 0.68);
+  --surface-elevated-hover: rgba(65, 68, 73, 0.68);
+  --surface-elevated-solid: #373A3E; --surface-elevated-solid-hover: #414449;
+  --surface-elevated-strong: rgba(55, 58, 62, 0.92);
+
+  --fill-1: rgba(131, 131, 145, 0.10); --fill-2: rgba(131, 131, 145, 0.20);
+  --fill-3: rgba(131, 131, 145, 0.30); --fill-4: rgba(131, 131, 145, 0.40);
+
+  --border-subtle: rgba(131, 131, 145, 0.16);
+  --border-popover: rgba(255, 255, 255, 0.12);
+  --border-strong: rgba(131, 131, 145, 0.24);
+
+  --skeleton: rgba(131, 131, 145, 0.20);
+  --switch-bg: #4A4D52;
+  --scrim: rgba(0, 0, 0, 0.70);
+
+  /* 玻璃边缘光：暗色下大幅收敛（Shadows.axaml 明确说明否则内圈发脏） */
+  --edge-glow: inset 1px 1px 1px -0.5px rgba(255,255,255,0.06),
+               inset -1px -1px 1px -0.5px rgba(255,255,255,0.03),
+               inset 0 0 10px rgba(255,255,255,0.02);
+  --edge-glow-modal: inset 1px 1px 1px -0.5px rgba(255,255,255,0.06),
+                     inset -1px -1px 1px -0.5px rgba(255,255,255,0.03),
+                     inset 0 0 14px rgba(255,255,255,0.03);
+
+  --shadow-1: 0 4px 6px -1px rgba(0,0,0,0.08), 0 2px 4px -2px rgba(0,0,0,0.06);
+  --shadow-2: 0 10px 15px -3px rgba(0,0,0,0.10), 0 4px 6px -4px rgba(0,0,0,0.08);
+  --shadow-3: 0 20px 25px -5px rgba(0,0,0,0.12), 0 8px 10px -6px rgba(0,0,0,0.10);
+  --shadow-4: 0 34px 50px -20px rgba(0,0,0,0.14), 0 32px 45px -12px rgba(0,0,0,0.10), 0 30px 40px -8px rgba(0,0,0,0.14);
+  --shadow-card-hover: 0 10px 15px -3px rgba(0,0,0,0.12), 0 4px 6px -4px rgba(0,0,0,0.10),
+                       inset 1px 1px 1px -0.5px rgba(255,255,255,0.06),
+                       inset -1px -1px 1px -0.5px rgba(255,255,255,0.03);
+  --shadow-glass-card: var(--shadow-1), var(--edge-glow);
+  --shadow-glass-elevated: var(--shadow-3), var(--edge-glow);
+  --shadow-glass-modal: var(--shadow-4), var(--edge-glow-modal);
+}
+
+/* ---------- 语义表面：亮色（Surfaces.axaml / Light） ---------- */
+[data-theme="light"] {
+  --text-1: #15181E; --text-2: rgba(50, 59, 73, 0.80); --text-3: rgba(58, 69, 85, 0.60);
+  --text-4: rgba(74, 89, 109, 0.40); --text-on-accent: #FFFFFF;
+
+  --bg-base: #FFFFFF; --bg-homepage: #F2F2F8;
+  --bg-gradient: linear-gradient(160deg, #DCF1F9 0%, #EFF2F7 55%, #F2F2F8 100%);
+  --bg-glow: radial-gradient(70% 55% at 15% 0%, rgba(0,161,214,0.20) 0%, rgba(0,161,214,0) 100%);
+
+  --surface-content: rgba(255, 255, 255, 0.68);
+  --surface-content-hover: rgba(217, 217, 217, 0.68);
+  --surface-content-alt: rgba(238, 238, 246, 0.68);
+  --surface-solid: #FFFFFF; --surface-solid-hover: #D9D9D9;
+
+  --surface-elevated: rgba(255, 255, 255, 0.68);
+  --surface-elevated-hover: rgba(217, 217, 217, 0.68);
+  --surface-elevated-solid: #FFFFFF; --surface-elevated-solid-hover: #D9D9D9;
+  --surface-elevated-strong: rgba(255, 255, 255, 0.92);
+
+  --fill-1: rgba(131, 131, 145, 0.15); --fill-2: rgba(131, 131, 145, 0.30);
+  --fill-3: rgba(131, 131, 145, 0.45); --fill-4: rgba(131, 131, 145, 0.60);
+
+  --border-subtle: rgba(131, 131, 145, 0.18);
+  --border-popover: rgba(255, 255, 255, 0.40);
+  --border-strong: rgba(131, 131, 145, 0.30);
+
+  --skeleton: rgba(131, 131, 145, 0.30);
+  --switch-bg: #E3E5E7;
+  --scrim: rgba(0, 0, 0, 0.55);
+
+  --edge-glow: inset 1px 1px 1px -0.5px rgba(255,255,255,0.34),
+               inset -1px -1px 1px -0.5px rgba(255,255,255,0.14),
+               inset 0 0 10px rgba(255,255,255,0.60);
+  --edge-glow-modal: inset 1px 1px 1px -0.5px rgba(255,255,255,0.34),
+                     inset -1px -1px 1px -0.5px rgba(255,255,255,0.14),
+                     inset 0 0 14px rgba(255,255,255,0.62);
+
+  --shadow-1: 0 4px 6px -1px rgba(0,0,0,0.08), 0 2px 4px -2px rgba(0,0,0,0.04);
+  --shadow-2: 0 10px 15px -3px rgba(0,0,0,0.10), 0 4px 6px -4px rgba(0,0,0,0.06);
+  --shadow-3: 0 20px 25px -5px rgba(0,0,0,0.12), 0 8px 10px -6px rgba(0,0,0,0.08);
+  --shadow-4: 0 34px 50px -20px rgba(0,0,0,0.14), 0 32px 45px -12px rgba(0,0,0,0.10), 0 30px 40px -8px rgba(0,0,0,0.12);
+  --shadow-card-hover: 0 10px 15px -3px rgba(0,0,0,0.12), 0 4px 6px -4px rgba(0,0,0,0.08),
+                       inset 1px 1px 1px -0.5px rgba(255,255,255,0.34),
+                       inset -1px -1px 1px -0.5px rgba(255,255,255,0.14);
+  --shadow-glass-card: var(--shadow-1), var(--edge-glow);
+  --shadow-glass-elevated: var(--shadow-3), var(--edge-glow);
+  --shadow-glass-modal: var(--shadow-4), var(--edge-glow-modal);
+}
+
+/* ============================================================================
+   渲染引擎开关
+   Avalonia 12 的 Visual.Effect 只有 DropShadowDirectionEffect，没有 BlurEffect，
+   因此 BewlyCat 的 backdrop-filter 无法移植。这个开关让设计稿与落地效果可比对：
+     data-engine="avalonia" —— 可用真实模糊时的替身方案（提高填充不透明度 + inset 高光）
+     data-engine="ideal"    —— 设计理想态（带 backdrop-filter 模糊）
+   ========================================================================== */
+[data-engine="avalonia"] .glass { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+[data-engine="ideal"] .glass { backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%); }
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: var(--text-1);
+  background: var(--bg-homepage);
+  transition: background var(--dur-normal) var(--ease-standard), color var(--dur-normal) var(--ease-standard);
+}
+
+.icon { width: var(--icon-md); height: var(--icon-md); flex: none; stroke: currentColor; fill: none;
+        stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.icon-sm { width: var(--icon-sm); height: var(--icon-sm); }
+.icon-lg { width: var(--icon-lg); height: var(--icon-lg); }
+.icon-xl { width: var(--icon-xl); height: var(--icon-xl); }
+
+/* ---------- 文档外框 ---------- */
+.doc-header {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; gap: var(--space-4);
+  height: var(--topbar-h); padding: 0 var(--space-8);
+  background: var(--surface-elevated-strong);
+  border-bottom: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-2), var(--edge-glow);
+}
+.doc-brand { display: flex; align-items: center; gap: var(--space-2); font-weight: var(--fw-bold);
+             font-size: var(--fs-heading); letter-spacing: -0.02em; }
+.doc-brand .mark { color: var(--theme-primary); }
+.doc-sub { color: var(--text-3); font-size: var(--fs-control); }
+.doc-header .spacer { flex: 1; }
+
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: var(--radius-full);
+       background: var(--fill-2); }
+.seg button {
+  appearance: none; border: 0; cursor: pointer; font-family: inherit;
+  font-size: var(--fs-control); font-weight: var(--fw-medium); color: var(--text-3);
+  padding: 6px 14px; border-radius: var(--radius-full); background: transparent;
+  transition: color var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.seg button:hover { color: var(--text-1); }
+.seg button[aria-pressed="true"] {
+  background: var(--surface-solid); color: var(--theme-primary);
+  box-shadow: var(--shadow-1);
+}
+
+.layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: var(--space-8);
+          max-width: 1600px; margin: 0 auto; padding: var(--space-8); align-items: start; }
+.toc { position: sticky; top: calc(var(--topbar-h) + var(--space-8)); }
+.toc h4 { margin: 0 0 var(--space-3); font-size: var(--fs-caption); font-weight: var(--fw-semibold);
+          text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-4); }
+.toc a { display: block; padding: 7px var(--space-3); border-radius: var(--radius-md);
+         color: var(--text-2); text-decoration: none; font-size: var(--fs-control);
+         border-left: 2px solid transparent;
+         transition: color var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard); }
+.toc a:hover { background: var(--fill-1); color: var(--text-1); border-left-color: var(--theme-primary); }
+
+main { display: flex; flex-direction: column; gap: var(--space-10); min-width: 0; }
+section { scroll-margin-top: calc(var(--topbar-h) + var(--space-4)); }
+.sec-head { margin-bottom: var(--space-4); }
+.sec-head h2 { margin: 0 0 var(--space-1); font-size: var(--fs-display); font-weight: var(--fw-bold);
+               letter-spacing: -0.02em; line-height: var(--lh-heading); }
+.sec-head p { margin: 0; color: var(--text-3); font-size: var(--fs-control); line-height: 1.7; max-width: 76ch; }
+.sec-num { display: inline-block; font-variant-numeric: tabular-nums; color: var(--theme-primary);
+           font-weight: var(--fw-bold); margin-right: var(--space-2); }
+
+.panel { background: var(--surface-content); border: 1px solid var(--border-popover);
+         border-radius: var(--panel-radius); box-shadow: var(--shadow-glass-card); padding: var(--space-5); }
+.panel + .panel { margin-top: var(--space-4); }
+.panel h3 { margin: 0 0 var(--space-3); font-size: var(--fs-title); font-weight: var(--fw-semibold); }
+.panel .note { color: var(--text-3); font-size: var(--fs-control); line-height: 1.7; margin: var(--space-2) 0 0; }
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--space-4); }
+.grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); }
+
+/* ---------- 色卡 ---------- */
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); gap: var(--space-3); }
+.swatch { border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border-subtle);
+          background: var(--surface-solid); }
+.swatch .chip { height: 56px; }
+.swatch .meta { padding: var(--space-2) var(--space-3); }
+.swatch .meta b { display: block; font-size: var(--fs-caption); font-weight: var(--fw-semibold); }
+.swatch .meta span { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                     font-size: 11px; color: var(--text-4); }
+.ramp { display: flex; border-radius: var(--radius-md); overflow: hidden; margin-top: var(--space-3);
+        border: 1px solid var(--border-subtle); }
+.ramp div { flex: 1; height: 44px; display: grid; place-items: center;
+            font-size: 10px; color: #fff; font-family: ui-monospace, Menlo, monospace; }
+
+/* ---------- 表格 ---------- */
+table { width: 100%; border-collapse: collapse; font-size: var(--fs-control); }
+th, td { text-align: left; padding: 10px var(--space-3); border-bottom: 1px solid var(--border-subtle);
+         vertical-align: top; }
+th { color: var(--text-4); font-weight: var(--fw-semibold); font-size: var(--fs-caption);
+     text-transform: uppercase; letter-spacing: 0.06em; }
+td code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+                 color: var(--theme-primary); }
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover { background: var(--fill-1); }
+
+/* ---------- 排版示例 ---------- */
+.type-row { display: flex; align-items: baseline; gap: var(--space-4); padding: var(--space-3) 0;
+            border-bottom: 1px solid var(--border-subtle); }
+.type-row:last-child { border-bottom: 0; }
+.type-row .sample { flex: 1; min-width: 0; }
+
+/* ---------- 标签 ---------- */
+.tag { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
+       border-radius: var(--badge-radius); font-size: 11px; font-weight: var(--fw-medium); }
+.tag.ok    { background: rgba(41, 163, 131, 0.16); color: var(--status-success); }
+.tag.warn  { background: rgba(245, 158, 11, 0.16);  color: var(--status-warning); }
+.tag.err   { background: rgba(229, 72, 77, 0.16);   color: var(--status-error); }
+.tag.info  { background: rgba(58, 191, 248, 0.16);  color: var(--status-info); }
+.tag.ghost { background: var(--fill-2); color: var(--text-3); }
+.tag.accent{ background: var(--theme-20); color: var(--theme-primary); }
+.sev { font-size: 10px; padding: 2px 7px; border-radius: var(--badge-radius); font-weight: var(--fw-semibold); }
+.sev.critical { background: rgba(229, 72, 77, 0.18); color: #FF6B6F; }
+.sev.high     { background: rgba(245, 158, 11, 0.18); color: var(--status-warning); }
+.sev.medium   { background: rgba(58, 191, 248, 0.18); color: var(--status-info); }
+.sev.low      { background: var(--fill-2); color: var(--text-3); }
+
+/* ============================================================================
+   实景预览：应用外壳
+   ========================================================================== */
+.stage { border-radius: var(--radius-xl); overflow: hidden; border: 1px solid var(--border-subtle);
+         box-shadow: var(--shadow-4); background: var(--bg-homepage); position: relative; }
+.stage-bar { display: flex; align-items: center; gap: var(--space-2); padding: 10px var(--space-4);
+             background: var(--surface-elevated-solid); border-bottom: 1px solid var(--border-subtle); }
+.traffic { display: flex; gap: 6px; }
+.traffic i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+.traffic i:nth-child(1) { background: #ED6A5E; } .traffic i:nth-child(2) { background: #F4BF4F; }
+.traffic i:nth-child(3) { background: #61C554; }
+.stage-bar .url { flex: 1; text-align: center; font-size: 11px; color: var(--text-4); }
+
+/* ---------- 应用外壳：渐变 + 光晕用多重背景叠加 ----------
+   不用伪元素：伪元素在滚动容器内会随内容滚走，而 background 默认相对元素本身。
+   光晕在上层（透明端露出下层渐变），渐变在下层，与 MainView.axaml 的两层结构等价。 */
+.app {
+  position: relative; overflow: hidden;
+  background-color: var(--bg-homepage);
+  background-image: var(--bg-glow), var(--bg-gradient);
+  background-repeat: no-repeat;
+}
+.app > * { position: relative; z-index: 1; }
+
+/* ============================================================================
+   场景层级契约（应用级，不是局部）
+   ---------------------------------------------------------------------------
+   本页有三个并列的舞台（首页 / 播放浮窗 / 登录），它们是同级的上层场景，
+   内部层级彼此独立设计。必须固定为：
+
+       首页场景          ≤ 30   （顶栏 30 / 分类 20 / Dock 25）
+       播放浮窗场景       60    ← 整个浮窗是一个场景，整体压在首页之上
+         └ 视频内容        0    （inset:0 铺满，尺寸不随面板变化）
+         └ 悬浮控制栏     50
+         └ 信息面板       45    （浮层，收起后淡出右移）
+
+   否则会出现「首页的左下控件浮在播放器之上」这类穿插——
+   两个场景的层号一旦在同一参照系里比较，就先高者胜。
+   ========================================================================== */
+/* 首页预览：内部滚动，用于演示顶栏与分类导航的真实吸顶行为。
+   Dock 必须放在这个容器之外，否则它会随内容一起滚走（绝对定位在滚动容器内不固定）。 */
+.app-scroll { position: relative; height: 720px; overflow-y: auto; overflow-x: hidden; }
+.app-scroll::-webkit-scrollbar { width: 6px; }
+.app-scroll::-webkit-scrollbar-thumb { background: var(--fill-4); border-radius: 9999px; }
+.app-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 顶栏（TopBarHeight 64 / TopBarControlHeight 46） ---------- */
+.topbar { height: var(--topbar-h); display: flex; align-items: center; gap: var(--space-4);
+          padding: 0 var(--space-5); position: sticky; top: 0; z-index: 30; }
+.topbar .logo { display: flex; align-items: center; gap: var(--space-2); font-weight: var(--fw-bold);
+                font-size: 17px; color: var(--text-1); }
+.topbar .logo .mark { color: var(--theme-primary); }
+
+.search {
+  flex: 1; max-width: 520px; height: var(--topbar-control-h); margin: 0 auto;
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: 0 var(--space-2) 0 var(--space-4);
+  border-radius: var(--radius-full);
+  background: var(--surface-elevated); border: 1px solid var(--border-popover);
+  box-shadow: var(--shadow-1), var(--edge-glow);
+  transition: border-color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
+}
+.search:focus-within { border-color: var(--theme-60);
+                       box-shadow: 0 0 0 3px var(--theme-20), var(--shadow-2); }
+.search svg { color: var(--text-4); }
+.search input { flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-1);
+                font-family: inherit; font-size: var(--fs-body); }
+.search input::placeholder { color: var(--text-4); }
+.search .go { height: 34px; padding: 0 var(--space-4); border: 0; cursor: pointer; border-radius: var(--radius-full);
+              background: var(--theme-primary); color: var(--text-on-accent); font-family: inherit;
+              font-size: var(--fs-control); font-weight: var(--fw-semibold);
+              transition: filter var(--dur-fast) var(--ease-standard); }
+.search .go:hover { filter: brightness(1.1); }
+
+.topbar .actions { display: flex; align-items: center; gap: var(--space-1); margin-left: auto; }
+.iconbtn {
+  width: 38px; height: 38px; display: grid; place-items: center; border: 0; cursor: pointer;
+  border-radius: var(--radius-full); background: transparent; color: var(--text-2);
+  position: relative; transition: background var(--dur-fast) var(--ease-standard),
+                                color var(--dur-fast) var(--ease-standard);
+}
+.iconbtn:hover { background: var(--fill-2); color: var(--text-1); }
+.iconbtn:active { transform: scale(0.94); }
+.iconbtn .dot { position: absolute; top: 8px; right: 9px; width: 6px; height: 6px;
+                border-radius: 50%; background: var(--bili-pink); }
+.avatar { width: 34px; height: 34px; border-radius: 50%; border: 2px solid var(--border-popover);
+          background: linear-gradient(135deg, var(--bili-blue), var(--bili-pink)); cursor: pointer; }
+
+/* ---------- 分类导航（吸顶） ---------- */
+.tabs { display: flex; align-items: center; justify-content: center; gap: var(--space-1);
+        padding-bottom: var(--space-4); position: sticky; top: var(--topbar-h); z-index: 20; }
+.tabs .pill { display: flex; gap: 2px; padding: 4px; border-radius: var(--radius-full);
+              background: var(--surface-elevated); border: 1px solid var(--border-popover);
+              box-shadow: var(--shadow-1), var(--edge-glow); }
+.tab { border: 0; cursor: pointer; font-family: inherit; font-size: var(--fs-control);
+       font-weight: var(--fw-medium); color: var(--text-3); background: transparent;
+       padding: 8px 18px; border-radius: var(--radius-full);
+       display: inline-flex; align-items: center; gap: 6px;
+       transition: color var(--dur-fast) var(--ease-standard), background var(--dur-fast) var(--ease-standard); }
+.tab:hover { color: var(--text-1); background: var(--fill-1); }
+.tab[aria-selected="true"] { background: var(--theme-primary); color: var(--text-on-accent);
+                             box-shadow: 0 2px 8px -2px var(--theme-60); }
+
+/* ---------- 左侧浮动 Dock ---------- */
+.dock { position: absolute; left: var(--space-3); top: 50%; transform: translateY(-50%); z-index: 25;
+        display: flex; flex-direction: column; gap: var(--space-2); }
+.dock .iconbtn { width: 42px; height: 42px; background: var(--surface-elevated-strong);
+                 border: 1px solid var(--border-popover); box-shadow: var(--shadow-2), var(--edge-glow); }
+.dock .iconbtn[aria-current="true"] { color: var(--theme-primary); }
+
+/* ---------- 封面网格 ---------- */
+.feed { padding: var(--space-2) var(--space-6) var(--space-12); }
+.rail { display: grid; gap: var(--space-4) var(--space-3);
+        grid-template-columns: repeat(var(--cols, 6), minmax(0, 1fr)); }
+
+.card { border-radius: var(--card-radius); cursor: pointer; padding: var(--space-2);
+        background: transparent; border: 1px solid transparent;
+        transition: background var(--dur-fast) var(--ease-standard),
+                    box-shadow var(--dur-fast) var(--ease-standard),
+                    transform var(--dur-fast) var(--ease-standard),
+                    border-color var(--dur-fast) var(--ease-standard); }
+.card:hover { background: var(--surface-content); border-color: var(--border-popover);
+              box-shadow: var(--shadow-card-hover); transform: translateY(-2px) scale(1.02); }
+.card:active { transform: translateY(-1px) scale(1.0); }
+
+.thumb { position: relative; aspect-ratio: 16 / 9; border-radius: var(--media-radius);
+         overflow: hidden; background: var(--surface-solid); }
+.thumb .art { position: absolute; inset: 0; display: grid; place-items: center; padding: var(--space-3);
+              transition: transform var(--dur-moderate) var(--ease-standard); }
+.card:hover .thumb .art { transform: scale(1.04); }
+.thumb .art span { font-size: 16px; font-weight: var(--fw-bold); color: #fff; text-align: center;
+                   line-height: 1.25; letter-spacing: -0.01em;
+                   text-shadow: 0 2px 10px rgba(0,0,0,0.55);
+                   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+                   overflow: hidden; }
+
+/* 封面信息层：数字带文字阴影保证任意封面图上都可读 */
+.thumb .stats { position: absolute; left: var(--space-2); bottom: 6px; display: flex; gap: var(--space-3);
+                font-size: 11px; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+.thumb .stats i { display: inline-flex; align-items: center; gap: 4px; font-style: normal;
+                  font-variant-numeric: tabular-nums; }
+.thumb .dust { position: absolute; right: var(--space-2); bottom: 6px; font-size: 11px; color: #fff;
+               font-variant-numeric: tabular-nums; text-shadow: 0 1px 3px rgba(0,0,0,0.8); }
+.thumb .progress { position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+                   background: rgba(255,255,255,0.25); }
+.thumb .progress i { display: block; height: 100%; background: var(--bili-pink); }
+.thumb .badge-live { position: absolute; left: var(--space-2); top: var(--space-2); }
+.thumb .hover-actions { position: absolute; right: 6px; top: 6px; display: flex; gap: 4px;
+                        opacity: 0; transform: translateY(-4px);
+                        transition: opacity var(--dur-fast) var(--ease-standard),
+                                    transform var(--dur-fast) var(--ease-standard); }
+.card:hover .thumb .hover-actions { opacity: 1; transform: none; }
+.thumb .hover-actions button { width: 28px; height: 28px; border: 0; cursor: pointer;
+                               display: grid; place-items: center; border-radius: var(--radius-md);
+                               background: rgba(0,0,0,0.55); color: #fff; }
+.thumb .hover-actions button:hover { background: var(--theme-primary); }
+
+.card .title { margin: var(--space-2) 2px 0; font-size: var(--fs-control); line-height: var(--lh-control);
+               font-weight: var(--fw-medium); color: var(--text-1);
+               display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+               overflow: hidden; min-height: calc(var(--lh-control) * 2); }
+.card .byline { display: flex; align-items: center; gap: 6px; margin: var(--space-2) 2px 0;
+                color: var(--text-4); font-size: 11px; }
+.card .byline .up { width: 18px; height: 18px; border-radius: 50%; flex: none;
+                    background: linear-gradient(135deg, var(--bili-blue), var(--bili-pink)); }
+.card .byline .name { color: var(--text-3); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.card .byline .sep { opacity: 0.5; }
+
+/* 状态实测区固定 5 列语义，用 auto-fill 保证窄屏不溢出 */
+#state-rail { grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); }
+
+/* ---------- 骨架屏 / 空态 / 错误态 ---------- */
+.sk { border-radius: var(--radius-md); background: var(--skeleton); animation: pulse 1.5s var(--ease-standard) infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+.sk-thumb { aspect-ratio: 16/9; border-radius: var(--media-radius); }
+.sk-line { height: 11px; margin-top: var(--space-2); }
+
+.state { display: grid; place-items: center; gap: var(--space-3); padding: var(--space-10) var(--space-4);
+         text-align: center; }
+.state .glyph { width: 64px; height: 64px; display: grid; place-items: center; border-radius: var(--radius-full);
+                background: var(--fill-1); color: var(--text-4); }
+.state h4 { margin: 0; font-size: var(--fs-title); font-weight: var(--fw-semibold); }
+.state p { margin: 0; color: var(--text-3); font-size: var(--fs-control); max-width: 42ch; line-height: 1.7; }
+.btn { border: 0; cursor: pointer; font-family: inherit; font-size: var(--fs-control);
+       font-weight: var(--fw-semibold); padding: 9px var(--space-5); border-radius: var(--radius-full);
+       display: inline-flex; align-items: center; gap: 6px;
+       transition: filter var(--dur-fast) var(--ease-standard), transform var(--dur-fast) var(--ease-emphasized); }
+.btn:active { transform: scale(0.97); }
+.btn.accent { background: var(--theme-primary); color: var(--text-on-accent); }
+.btn.accent:hover { filter: brightness(1.1); }
+.btn.ghost { background: var(--fill-2); color: var(--text-1); }
+.btn.ghost:hover { background: var(--fill-3); }
+
+/* ============================================================================
+   播放浮窗（点击视频卡片后弹出）
+   ---------------------------------------------------------------------------
+   播放窗口本身的结构不动：视频区铺满浮窗，控制栏悬浮在画面下沿，
+   右侧信息面板以浮层形式叠在画面之上（不挤窄视频区）。
+
+   控制栏两种形态：播放期间只显示紧贴视频下沿、横跨整个播放器的一条<b>3px 进度线</b>（无时间无按钮）；鼠标移入控制栏区域
+   才展开为完整控制栏（含弹幕输入、清晰度、倍速、音量等），暂停态则常驻完整形态。
+
+   面板的唤出方式：面板本体即热区——鼠标进入展开为 400px，移出收回为 200px。
+   播放器（视频 + 控制栏）宽度<b>全程固定</b>：收起态面板不遮挡任何控件；
+   展开态面板才部分遮挡画面，这是展开时的正常代价。
+   收起态不是空白条，而是面板自身收回到<b>一半宽度</b>：
+   内容仍按 400px 排版、右半被裁掉，因此左侧信息（标题 / UP 主 / 互动）仍可见，
+   用户能看出这里是什么，而不是靠一条装饰性渐变去暗示。
+
+   ── 2026-10 技术选型变更 ──────────────────────────────────────────────
+   旧底座：Avalonia + NativeControlHost 原生视图，视频层与 UI 层分属两个渲染管线，
+   由此产生两条硬约束（原生视图不可被覆盖、不跟随 RenderTransform）。
+   新底座：GPUI Metal renderer —— 视频帧（CVPixelBuffer, NV12 双平面 + IOSurface-backed）
+   与 GPUI 控件在**同一条渲染管线**里合成（见 spike-gpui-kit 的叠层验证）。
+
+   于是两条约束整体失效：面板与控制栏都可以浮在画面之上、可走 opacity/transform 过渡。
+   仍然成立的一条：压在画面上的文字必须有兜底（控制栏用底部渐变遮罩，提示文字用文字阴影）。
+   ========================================================================== */
+/* 播放浮窗 = 一个整体场景（z-index 60），高于全部首页层（顶栏 30 / Dock 25）。
+   浮窗内部的层号只在它自己的 stacking context 内比较，不与首页层号混用。
+   position: relative 是必需的——未定位元素的 z-index 不生效。
+   对应用代码：此值即 LayerPlayer（见第 02 节层级令牌）。 */
+.stage.pw-scene { position: relative; z-index: 60; }
+.pw-stage { position: relative; padding: var(--space-6);
+            background-color: var(--bg-homepage);
+            background-image: var(--bg-glow), var(--bg-gradient); }
+
+/* 顶栏：浮窗从它下方展开，顶栏本身保持可用（参考截图里搜索框与图标仍然可见） */
+.pw-topbar { display: flex; align-items: center; gap: var(--space-4); height: var(--topbar-h);
+             margin: calc(var(--space-6) * -1) calc(var(--space-6) * -1) var(--space-5);
+             padding: 0 var(--space-5); border-bottom: 1px solid var(--border-subtle);
+             background: var(--surface-elevated-strong); }
+.pw-topbar .logo { display: flex; align-items: center; gap: var(--space-2);
+                   font-weight: var(--fw-bold); font-size: 17px; }
+.pw-topbar .logo .mark { color: var(--theme-primary); }
+.pw-topbar .search { max-width: 460px; }
+
+/* 浮窗本体：视频区铺满整窗（面板是浮层，不改变视频尺寸） */
+.pw { position: relative; height: 600px;
+      border-radius: var(--radius-lg); overflow: hidden;
+      background: #0B0F14; border: 1px solid var(--border-popover);
+      box-shadow: var(--shadow-glass-modal); }
+.pw-main { position: absolute; inset: 0; }
+
+/* ---------- 视频渲染区 ---------- */
+.pw-video { position: absolute; inset: 0; overflow: hidden;
+            background:
+              radial-gradient(72% 44% at 20% 88%, #6B5A3C 0%, #463A26 58%, transparent 100%),
+              radial-gradient(88% 40% at 84% 94%, #7C6A46 0%, #4E422C 62%, transparent 100%),
+              linear-gradient(180deg, #12304C 0%, #1F4E75 42%, #35709A 60%, #6E5F42 76%, #352C1C 100%); }
+/* 远山与云，让画面有视频感（纯装饰，不参与信息表达） */
+.pw-video .scenery { position: absolute; inset: 0; pointer-events: none; opacity: .9;
+                     background:
+                       radial-gradient(38% 5% at 30% 30%, rgba(255,255,255,.10) 0%, transparent 100%),
+                       radial-gradient(26% 4% at 62% 22%, rgba(255,255,255,.08) 0%, transparent 100%),
+                       radial-gradient(52% 12% at 72% 46%, #2C4A34 0%, transparent 100%); }
+/* 空投轨迹（参考画面里的白色抛物线箭头） */
+.pw-video .arc { position: absolute; left: 44%; top: 46%; width: 60px; height: 30px;
+                 border-top: 2px solid rgba(255,255,255,.75); border-radius: 50% 50% 0 0;
+                 transform: rotate(-18deg); }
+
+.pw-play { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+           width: 84px; height: 84px; border-radius: 50%; display: grid; place-items: center;
+           background: rgba(0, 0, 0, 0.42); border: 1px solid rgba(255, 255, 255, 0.30);
+           color: #fff; cursor: pointer;
+           transition: transform var(--dur-normal) var(--ease-emphasized),
+                       background var(--dur-fast) var(--ease-standard),
+                       opacity var(--dur-normal) var(--ease-standard); }
+.pw-play:hover { transform: translate(-50%, -50%) scale(1.06); background: var(--theme-60); }
+/* 播放中：中央按钮让位给画面 */
+.pw.playing .pw-play { opacity: 0; pointer-events: none; }
+
+/* 视频区左下角的浮层提示（1人正在看 / 弹幕开关）：让开悬浮控制栏的高度 */
+.pw-watch { position: absolute; left: var(--space-4); bottom: 98px; z-index: 6;
+            display: flex; align-items: center; gap: var(--space-3);
+            font-size: var(--fs-caption); color: rgba(255,255,255,.85);
+            text-shadow: 0 1px 3px rgba(0,0,0,.7);
+            transition: bottom var(--dur-normal) var(--ease-standard); }
+.pw-watch button { border: 0; background: transparent; color: inherit; cursor: pointer;
+                   display: inline-flex; align-items: center; gap: 4px; font-family: inherit;
+                   font-size: var(--fs-caption); }
+
+/* ---------- 控制栏：悬浮在画面之上，播放中自动隐藏 ---------- */
+/* 底部渐变遮罩保证控件与文字在任意画面上都可读——这是浮层方案唯一的硬性补偿 */
+/* 控制栏右边界固定停在「收起态面板宽度」处（200px）：
+   ① 收起态：面板只占 200px，控制栏控件完整可点，不被遮挡；
+   ② 展开态：面板扩展到 400px，允许它盖住控制栏右端——这是展开时的正常代价；
+   ③ 播放器（视频 + 控制栏）宽度由此全程固定，不随面板伸缩。 */
+.pw-ctrl { position: absolute; left: 0; right: 200px; bottom: 0; z-index: 3;
+           background: linear-gradient(to top,
+                       rgba(0,0,0,.82) 0%, rgba(0,0,0,.62) 42%, rgba(0,0,0,.28) 74%, transparent 100%);
+           transition: opacity var(--dur-normal) var(--ease-standard),
+                       transform var(--dur-normal) var(--ease-standard); }
+/* 键盘聚焦到控制栏内任一控件时，完整控制栏必须可见（可达性兜底） */
+.pw-ctrl:focus-within .pw-dm,
+.pw-ctrl:focus-within .pw-bar { opacity: 1; pointer-events: auto; }
+.pw-ctrl:focus-within .pw-mini { opacity: 0; }
+
+/* ---------- 简略进度条（播放期间的默认形态） ----------
+   只有一条细进度条 + 播放/暂停 + 时间，压在画面底部；
+   鼠标移入控制栏区域时它让位给完整控制栏。 */
+/* 用负偏移抵消 .pw-main 的 inset:0，使简略条相对整个播放器定位：
+   紧贴视频最下方，长度横跨整个播放器（含右侧面板下方那段）。 */
+.pw-mini { position: absolute; left: 0; right: -200px; bottom: 0; height: 40px;
+           display: flex; align-items: flex-end;
+           opacity: 0; pointer-events: none;
+           transition: opacity var(--dur-normal) var(--ease-standard); }
+/* 播放中面板展开时，简略条仍占满整个播放器宽度 */
+.pw:not(.collapsed) .pw-mini { right: -400px; }
+.pw-mini .mini-track { width: 100%; height: 3px; position: relative;
+                       background: rgba(255,255,255,.28); cursor: pointer; }
+/* 40px 是 hover 热区高度；进度线本身靠 align-items:flex-end 贴在视频最下沿 */
+.pw-mini .mini-track i { position: absolute; left: 0; top: 0; bottom: 0;
+                         background: var(--theme-primary); }
+.pw-mini .mini-track b { position: absolute; top: 50%; width: 10px; height: 10px; border-radius: 50%;
+                         background: #fff; transform: translate(-50%, -50%);
+                         box-shadow: var(--shadow-1); opacity: 0;
+                         transition: opacity var(--dur-fast) var(--ease-standard); }
+.pw-mini:hover .mini-track b { opacity: 1; }
+
+/* 播放中：完整控制栏收起、简略条出现 —— 这就是「隐藏状态」 */
+.pw.playing .pw-dm,
+.pw.playing .pw-bar { opacity: 0; pointer-events: none; }
+.pw.playing .pw-mini { opacity: 1; pointer-events: auto; }
+/* 鼠标移入 / 键盘聚焦控制栏：完整栏展开、简略条让位（对应参考图的展开态） */
+.pw.playing .pw-ctrl:hover .pw-mini { opacity: 0; pointer-events: none; }
+.pw.playing .pw-ctrl:hover .pw-dm,
+.pw.playing .pw-ctrl:hover .pw-bar { opacity: 1; pointer-events: auto; }
+/* 控制栏的右边界必须停在面板左侧：面板收起时是 200px、展开时是 400px，
+   若横跨整窗，「1080P 高清 / 倍速 / 音量」会被面板压住——这些是必须可点的控件。
+   左侧区域则始终是完整可用的播放器区域。 */
+/* 完整控制栏的两个块：默认可见；播放中由 .pw.playing 收起，hover 时展开 */
+.pw-dm, .pw-bar { transition: opacity var(--dur-normal) var(--ease-standard); }
+.pw-dm { display: flex; align-items: center; gap: var(--space-3); height: 38px;
+         padding: 0 var(--space-4); }
+.pw-dm .hint { flex: 1; font-size: var(--fs-caption); color: rgba(255,255,255,.45); }
+.pw-dm .send { border: 0; cursor: pointer; font-family: inherit; font-size: var(--fs-caption);
+               font-weight: var(--fw-semibold); padding: 5px var(--space-4);
+               border-radius: var(--radius-md); background: var(--theme-primary); color: #fff; }
+.pw-dm .send:hover { filter: brightness(1.1); }
+.pw-dm .polite { font-size: var(--fs-caption); color: rgba(255,255,255,.45); cursor: pointer; }
+.pw-dm .polite:hover { color: rgba(255,255,255,.8); }
+
+.pw-bar { display: flex; align-items: center; gap: var(--space-2); height: 50px;
+          padding: 0 var(--space-5); color: rgba(255,255,255,.90); }
+.pw-bar .time { font-size: var(--fs-caption); font-variant-numeric: tabular-nums;
+                color: rgba(255,255,255,.72); }
+.pw-bar .track { flex: 1; height: 4px; border-radius: var(--radius-full); position: relative;
+                 background: rgba(255,255,255,.30); cursor: pointer; margin: 0 var(--space-2); }
+.pw-bar .track i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: var(--radius-full);
+                   background: var(--theme-primary); }
+.pw-bar .track b { position: absolute; top: 50%; width: 12px; height: 12px; border-radius: 50%;
+                   background: #fff; transform: translate(-50%, -50%); box-shadow: var(--shadow-1); }
+.pw-bar .pill { border: 0; background: transparent; color: inherit; cursor: pointer;
+                font-family: inherit; font-size: var(--fs-caption); padding: 4px 8px;
+                border-radius: var(--radius-sm); }
+.pw-bar .pill:hover { background: rgba(255,255,255,.16); }
+.pw-bar .iconbtn { width: 32px; height: 32px; color: rgba(255,255,255,.90); }
+.pw-bar .iconbtn:hover { background: rgba(255,255,255,.16); color: #fff; }
+
+/* ---------- 信息面板：右侧浮层，面板本体兼作 hover 热区 ----------
+   展开态 400px（贴右边缘、通高、无圆角无阴影、靠左侧 1px 分隔线划分层级）；
+   收起态不是消失，而是<b>收回到一半宽度（200px）</b>——右侧可见的那一条就是热区，
+   鼠标进入即展开、移出即收回。视频区尺寸全程不变（inset:0）。 */
+.pw-side { position: absolute; right: 0; top: 0; bottom: 0; z-index: 5;
+           width: 400px; overflow: hidden;
+           background: var(--surface-elevated-solid);
+           border-left: 1px solid var(--border-subtle);
+           transition: width var(--dur-normal) var(--ease-standard); }
+/* 内容按 400px 排版，容器收窄时右侧被裁掉——保留左侧信息（标题 / UP 主 / 互动），
+   这样收起态那一条不是空白，用户能看出这里是什么。 */
+.pw-side-inner { width: 400px; min-width: 400px; height: 100%;
+                 display: flex; flex-direction: column; }
+.pw.collapsed .pw-side { width: 200px; }
+/* 键盘 Tab 进入收起到一半的面板时自动展开，避免焦点落在被裁掉的区域 */
+.pw.collapsed .pw-side:focus-within { width: 400px; }
+
+.pw-head { display: flex; align-items: flex-start; gap: var(--space-2);
+           padding: var(--space-4) var(--space-4) var(--space-2); }
+.pw-head h4 { margin: 0; flex: 1; font-size: var(--fs-title); font-weight: var(--fw-semibold);
+              line-height: 1.5; }
+/* 面板左上角的收起按钮（骑在面板左边界上）。它同时是收起态下的「展开」入口：
+   面板收起后整块淡出，但这枚按钮保持可见，图标由 setSidebar 切为 ‹ 。
+   注意：这里不能再用 flex 布局的写法，否则会覆盖上面的绝对定位。 */
+.pw-x { position: absolute; left: -16px; top: 8px; z-index: 8;
+        width: 32px; height: 32px; border: 0; border-radius: 50%;
+        display: grid; place-items: center; cursor: pointer;
+        background: rgba(20,22,26,.72); color: #fff;
+        border: 1px solid var(--border-popover);
+        transition: background var(--dur-fast) var(--ease-standard),
+                    opacity var(--dur-fast) var(--ease-standard); }
+.pw-x:hover { background: var(--theme-primary); }
+
+.pw-meta { display: flex; align-items: center; gap: var(--space-4);
+           padding: 0 var(--space-4) var(--space-3);
+           color: var(--text-4); font-size: var(--fs-caption); }
+.pw-meta i { display: inline-flex; align-items: center; gap: 4px; font-style: normal;
+             font-variant-numeric: tabular-nums; }
+
+.pw-up { padding: 0 var(--space-4) var(--space-4); }
+.pw-up-row { display: flex; gap: var(--space-3); }
+.pw-up-avatar { width: 46px; height: 46px; border-radius: 50%; flex: none;
+                background: linear-gradient(135deg, #7BD3F0, #F0A6C0); }
+.pw-up-name { display: flex; align-items: center; gap: var(--space-2);
+              font-size: var(--fs-control); font-weight: var(--fw-semibold); color: var(--text-1); }
+.pw-up-msg { font-size: 11px; font-weight: var(--fw-regular); color: var(--text-4);
+             border: 1px solid var(--border-strong); border-radius: var(--badge-radius);
+             padding: 0 6px; cursor: pointer; }
+.pw-up-msg:hover { color: var(--theme-primary); border-color: var(--theme-50); }
+.pw-up-sign { margin-top: 2px; font-size: var(--fs-caption); color: var(--text-4); line-height: 1.5;
+              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.pw-up-btns { display: flex; gap: var(--space-2); margin-top: var(--space-3); }
+.pw-up-btns .charge { flex: none; height: 30px; padding: 0 var(--space-4); border: 0; cursor: pointer;
+                      border-radius: var(--radius-md); background: var(--theme-primary); color: #fff;
+                      font-family: inherit; font-size: var(--fs-caption); font-weight: var(--fw-semibold); }
+.pw-up-btns .charge:hover { filter: brightness(1.1); }
+.pw-up-btns .follow { flex: 1; height: 30px; border: 0; cursor: pointer; border-radius: var(--radius-md);
+                      background: var(--fill-2); color: var(--text-2); font-family: inherit;
+                      font-size: var(--fs-caption); display: inline-flex; align-items: center;
+                      justify-content: center; gap: 5px; }
+.pw-up-btns .follow:hover { background: var(--fill-3); }
+
+.pw-acts { display: flex; align-items: center; justify-content: space-around;
+           padding: var(--space-2) var(--space-4); border-top: 1px solid var(--border-subtle); }
+.pw-act { display: inline-flex; flex-direction: column; align-items: center; gap: 2px;
+          border: 0; background: transparent; color: var(--text-3); font-family: inherit;
+          font-size: 11px; cursor: pointer; padding: var(--space-1) var(--space-2);
+          border-radius: var(--radius-md); font-variant-numeric: tabular-nums;
+          transition: color var(--dur-fast) var(--ease-standard); }
+.pw-act:hover { color: var(--theme-primary); background: var(--fill-1); }
+
+.pw-tags { display: flex; flex-wrap: wrap; gap: var(--space-2);
+           padding: var(--space-3) var(--space-4); border-top: 1px solid var(--border-subtle); }
+.pw-tag { padding: 2px 10px; border-radius: var(--badge-radius); background: var(--fill-2);
+          color: var(--text-3); font-size: 11px; cursor: pointer;
+          transition: background var(--dur-fast) var(--ease-standard); }
+.pw-tag:hover { background: var(--theme-20); color: var(--theme-primary); }
+
+.pw-tabs { display: flex; border-top: 1px solid var(--border-subtle); }
+.pw-tab { flex: 1; height: 42px; border: 0; background: transparent; color: var(--text-3);
+          font-family: inherit; font-size: var(--fs-control); font-weight: var(--fw-medium);
+          cursor: pointer; position: relative; }
+.pw-tab:hover { color: var(--text-1); }
+.pw-tab[aria-selected="true"] { color: var(--theme-primary); font-weight: var(--fw-semibold); }
+.pw-tab[aria-selected="true"]::after { content: ""; position: absolute; left: 50%; bottom: 0;
+                                       transform: translateX(-50%); width: 28px; height: 2px;
+                                       border-radius: 2px; background: var(--theme-primary); }
+
+.pw-cmts { flex: 1; min-height: 0; overflow-y: auto; padding: var(--space-4); }
+.pw-cmt-head { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-3); }
+.pw-cmt-head b { font-size: var(--fs-control); font-weight: var(--fw-semibold); }
+.pw-sort { display: flex; gap: var(--space-3); margin-left: auto; font-size: var(--fs-caption);
+           color: var(--text-4); }
+.pw-sort span { cursor: pointer; }
+.pw-sort span.on { color: var(--text-1); font-weight: var(--fw-medium); }
+.pw-cmt { display: flex; gap: var(--space-3); }
+.pw-cmt .av { width: 32px; height: 32px; border-radius: 50%; flex: none;
+              background: linear-gradient(135deg, #8AD4EE, #F2B8CE); }
+.pw-cmt p { margin: 0; font-size: var(--fs-control); color: var(--text-1); line-height: 1.6; }
+.pw-empty { text-align: center; color: var(--text-4); font-size: var(--fs-caption);
+            padding: var(--space-6) 0; }
+
+/* ---------- 浮窗右侧浮动工具列 ---------- */
+/* 面板收起后不再保留窄条：收起/展开由面板左上角骑边界的那枚按钮承担，
+   这样右侧不会多出一条浮层（与参考图 2/图 3 的贴边两栏一致）。 */
+
+/* 状态切换按钮（仅预览用，非设计的一部分） */
+.pw-ctl { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-4);
+          padding: var(--space-3) var(--space-4); border-radius: var(--radius-md);
+          background: var(--fill-1); border: 1px dashed var(--border-strong); }
+.pw-ctl .label { font-size: var(--fs-caption); color: var(--text-3); }
+
+/* ---------- 登录页 ---------- */
+.login-stage { display: grid; place-items: center; padding: var(--space-12) var(--space-4); }
+.login-card { width: 380px; padding: 32px 36px; border-radius: var(--modal-radius);
+              background: var(--surface-elevated); border: 1px solid var(--border-popover);
+              box-shadow: var(--shadow-glass-modal); }
+.qr { width: 220px; height: 220px; margin: 0 auto; border-radius: var(--media-radius); background: #fff;
+      display: grid; place-items: center; position: relative; }
+.qr .pattern { width: 196px; height: 196px; opacity: 0.9;
+               background:
+                 repeating-conic-gradient(#15181E 0% 25%, #fff 0% 50%) 0 0 / 14px 14px;
+               border-radius: 6px; }
+.qr .scan { position: absolute; inset: 0; border-radius: var(--media-radius);
+            background: rgba(0, 161, 214, 0.86); display: grid; place-items: center; color: #fff;
+            font-size: var(--fs-control); font-weight: var(--fw-semibold); }
+
+/* ---------- 卡片解剖图 ---------- */
+.anatomy { position: relative; }
+.measure { position: absolute; font-size: 10px; font-family: ui-monospace, Menlo, monospace;
+           color: var(--theme-primary); background: var(--surface-solid); padding: 1px 5px;
+           border-radius: var(--radius-sm); border: 1px solid var(--theme-40); white-space: nowrap; }
+.callout { display: flex; gap: var(--space-3); padding: var(--space-3) var(--space-4);
+           border-radius: var(--radius-md); border-left: 3px solid; font-size: var(--fs-control);
+           line-height: 1.7; }
+.callout.info { background: rgba(58, 191, 248, 0.08); border-color: var(--status-info); }
+.callout.warn { background: rgba(245, 158, 11, 0.08); border-color: var(--status-warning); }
+.callout.err  { background: rgba(229, 72, 77, 0.08);  border-color: var(--status-error); }
+.callout.ok   { background: rgba(41, 163, 131, 0.08); border-color: var(--status-success); }
+.callout b { font-weight: var(--fw-semibold); }
+.callout .ti { flex: none; margin-top: 2px; }
+
+ul.clean { margin: 0; padding-left: 1.15em; color: var(--text-2); font-size: var(--fs-control); line-height: 1.9; }
+ul.clean li::marker { color: var(--theme-primary); }
+.checklist { list-style: none; margin: 0; padding: 0; }
+.checklist li { display: flex; gap: var(--space-3); align-items: flex-start; padding: 9px 0;
+                border-bottom: 1px solid var(--border-subtle); font-size: var(--fs-control);
+                color: var(--text-2); line-height: 1.7; }
+.checklist li:last-child { border-bottom: 0; }
+.checklist .box { flex: none; width: 16px; height: 16px; margin-top: 3px; border-radius: var(--radius-sm);
+                  border: 1.5px solid var(--text-4); }
+.checklist .box.done { background: var(--theme-primary); border-color: var(--theme-primary);
+                       display: grid; place-items: center; color: #fff; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: var(--space-2) var(--space-4);
+      font-size: var(--fs-control); }
+.kv dt { color: var(--text-4); } .kv dd { margin: 0; color: var(--text-2); }
+.foot { text-align: center; color: var(--text-4); font-size: var(--fs-caption);
+        padding: var(--space-8) 0 var(--space-10); }
+@media (max-width: 1080px) { .layout { grid-template-columns: 1fr; } .toc { display: none; } }
+</style>
+</head>
+<body>
+
+<!-- ===================== SVG 图标集（Phosphor 风格线性，禁止 emoji） ===================== -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5 21 21"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5.2l3.2 2"/></symbol>
+    <symbol id="i-bookmark" viewBox="0 0 24 24"><path d="M6.5 3.5h11v17l-5.5-4.2-5.5 4.2z"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8.5a6 6 0 1 0-12 0c0 6.5-2 7.5-2 7.5h16s-2-1-2-7.5"/><path d="M10.3 19.5a2 2 0 0 0 3.4 0"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M8.5 5.6v12.8L19 12z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9.5 5v14M14.5 5v14" stroke-width="2.4"/></symbol>
+    <symbol id="i-play-o" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10.2 8.6 15.5 12l-5.3 3.4z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-danmaku" viewBox="0 0 24 24"><path d="M4 5.5h16v10H10l-6 4.2z"/><path d="M8 9.5h8M8 12.2h5"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 10.8 12 4l8 6.8V20H4z"/><path d="M9.8 20v-5.2h4.4V20"/></symbol>
+    <symbol id="i-trend" viewBox="0 0 24 24"><path d="M4 16.5 9 11l3.6 2.8L20 7"/><path d="M15.2 7H20v4.8"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6.6" height="6.6" rx="1.6"/><rect x="13.4" y="4" width="6.6" height="6.6" rx="1.6"/><rect x="4" y="13.4" width="6.6" height="6.6" rx="1.6"/><rect x="13.4" y="13.4" width="6.6" height="6.6" rx="1.6"/></symbol>
+    <symbol id="i-trophy" viewBox="0 0 24 24"><path d="M7.5 4h9v5.2a4.5 4.5 0 0 1-9 0z"/><path d="M7.5 6H4.5v1.6a3 3 0 0 0 3 3M16.5 6h3v1.6a3 3 0 0 1-3 3"/><path d="M12 13.7V17M9 20h6"/></symbol>
+    <symbol id="i-live" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.6"/><path d="M7 7a7 7 0 0 0 0 10M17 17a7 7 0 0 0 0-10"/><path d="M4.4 4.4a11 11 0 0 0 0 15.2M19.6 19.6a11 11 0 0 0 0-15.2"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 4 2.5 5.4 5.9.8-4.3 4.1 1.1 5.9-5.2-2.9-5.2 2.9 1.1-5.9L3.6 10.2l5.9-.8z"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.2A8.4 8.4 0 0 1 9.8 4 8.6 8.6 0 1 0 20 14.2"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3.6 8.4 4.3L12 12.2 3.6 7.9z"/><path d="m4 12.4 8 4.1 8-4.1M4 16.4l8 4.1 8-4.1"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.2M12 16.2h.01"/></symbol>
+    <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M4.4 13.4h3.4l1.4 2.4h5.6l1.4-2.4h3.4"/><path d="M5.6 4.6h12.8l2 8.8V19H3.6v-5.6z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20.2 12a8.2 8.2 0 1 1-2.4-5.8"/><path d="M20.4 4v5h-5"/></symbol>
+    <symbol id="i-wifi-off" viewBox="0 0 24 24"><path d="M3 4l18 16"/><path d="M8.6 12.4a5 5 0 0 1 6.8 0M5.4 9.2a9.6 9.6 0 0 1 3-1.7M18.6 9.2a9.6 9.6 0 0 0-3.4-1.8"/><path d="M12 19h.01"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M9 4H4v5M15 4h5v5M15 20h5v-5M9 20H4v-5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.6 4.6 4.6L19 6.8"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 14.5a1.6 1.6 0 0 0 .3 1.8l.1.1a1.9 1.9 0 1 1-2.7 2.7l-.1-.1a1.6 1.6 0 0 0-2.7 1.1v.3a1.9 1.9 0 1 1-3.8 0v-.2a1.6 1.6 0 0 0-2.8-1.2l-.1.1a1.9 1.9 0 1 1-2.7-2.7l.1-.1a1.6 1.6 0 0 0-1.1-2.7h-.3a1.9 1.9 0 1 1 0-3.8h.2a1.6 1.6 0 0 0 1.2-2.8l-.1-.1a1.9 1.9 0 1 1 2.7-2.7l.1.1a1.6 1.6 0 0 0 2.7-1.1v-.3a1.9 1.9 0 1 1 3.8 0v.2a1.6 1.6 0 0 0 2.8 1.2l.1-.1a1.9 1.9 0 1 1 2.7 2.7l-.1.1a1.6 1.6 0 0 0 1.1 2.7h.3a1.9 1.9 0 1 1 0 3.8h-.2a1.6 1.6 0 0 0-1.5 1.1z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11M7.8 10.8 12 15l4.2-4.2"/><path d="M4.5 19.5h15"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5.5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="18.5" r="1.4" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-tv" viewBox="0 0 24 24"><rect x="2.5" y="6.5" width="19" height="12.5" rx="2.4"/><path d="M8 3.4 12 6.5l4-3.1"/></symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="M14.5 6.5 9 12l5.5 5.5"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="M9.5 6.5 15 12l-5.5 5.5"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5.5 12h13"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5"/></symbol>
+    <symbol id="i-thumb" viewBox="0 0 24 24"><path d="M7.5 20.5V10l4.3-6a2 2 0 0 1 3.4 2l-1.4 3.6h5.1a1.9 1.9 0 0 1 1.9 2.3l-1.2 6a2 2 0 0 1-2 1.6z"/><path d="M7.5 10H4.2v10.5h3.3z"/></symbol>
+    <symbol id="i-coin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M12 8v8M9.6 10.4h4.8M9.6 13.6h4.8"/></symbol>
+    <symbol id="i-share" viewBox="0 0 24 24"><path d="M3.6 13.6 20.4 4l-6.6 16.2-2.3-6.4z"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20 11.8a7.6 7.6 0 0 1-11 6.8L4.4 20l1.4-4.4A7.6 7.6 0 1 1 20 11.8z"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21v-6.6"/><path d="M8.6 3.6h6.8l-1 5.8 2.6 3.2H7l2.6-3.2z"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m14.4 5.6 4 4"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 20V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-cc" viewBox="0 0 24 24"><rect x="3.4" y="5.4" width="17.2" height="13.2" rx="2.6"/><path d="M9.9 10.5a2.4 2.4 0 1 0 0 3M16.2 10.5a2.4 2.4 0 1 0 0 3"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.6 12S6.2 5.8 12 5.8 21.4 12 21.4 12 17.8 18.2 12 18.2 2.6 12 2.6 12z"/><circle cx="12" cy="12" r="2.6"/></symbol>
+    <symbol id="i-vol" viewBox="0 0 24 24"><path d="M5 9.6h3l4-3.6v12l-4-3.6H5z"/><path d="M15.6 9.6a3.6 3.6 0 0 1 0 4.8"/></symbol>
+    <symbol id="i-speed" viewBox="0 0 24 24"><path d="M12 4.6a8.4 8.4 0 1 0 8.4 8.4"/><path d="M12 13l4.6-4.6"/></symbol>
+    <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4"/><path d="M6.2 6.2 17.8 17.8"/></symbol>
+    <symbol id="i-vol-off" viewBox="0 0 24 24"><path d="M5 9.6h3l4-3.6v12l-4-3.6H5z"/><path d="m15.5 10 4 4M19.5 10l-4 4"/></symbol>
+  </defs>
+</svg>
+
+<!-- ============================ 文档头部 ============================ -->
+<header class="doc-header">
+  <div class="doc-brand"><svg class="icon icon-lg mark"><use href="#i-tv"/></svg>YKPili</div>
+  <span class="doc-sub">UX 设计规范 · 实景预览</span>
+  <span class="spacer"></span>
+  <div class="seg" role="group" aria-label="渲染引擎">
+    <button id="eng-avalonia" aria-pressed="true" title="Avalonia 12 无 BlurEffect，面板靠提高不透明度补偿">
+      <svg class="icon icon-sm"><use href="#i-layers"/></svg>Avalonia 实际</button>
+    <button id="eng-ideal" aria-pressed="false" title="带 backdrop-filter 的设计理想态">
+      <svg class="icon icon-sm"><use href="#i-star"/></svg>设计理想</button>
+  </div>
+  <div class="seg" role="group" aria-label="主题">
+    <button id="th-dark" aria-pressed="true"><svg class="icon icon-sm"><use href="#i-moon"/></svg>暗色</button>
+    <button id="th-light" aria-pressed="false"><svg class="icon icon-sm"><use href="#i-sun"/></svg>亮色</button>
+  </div>
+</header>
+
+<div class="layout">
+  <!-- ============================ 目录 ============================ -->
+  <nav class="toc" aria-label="目录">
+    <h4>目录</h4>
+    <a href="#position">01 · 设计定位与取舍</a>
+    <a href="#tokens">02 · 设计令牌体系</a>
+    <a href="#home">03 · 首页实景预览</a>
+    <a href="#card">04 · 封面卡片解剖</a>
+    <a href="#states">05 · 状态设计</a>
+    <a href="#player">06 · 播放浮窗与面板</a>
+    <a href="#login">07 · 登录与扫码</a>
+    <a href="#ia">08 · 信息架构与栅格</a>
+    <a href="#interaction">09 · 交互与动效</a>
+    <a href="#a11y">10 · 无障碍与性能</a>
+    <a href="#gap">11 · 差距分析与落地清单</a>
+  </nav>
+
+  <main>
+    <!-- ==================== 01 定位 ==================== -->
+    <section id="position">
+      <div class="sec-head">
+        <h2><span class="sec-num">01</span>设计定位与取舍</h2>
+        <p>YKPili 是 B 站第三方桌面客户端，材质基线移植自 BewlyCat。本规范在既有 Token 层之上补齐
+           <b>信息架构</b>与<b>卡片信息层</b>——现有首页只有「封面 + 标题」，缺少顶栏、分类导航与 UP 主信息，
+           这正是与参考界面差距最大的地方。</p>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <h3>设计定位</h3>
+          <dl class="kv">
+            <dt>产品类型</dt><dd>视频流媒体 / 内容聚合（桌面端）</dd>
+            <dt>风格家族</dt><dd>Modern Dark + 玻璃拟态（Glassmorphism）</dd>
+            <dt>密度档位</dt><dd>8 / 10 —— 紧凑看板，4K 下最多 18 列</dd>
+            <dt>大胆度</dt><dd>4 / 10 —— 均衡现代，不为造型牺牲信息效率</dd>
+            <dt>动效档位</dt><dd>4 / 10 —— 仅悬停/入场，不做编排</dd>
+            <dt>品牌色</dt><dd>B 站蓝 <code>#00A1D6</code>（锁定，见下）</dd>
+            <dt>主题</dt><dd>亮 / 暗双主题等权，非"暗色为主"</dd>
+          </dl>
+        </div>
+
+        <div class="panel">
+          <h3>与 UX 插件建议的偏离说明</h3>
+          <p class="note">插件按"视频流媒体"检索给出的是 Cinema Dark 方案（背景 <code>#0F0F23</code>、
+            强调色 <code>#E11D48</code> 影院红、纯黑底）。本项目<b>不采纳</b>这三项，理由如下——属于刻意例外，非遗漏：</p>
+          <div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">
+            <div class="callout warn"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+              <div><b>不采用纯黑背景</b>：插件自身反模式清单即写明「avoid pure #000000 (OLED smear)」。
+                项目用 <code>#222428</code>（bew-dark-base 与黑混合 20%），滚动时无 OLED 拖影。</div></div>
+            <div class="callout warn"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+              <div><b>不采用影院红强调色</b>：品牌已锁定 B 站蓝。第三方客户端换掉品牌色会削弱识别度，
+                且 <code>#E11D48</code> 与错误态红 <code>#E5484D</code> 在深色下难以区分，破坏状态语义。</div></div>
+            <div class="callout info"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+              <div><b>采纳</b>：暗色优先的层次模型、玻璃拟态表面、圆角 12/16 卡片、
+                <code>cubic-bezier(0.16,1,0.3,1)</code> 类缓动（项目已有同源 <code>EaseStandard</code>）、
+                点击播放（禁自动播放）。</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <h3>核心约束（全部来自实际代码，不是推测）</h3>
+        <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+          <div><b>2026-10 技术选型变更：以下两条约束已失效。</b>新底座 GPUI Metal renderer 把视频帧
+            （CVPixelBuffer）与控件合成在同一条渲染管线，控件可以压在画面上、也可以做位移与透明过渡。
+            第 06 节最终定为：<b>播放窗口不动，右侧 hover 热区唤出浮层面板</b>。
+            本节保留原文仅作历史说明。</div>
+        </div>
+        <div class="callout err"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+          <div><b>① 没有 backdrop-filter。</b>Avalonia 12 的 <code>Visual.Effect</code> 只有
+            <code>DropShadowDirectionEffect</code>，没有 <code>BlurEffect</code>，也没有自定义 Effect 扩展点。
+            BewlyCat 的 <code>blur(20px) saturate(180%)</code> <b>无法移植</b>。
+            请用顶部开关切换「Avalonia 实际 / 设计理想」直观对比差距。</div>
+        </div>
+        <div class="callout warn" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+          <div><b>② <span style="text-decoration:line-through;opacity:.65">原生视频视图既不可被覆盖，也不跟随渲染变换</span>
+            <span class="tag warn">2026-10 已失效</span></b>
+            旧底座下它无法被 Avalonia 内容盖住（控制栏只能占独立高度）、也不跟随 <code>RenderTransform</code>。
+            新底座 GPUI Metal renderer 把视频帧与控件合成在同一条管线，这两条均不再成立，
+            第 06 节最终定为「播放窗口不动 + 右侧 hover 热区唤出浮层面板」。</div>
+        </div>
+        <p class="note"><b>补偿策略（四层叠加，前 3 层已可精确复刻）：</b></p>
+        <ul class="clean" style="margin-top:6px">
+          <li>① 半透明填充 <code>SurfaceElevated</code>；叠加在高频内容之上时改用 <code>SurfaceElevatedStrong</code>（0.92）</li>
+          <li>② 1px 半透明亮边 <code>BorderPopover</code></li>
+          <li>③ <b>inset 白色高光</b> <code>EdgeGlow1/2</code> —— 玻璃质感的主要来源，与 BewlyCat 同源</li>
+          <li>④ 外阴影 <code>Shadow1–4</code> 定层级</li>
+        </ul>
+        <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+          <div><b>落地红线</b>：任何浮在视频网格之上的面板（顶栏、吸顶分类、Dock、播放器）
+            <b>必须</b>用 <code>on-content</code> / <code>Strong</code> 变体，否则背后封面会直接干扰文字阅读——
+            没有模糊可以依赖。预览中顶栏已按此处理。</div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <h3>场景层级令牌（z-index）</h3>
+        <p class="note">原文把 20/25/30/40 散落在第 06、08 节的正文里，没有令牌化。
+          这里补成一张表：<b>先场景、后层内</b>——播放浮窗作为整体场景压过整个首页，
+          场景内部的层号不参与跨场景比较。</p>
+        <table style="margin-top:10px">
+          <thead><tr><th>层级</th><th>z-index</th><th>用途</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">LayerBase</td><td>0</td><td>页面底与内容网格</td></tr>
+            <tr><td class="mono">LayerStickyNav</td><td>20</td><td>吸顶分类导航</td></tr>
+            <tr><td class="mono">LayerDock</td><td>25</td><td>首页左侧浮动 Dock（属首页场景，≤ 30）</td></tr>
+            <tr><td class="mono">LayerTopBar</td><td>30</td><td>应用顶栏</td></tr>
+            <tr><td class="mono">LayerPlayer</td><td>60</td><td>播放浮窗<b>整体场景</b>，一次性压过上述所有层</td></tr>
+            <tr><td class="mono">LayerPanel</td><td>45</td><td>浮窗内 · 右侧信息栏（场景内层号）</td></tr>
+            <tr><td class="mono">LayerPanelToggle</td><td>46</td><td>浮窗内 · 面板左上角骑边界的展开/收起按钮</td></tr>
+            <tr><td class="mono">LayerOverlay</td><td>70</td><td>模态与遮罩（登录、对话框）</td></tr>
+          </tbody>
+        </table>
+        <div class="callout err" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+          <div><b>反面案例（本页曾踩到）</b>：给所有场景套一个 <code>z-index: 1</code> 的容器，
+            却让各场景内部直接写 25/30/40——首页的层号与浮窗的层号落入同一参照系，
+            于是「首页的左下控件浮到播放器之上」。修法是<b>先给场景定层</b>，
+            场景内部再定层内顺序。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 02 令牌 ==================== -->
+    <section id="tokens">
+      <div class="sec-head">
+        <h2><span class="sec-num">02</span>设计令牌体系</h2>
+        <p>全部令牌已存在于 <code>YKPili/Styles/Tokens/</code>，本页只做可视化确认。
+          规则：<b>视图不得硬编码任何色值/尺寸</b>，一律引用语义令牌；随主题变化的资源必须走
+          <code>DynamicResource</code> 或显式传 <code>ActualThemeVariant</code>。</p>
+      </div>
+
+      <div class="panel">
+        <h3>品牌色与主题色梯度</h3>
+        <p class="note">主题色固定为 B 站蓝。换色只需替换 <code>Palette.axaml</code> 中的
+          <code>ThemePrimaryColor</code> 与九档梯度，无需触碰任何视图。</p>
+        <div class="swatches" style="margin-top:12px">
+          <div class="swatch"><div class="chip" style="background:#00A1D6"></div>
+            <div class="meta"><b>BiliBlue / ThemePrimary</b><span>#00A1D6</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#FB749A"></div>
+            <div class="meta"><b>BiliPink</b><span>#FB749A</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#3ABFF8"></div>
+            <div class="meta"><b>StatusInfo</b><span>#3ABFF8</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#29A383"></div>
+            <div class="meta"><b>StatusSuccess</b><span>#29A383</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#F59E0B"></div>
+            <div class="meta"><b>StatusWarning</b><span>#F59E0B</span></div></div>
+          <div class="swatch"><div class="chip" style="background:#E5484D"></div>
+            <div class="meta"><b>StatusError</b><span>#E5484D</span></div></div>
+        </div>
+        <div class="ramp" role="img" aria-label="主题色透明度梯度 10% 到 90%">
+          <div style="background:var(--theme-10);color:var(--text-3)">10</div>
+          <div style="background:var(--theme-20)">20</div><div style="background:var(--theme-30)">30</div>
+          <div style="background:var(--theme-40)">40</div><div style="background:var(--theme-50)">50</div>
+          <div style="background:var(--theme-60)">60</div><div style="background:var(--theme-70)">70</div>
+          <div style="background:var(--theme-80)">80</div><div style="background:var(--theme-90)">90</div>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="panel">
+          <h3>语义表面（随主题切换）</h3>
+          <table>
+            <thead><tr><th>令牌</th><th>用途</th><th>当前值</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">BgHomepage</td><td>页面底</td><td id="v-bg">—</td></tr>
+              <tr><td class="mono">SurfaceContent</td><td>平面卡片/区块</td><td id="v-content">—</td></tr>
+              <tr><td class="mono">SurfaceElevated</td><td>浮层（顶栏/下拉）</td><td id="v-elev">—</td></tr>
+              <tr><td class="mono">SurfaceElevatedStrong</td><td>压在内容上的面板</td><td id="v-strong">—</td></tr>
+              <tr><td class="mono">TextPrimary</td><td>标题正文</td><td id="v-t1">—</td></tr>
+              <tr><td class="mono">TextTertiary</td><td>次要信息</td><td id="v-t3">—</td></tr>
+              <tr><td class="mono">TextQuaternary</td><td>元信息/时间</td><td id="v-t4">—</td></tr>
+              <tr><td class="mono">BorderPopover</td><td>玻璃亮边</td><td id="v-bp">—</td></tr>
+            </tbody>
+          </table>
+          <p class="note">亮暗两套值独立定义，<b>禁止</b>在暗色里复用亮色灰阶——这是 design_review 判为「高」的规范。</p>
+        </div>
+
+        <div class="panel">
+          <h3>圆角与间距</h3>
+          <table>
+            <thead><tr><th>语义别名</th><th>值</th><th>用于</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">CardRadius</td><td>12</td><td>卡片外框</td></tr>
+              <tr><td class="mono">MediaRadius</td><td>12</td><td>封面/缩略图</td></tr>
+              <tr><td class="mono">InteractiveRadius</td><td>8</td><td>小按钮、标签块</td></tr>
+              <tr><td class="mono">PopoverRadius</td><td>16</td><td>下拉、搜索建议</td></tr>
+              <tr><td class="mono">ModalRadius</td><td>24</td><td>登录卡、对话框</td></tr>
+              <tr><td class="mono">BadgeRadius</td><td>9999</td><td>分类 pill、角标</td></tr>
+              <tr><td class="mono">Space1/2/3/4</td><td>4/8/12/16</td><td>4px 网格基本档</td></tr>
+              <tr><td class="mono">Space6/8/12</td><td>24/32/48</td><td>区块级纵向节奏</td></tr>
+            </tbody>
+          </table>
+          <p class="note">2px 一档只留给边框与视觉微调，不用于常规间距（BewlyCat 原始约定）。</p>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="panel">
+          <h3>排版阶</h3>
+          <div class="type-row"><div class="sample" style="font-size:var(--fs-display);font-weight:var(--fw-bold);line-height:var(--lh-heading)">视频标题示例 Heading</div>
+            <span class="tag ghost">Display 24 / Bold</span></div>
+          <div class="type-row"><div class="sample" style="font-size:var(--fs-heading);font-weight:var(--fw-bold)">页面区块标题</div>
+            <span class="tag ghost">Heading 20 / Bold</span></div>
+          <div class="type-row"><div class="sample" style="font-size:var(--fs-title);font-weight:var(--fw-semibold)">卡片标题</div>
+            <span class="tag ghost">Title 15 / SemiBold</span></div>
+          <div class="type-row"><div class="sample" style="font-size:var(--fs-body)">正文与视频简介文本</div>
+            <span class="tag ghost">Body 15 / Regular</span></div>
+          <div class="type-row"><div class="sample" style="font-size:var(--fs-control);font-weight:var(--fw-medium)">封面卡标题</div>
+            <span class="tag ghost">Control 13 / Medium</span></div>
+          <div class="type-row"><div class="sample" style="font-size:var(--fs-caption);color:var(--text-3)">UP 主 · 3 小时前 · 12.4 万播放</div>
+            <span class="tag ghost">Caption 12</span></div>
+          <p class="note">Body 与 Title 共用 15px 基准，层级差异由<b>行高与字重</b>承担，不靠堆字号。</p>
+        </div>
+
+        <div class="panel">
+          <h3>动效令牌</h3>
+          <table>
+            <thead><tr><th>令牌</th><th>时长</th><th>应用</th></tr></thead>
+            <tbody>
+              <tr><td class="mono">DurationFast</td><td>150ms</td><td>悬停、按压、图标变色</td></tr>
+              <tr><td class="mono">DurationNormal</td><td>200ms</td><td>主题切换、展开收起</td></tr>
+              <tr><td class="mono">DurationModerate</td><td>300ms</td><td>浮层入场、封面缓推</td></tr>
+            </tbody>
+          </table>
+          <p class="note"><code>EaseStandard</code> = <code>cubic-bezier(0.22, 0.61, 0.36, 1)</code>，
+            <code>EaseEmphasized</code> = <code>cubic-bezier(0.34, 1.3, 0.64, 1)</code>（带轻微回弹，用于按压）。
+            两条曲线与 BewlyCat 是 1:1 精确对应，不是近似。</p>
+          <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div><b>只过渡具体属性</b>，禁止 <code>transition: all</code> 式全属性动画——
+              会把布局属性一起动画化，造成网格抖动。</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 03 首页实景 ==================== -->
+    <section id="home">
+      <div class="sec-head">
+        <h2><span class="sec-num">03</span>首页实景预览</h2>
+        <p>这是<b>目标态</b>：在既有封面网格之上补齐三层缺失结构 —— 固定顶栏（搜索）、吸顶分类导航、
+          左侧浮动 Dock，以及卡片的信息层（播放量 / 弹幕数 / 时长 / UP 主）。
+          把鼠标移到卡片上可看悬停反馈，滚动可看吸顶与玻璃表现。</p>
+      </div>
+
+      <div class="stage">
+        <div class="stage-bar">
+          <div class="traffic"><i></i><i></i><i></i></div>
+          <div class="url">YKPili — 3840 × 2160 · 18 列自适应</div>
+        </div>
+        <div class="app">
+         <div class="app-scroll">
+          <!-- 顶栏 -->
+          <div class="topbar glass" style="background:var(--surface-elevated-strong);border-bottom:1px solid var(--border-subtle)">
+            <div class="logo"><svg class="icon icon-lg mark"><use href="#i-tv"/></svg>YKPili</div>
+            <div class="search">
+              <svg class="icon"><use href="#i-search"/></svg>
+              <input placeholder="搜索视频、UP 主、番剧" aria-label="搜索" />
+              <button class="go">搜索</button>
+            </div>
+            <div class="actions">
+              <button class="iconbtn" title="稍后再看"><svg class="icon"><use href="#i-clock"/></svg></button>
+              <button class="iconbtn" title="收藏夹"><svg class="icon"><use href="#i-bookmark"/></svg></button>
+              <button class="iconbtn" title="历史记录"><svg class="icon"><use href="#i-refresh"/></svg></button>
+              <button class="iconbtn" title="消息"><svg class="icon"><use href="#i-bell"/></svg><span class="dot"></span></button>
+              <button class="avatar" title="账号" aria-label="账号"></button>
+            </div>
+          </div>
+
+          <!-- 分类导航（吸顶） -->
+          <div class="tabs glass">
+            <div class="pill">
+              <button class="tab" aria-selected="true"><svg class="icon icon-sm"><use href="#i-star"/></svg>个性推荐</button>
+              <button class="tab"><svg class="icon icon-sm"><use href="#i-bell"/></svg>正在关注</button>
+              <button class="tab"><svg class="icon icon-sm"><use href="#i-trend"/></svg>热门视频</button>
+              <button class="tab"><svg class="icon icon-sm"><use href="#i-trophy"/></svg>排行</button>
+              <button class="tab"><svg class="icon icon-sm"><use href="#i-live"/></svg>直播</button>
+            </div>
+          </div>
+
+          <!-- 封面网格 -->
+          <div class="feed">
+            <div class="rail" id="rail" style="--cols:6"></div>
+          </div>
+         </div>
+         <!-- /app-scroll -->
+
+         <!-- 左侧浮动 Dock：必须留在滚动容器之外，否则会随内容一起滚走 -->
+         <div class="dock">
+           <button class="iconbtn" aria-current="true" title="首页"><svg class="icon"><use href="#i-home"/></svg></button>
+           <button class="iconbtn" title="热门"><svg class="icon"><use href="#i-trend"/></svg></button>
+           <button class="iconbtn" title="分区"><svg class="icon"><use href="#i-grid"/></svg></button>
+           <button class="iconbtn" title="排行"><svg class="icon"><use href="#i-trophy"/></svg></button>
+           <button class="iconbtn" title="直播"><svg class="icon"><use href="#i-live"/></svg></button>
+         </div>
+        </div>
+      </div>
+
+      <div class="grid-3" style="margin-top:16px">
+        <div class="panel"><h3>顶栏 · 64px</h3>
+          <p class="note">高度 <code>TopBarHeight 64</code>，主控件 46（<code>TopBarControlHeight</code>）。
+            搜索框居中、最大宽 520、胶囊圆角。右侧图标组 38px 圆形热区，含未读红点。
+            <b>压在网格之上</b>，故用 <code>SurfaceElevatedStrong</code>。窗口内边距 20px。</p></div>
+        <div class="panel"><h3>分类导航 · 吸顶</h3>
+          <p class="note">玻璃胶囊容器内 5 个 tab，选中态用主题色实底 + 主题色投影。
+            吸顶时顶栏下方 <code>Space4</code> 间距，内容区因此需要
+            <code>padding-top = 顶栏 + tabs</code>，否则首行卡片被遮挡（design_review 判为「中」）。</p></div>
+        <div class="panel"><h3>左侧 Dock</h3>
+          <p class="note">垂直居中浮动，42px 圆形玻璃按钮。<b>不做底部 Tab 栏</b>——
+            桌面端底部导航不符合平台习惯，且 design_review 明确要求主导航项 ≤ 5，
+            Dock 恰好 5 项，其余入口收进头像菜单。</p></div>
+      </div>
+    </section>
+
+    <!-- ==================== 04 卡片解剖 ==================== -->
+    <section id="card">
+      <div class="sec-head">
+        <h2><span class="sec-num">04</span>封面卡片解剖</h2>
+        <p>卡片是首页唯一的重复单元，也是当前实现与参考界面差距最大的组件。
+          现状只有<b>封面 + 两行标题</b>；目标态需要补齐信息层，同时保持 208×166 的单元格几何不变
+          —— 虚拟列表的 <code>CellWidth/CellHeight</code> 计算依赖它，改动会连带影响容器池推导。</p>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <h3>结构分层（自上而下）</h3>
+          <table>
+            <thead><tr><th>层</th><th>内容</th><th>令牌</th></tr></thead>
+            <tbody>
+              <tr><td>1 封面</td><td>16:9，192×108，裁剪圆角</td><td class="mono">MediaRadius 12</td></tr>
+              <tr><td>2 数据层</td><td>左下 播放量+弹幕数，右下 时长</td><td class="mono">11px + 文字阴影</td></tr>
+              <tr><td>3 进度层</td><td>观看进度条（仅看过的视频）</td><td class="mono">BiliPink 3px</td></tr>
+              <tr><td>4 悬停操作</td><td>稍后再看 / 下载 / 更多</td><td class="mono">InteractiveRadius 8</td></tr>
+              <tr><td>5 标题</td><td>2 行截断，行高 18</td><td class="mono">Control 13 / LineHeightControl</td></tr>
+              <tr><td>6 署名行</td><td>UP 头像 18 + 昵称 + 时间</td><td class="mono">Caption 12 / TextQuaternary</td></tr>
+            </tbody>
+          </table>
+          <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div><b>数据层必须带文字阴影</b>（<code>0 1px 3px rgba(0,0,0,.8)</code>）。
+              封面图明暗不可控，纯白数字压在浅色封面上会直接消失——参考界面同样这么处理。</div></div>
+        </div>
+
+        <div class="panel">
+          <h3>单元格几何约束</h3>
+          <dl class="kv">
+            <dt>ItemWidth</dt><dd class="mono">192（封面宽）</dd>
+            <dt>ItemHeight</dt><dd class="mono">108（封面高，16:9）</dd>
+            <dt>CellWidth</dt><dd class="mono">208 = 192 + 16 边距</dd>
+            <dt>CellHeight</dt><dd class="mono">166 = 108 + 6 + 36 + 16</dd>
+            <dt>列数推导</dt><dd>floor(视口宽 / 208) → 1920 得 9 列、2560 得 12、3840 得 18</dd>
+            <dt>容器池</dt><dd>(可见行 + 2) × 列数，上下各留 1 行缓冲</dd>
+          </dl>
+          <div class="callout err" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div><b>改动红线</b>：新增署名行会侵占 36px 标题区预算。
+              若要加入「UP 主行」，必须同步调整 <code>CellHeight</code>，
+              且 <code>HomeViewModel.ColumnsPerRow</code> 的推导不能被外部抢先赋值
+              —— 否则 resize 时列数判断失效、容器池不重建。</div></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <h3>卡片状态实测</h3>
+        <div class="rail" id="state-rail" style="--cols:5;margin-top:8px"></div>
+        <p class="note">从左到右：默认态 → 悬停态（放大 1.03 + 阴影抬升 + 操作浮出 + 封面缓推 1.04）
+          → 直播中（粉色角标）→ 已观看（进度条）→ 骨架加载态。
+          <b>悬停不是唯一手段</b>：点击、键盘聚焦都会触发同一套视觉，触摸设备不依赖 hover。</p>
+      </div>
+    </section>
+
+    <!-- ==================== 05 状态 ==================== -->
+    <section id="states">
+      <div class="sec-head">
+        <h2><span class="sec-num">05</span>状态设计</h2>
+        <p>design_review 把「加载态 / 空态 / 错误态」列入交付前必查项。当前项目只有 happy path，
+          以下四态需要逐页补齐。</p>
+      </div>
+      <div class="grid-2">
+        <div class="panel">
+          <h3>加载中 · 骨架屏</h3>
+          <div class="rail" style="--cols:3;margin-top:8px">
+            <div><div class="sk sk-thumb"></div><div class="sk sk-line" style="width:92%"></div><div class="sk sk-line" style="width:64%"></div></div>
+            <div><div class="sk sk-thumb"></div><div class="sk sk-line" style="width:84%"></div><div class="sk sk-line" style="width:52%"></div></div>
+            <div><div class="sk sk-thumb"></div><div class="sk sk-line" style="width:96%"></div><div class="sk sk-line" style="width:70%"></div></div>
+          </div>
+          <p class="note">骨架必须复刻<b>真实卡片几何</b>（封面 16:9 + 两行标题 + 署名行），
+            否则加载完成瞬间网格会跳。用 <code>SkeletonBrush</code> + 1.5s 脉冲，
+            并遵守 <code>prefers-reduced-motion</code>。</p>
+        </div>
+
+        <div class="panel">
+          <h3>空状态 · 无推荐</h3>
+          <div class="state">
+            <div class="glyph"><svg class="icon icon-xl"><use href="#i-inbox"/></svg></div>
+            <h4>暂时没有推荐内容</h4>
+            <p>换一个分类看看，或刷新获取最新推荐。登录后推荐会更贴合你的口味。</p>
+            <button class="btn accent"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>刷新推荐</button>
+          </div>
+          <p class="note">禁止空白屏。必须给出<b>原因 + 可执行动作</b>，而非只显示"暂无数据"。</p>
+        </div>
+
+        <div class="panel">
+          <h3>错误态 · 接口失败</h3>
+          <div class="state">
+            <div class="glyph" style="color:var(--status-error);background:rgba(229,72,77,.10)">
+              <svg class="icon icon-xl"><use href="#i-alert"/></svg></div>
+            <h4>推荐加载失败</h4>
+            <p>请求超时（10s）。请检查网络后重试；若持续失败可能是接口风控，稍后再试。</p>
+            <div style="display:flex;gap:8px">
+              <button class="btn accent"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>重试</button>
+              <button class="btn ghost">查看已缓存内容</button>
+            </div>
+          </div>
+          <p class="note">错误文案要具体可操作：说明<b>失败原因 + 下一步</b>，不只标红。</p>
+        </div>
+
+        <div class="panel">
+          <h3>离线 / 弱网</h3>
+          <div class="state">
+            <div class="glyph"><svg class="icon icon-xl"><use href="#i-wifi-off"/></svg></div>
+            <h4>当前处于离线状态</h4>
+            <p>已为你展示本地缓存的 46 条内容。恢复网络后会自动同步。</p>
+            <button class="btn ghost">管理缓存</button>
+          </div>
+          <p class="note">项目已有 <code>CacheManager</code>，离线态应主动降级到缓存而不是报错。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 06 播放器 ==================== -->
+    <section id="player">
+      <div class="sec-head">
+        <h2><span class="sec-num">06</span>播放浮窗与可收起面板</h2>
+        <p>点击卡片后弹出的是<b>大浮窗</b>而非居中模态：<b>播放窗口本身不动</b>——
+          视频区铺满整个浮窗，控制栏悬浮在画面下沿，右侧浮层面板承载全部视频信息。
+          面板的唤出靠它自己：<b>鼠标进入面板区域即展开为 400px，移出即收回为 200px</b>。
+          把鼠标移到浮窗右侧那条面板上试试（或点下面的按钮）。</p>
+        <div class="callout info"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+          <div><b>叠层合成已打通（2026-10 技术选型）</b>：视频帧（CVPixelBuffer）与 UI 控件在
+            <b>同一条 GPUI 渲染管线</b>里合成，因此控件可以压在画面上、也可以做位移与透明过渡。
+            旧的「控制栏必须让出独立高度」「面板只能走宽度变化」两条约束整体失效，已从本节移除。</div>
+        </div>
+      </div>
+
+      <div class="stage pw-scene">
+        <div class="stage-bar"><div class="traffic"><i></i><i></i><i></i></div>
+          <div class="url" id="pw-url">播放浮窗 · 面板收起 · 右侧 hover 唤出</div></div>
+        <div class="pw-stage">
+          <!-- 顶栏在浮窗出现时保持可用 -->
+          <div class="pw-topbar glass">
+            <div class="logo"><svg class="icon icon-lg mark"><use href="#i-tv"/></svg>YKPili</div>
+            <div class="search" style="margin:0">
+              <svg class="icon"><use href="#i-search"/></svg>
+              <input placeholder="这是什么游戏" aria-label="搜索" />
+            </div>
+            <div style="margin-left:auto;display:flex;gap:2px">
+              <button class="iconbtn" title="稍后再看"><svg class="icon"><use href="#i-clock"/></svg></button>
+              <button class="iconbtn" title="收藏夹"><svg class="icon"><use href="#i-bookmark"/></svg></button>
+              <button class="iconbtn" title="消息"><svg class="icon"><use href="#i-bell"/></svg><span class="dot"></span></button>
+              <button class="avatar" aria-label="账号"></button>
+            </div>
+          </div>
+
+          <div class="pw collapsed" id="pw">
+            <!-- ===== 视频区 ===== -->
+            <div class="pw-main">
+              <div class="pw-video">
+                <div class="scenery"></div>
+                <div class="arc"></div>
+                <button class="pw-play" id="pw-play" aria-label="播放">
+                  <svg class="icon" style="width:34px;height:34px"><use href="#i-play"/></svg>
+                </button>
+                <div class="pw-watch">
+                  <span>1人正在看</span>
+                  <button title="弹幕开关"><svg class="icon icon-sm"><use href="#i-eye"/></svg></button>
+                  <button title="弹幕设置"><svg class="icon icon-sm"><use href="#i-cc"/></svg></button>
+                </div>
+              </div>
+
+              <!-- 控制栏：悬浮在画面下沿（播放中自动隐藏） -->
+              <div class="pw-ctrl" id="pw-ctrl">
+                <!-- 简略进度条：播放期间的默认形态。只有一条进度线，
+                     紧贴视频最下方、横跨整个播放器宽度，不显示时间与播放按钮。 -->
+                <div class="pw-mini">
+                  <div class="mini-track"><i style="width:2%"></i><b style="left:2%"></b></div>
+                </div>
+
+                <div class="pw-dm">
+                  <span class="polite">弹幕礼仪 ›</span>
+                  <input placeholder="发个友善的弹幕见证当下" aria-label="发送弹幕"
+                         style="flex:1;background:transparent;border:0;outline:0;color:rgba(255,255,255,.85);font-family:inherit;font-size:var(--fs-caption)" />
+                  <button class="send">发送</button>
+                </div>
+                <div class="pw-bar">
+                  <button class="iconbtn" id="pw-toggle" title="播放 / 暂停"><svg class="icon icon-sm"><use href="#i-play"/></svg></button>
+                  <span class="time">00:01 / 01:47</span>
+                  <div class="track"><i style="width:2%"></i><b style="left:2%"></b></div>
+                  <button class="pill">1080P 高清</button>
+                  <button class="pill">倍速</button>
+                  <button class="iconbtn" title="音量"><svg class="icon icon-sm"><use href="#i-vol"/></svg></button>
+                  <button class="iconbtn" title="字幕"><svg class="icon icon-sm"><use href="#i-cc"/></svg></button>
+                  <button class="iconbtn" title="设置"><svg class="icon icon-sm"><use href="#i-settings"/></svg></button>
+                  <button class="iconbtn" title="网页全屏"><svg class="icon icon-sm"><use href="#i-expand"/></svg></button>
+                </div>
+              </div>
+            </div>
+
+            <!-- ===== 信息面板：浮在画面之上，不挤窄视频区 ===== -->
+            <!-- 浮层面板：贴右边缘、通高、无圆角无阴影；进出只改 opacity/transform，视频尺寸不变 -->
+            <aside class="pw-side" id="pw-side">
+              <div class="pw-side-inner">
+                <div class="pw-head">
+                  <h4>这是什么游戏</h4>
+                  <button class="pw-x" id="pw-close" title="收起面板"><svg class="icon icon-sm"><use id="pw-x-icon" href="#i-close"/></svg></button>
+                </div>
+                <div class="pw-meta">
+                  <i><svg class="icon icon-sm"><use href="#i-play"/></svg>1</i>
+                  <i><svg class="icon icon-sm"><use href="#i-danmaku"/></svg>0</i>
+                  <span>2026-10-15 22:46:02</span>
+                </div>
+
+                <div class="pw-up">
+                  <div class="pw-up-row">
+                    <span class="pw-up-avatar"></span>
+                    <div style="min-width:0">
+                      <div class="pw-up-name">空投猪 <span class="pw-up-msg">发消息</span></div>
+                      <div class="pw-up-sign">感觉不如40译白厄0刻 感觉不如易水寒行客6年没改id遇到我破防了喵</div>
+                    </div>
+                  </div>
+                  <div class="pw-up-btns">
+                    <button class="charge">充电</button>
+                    <button class="follow"><svg class="icon icon-sm"><use href="#i-list"/></svg>已互粉
+                      <b style="font-variant-numeric:tabular-nums">174</b></button>
+                  </div>
+                </div>
+
+                <div class="pw-acts">
+                  <button class="pw-act"><svg class="icon"><use href="#i-thumb"/></svg>8</button>
+                  <button class="pw-act"><svg class="icon"><use href="#i-coin"/></svg>投币</button>
+                  <button class="pw-act"><svg class="icon"><use href="#i-star"/></svg>收藏</button>
+                  <button class="pw-act"><svg class="icon"><use href="#i-share"/></svg>分享</button>
+                </div>
+
+                <div class="pw-tags">
+                  <span class="pw-tag">FPS</span><span class="pw-tag">吃鸡</span><span class="pw-tag">PUBG</span>
+                </div>
+
+                <div class="pw-tabs" role="tablist">
+                  <button class="pw-tab" role="tab" aria-selected="true">评论</button>
+                  <button class="pw-tab" role="tab" aria-selected="false">弹幕</button>
+                  <button class="pw-tab" role="tab" aria-selected="false">推荐</button>
+                </div>
+                <!-- 参考图 2 的 Tab 为「评论 / 弹幕 / 选集」，「推荐」保留为第四项（待定） -->
+
+                <div class="pw-cmts">
+                  <div class="pw-cmt-head">
+                    <b>评论 <span style="color:var(--text-4);font-weight:400">0</span></b>
+                    <div class="pw-sort"><span class="on">最热</span><span>|</span><span>最新</span></div>
+                  </div>
+                  <div class="pw-cmt"><span class="av"></span><p>你猜我的评论区在等待谁?</p></div>
+                  <div class="pw-empty">没有更多评论</div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <div class="pw-ctl">
+        <span class="label">预览控制（仅演示用，非设计的一部分）：</span>
+        <button class="btn accent" id="pw-expand"><svg class="icon icon-sm"><use href="#i-list"/></svg>展开面板</button>
+        <button class="btn ghost" id="pw-collapse"><svg class="icon icon-sm"><use href="#i-close"/></svg>收起面板</button>
+        <button class="btn ghost" id="pw-simulate"><svg class="icon icon-sm"><use href="#i-play"/></svg>模拟「点击播放」</button>
+        <button class="btn ghost" id="pw-measure"><svg class="icon icon-sm"><use href="#i-layers"/></svg>诊断各层尺寸</button>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="panel">
+          <h3>展开 / 收起：触发规则</h3>
+          <table>
+            <thead><tr><th>事件</th><th>面板</th><th>理由</th></tr></thead>
+            <tbody>
+              <tr><td>点击卡片打开浮窗</td><td><span class="tag ok">展开</span></td><td>用户此刻要的是「这是什么视频」，信息优先</td></tr>
+              <tr><td>点击播放</td><td><span class="tag warn">收起</span></td><td>进入观看，画面优先；信息随时可唤回</td></tr>
+              <tr><td>面板失去焦点<span style="color:var(--text-4);font-size:11px">（鼠标移出 / 点击视频区）</span></td>
+                <td><span class="tag warn">收起</span></td><td>视线已离开信息区，继续占位就是浪费画面</td></tr>
+              <tr><td>控制栏旁静止 2.5s</td><td><span class="tag warn">隐藏</span></td><td>播放中不遮挡画面；暂停态常驻不隐藏</td></tr>
+              <tr><td>移动鼠标 / 键盘聚焦</td><td><span class="tag ok">浮出</span></td><td><code>mouseenter</code> 与 <code>:focus-within</code> 双重兜底，键盘用户不会卡在隐藏态</td></tr>
+              <tr><td>点击面板左上角按钮</td><td><span class="tag ok">展开 / 收起</span></td><td>同一枚按钮切换：展开态显示 ×，收起态显示 ‹；它是<b>唯一且常驻</b>的唤回入口</td></tr>
+              <tr><td>点击右侧工具列</td><td><span class="tag ok">展开</span></td><td>必须有一条<b>永远可达</b>的唤回路径，否则功能被藏死</td></tr>
+              <tr><td>鼠标移入面板</td><td><span class="tag ok">保持展开</span></td><td>正在阅读时不能被自动收起打断；面板上的按钮点击才切换，悬停不切换</td></tr>
+              <tr><td>按 Esc</td><td><span class="tag ghost">关闭浮窗</span></td><td>与「退回网格」语义一致</td></tr>
+            </tbody>
+          </table>
+          <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div><b>自动收起必须可逆且有提示</b>。收起瞬间建议在视频右上角留一个短暂出现的
+              「信息」按钮（3s 后淡出），否则用户会以为信息面板消失了。</div></div>
+        </div>
+
+        <div class="panel">
+          <h3>面板规格（展开态 / 收起态）</h3>
+          <dl class="kv">
+            <dt>展开 · 宽度</dt><dd class="mono">400px 浮层</dd>
+            <dt>收起 · 宽度</dt><dd class="mono">200px（面板自身收回到一半）</dd>
+            <dt>展开 · 定位</dt><dd class="mono">absolute right:0 top:0 bottom:0（贴右边缘、通高）</dd>
+            <dt>展开 · 边界</dt><dd class="mono">无圆角无阴影，左侧 1px 分隔线划分层级</dd>
+            <dt>唤出 · 热区</dt><dd class="mono">面板本体即热区，不需要额外元素</dd>
+            <dt>唤出 · 时机</dt><dd>鼠标进入即展开；移出延迟 220ms 收回，避免掠边界闪收</dd>
+            <dt>唤出 · 例外</dt><dd>焦点在面板内（写评论等）时不自动收回</dd>
+            <dt>展开 · 分区</dt><dd>标题 → 元信息 → UP 主 → 互动 → 标签 → Tab → 评论</dd>
+            <dt>展开 · Tab</dt><dd>评论 / 弹幕 / 推荐（参考图为「选集」，待定）</dd>
+            <dt>展开 · 滚动</dt><dd>评论区长列表自己滚，不影响视频区</dd>
+            <dt>收起 · 裁切</dt><dd>内容按 400px 排版，右半被裁掉——保留左侧信息，不是空白条</dd>
+            <dt>收起 · 可达性</dt><dd>左上角按钮收起后仍可见（骑在左边界上），图标切为「展开」</dd>
+          </dl>
+          <div class="callout err" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div><b>面板不得侵占控制栏的横向空间。</b>早先的做法是「面板展开时控制栏右缩 540px」，
+              在 1300px 这类窗口下会把进度条压成一条缝——<b>已废弃</b>。
+              正确分工是：<b>控制栏常驻全宽（最高交互优先级），面板在纵向让出 88px</b>。</div></div>
+          <div class="callout err" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div><b>收起态不是完全隐藏。</b>参考图里收起后仍保留一条窄 icon rail——
+              否则面板收起后用户没有任何入口唤回信息区。面板本体走 <code>opacity</code> 淡出，
+              收起后不保留窄条——唤回由面板左上角那枚按钮承担，右侧因此不会多出一条浮层。</div></div>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="panel"><h3>硬约束变更记录</h3>
+          <div class="callout info"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+            <div><b>① 已失效：控制栏不能叠在画面上。</b>旧底座是 Avalonia + <code>NativeControlHost</code>
+              原生视图，视频层与 UI 层分属两个渲染管线、无法互相覆盖。新底座 GPUI Metal renderer
+              把 CVPixelBuffer 视频帧与控件合成在同一条管线，
+              <b>控制栏改为悬浮</b>，画面高度不再被切掉 50px。</div></div>
+          <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+            <div><b>② 已失效：浮层只能走布局、不能走 transform。</b>旧约束要求面板宽度变化而非位移；
+              叠层合成后浮层走 <code>opacity</code> / <code>translate</code> 即可，
+              既不影响视频尺寸，也不触发每帧重布局。</div></div>
+          <div class="callout warn" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div><b>③ 新约束：压在画面上的文字必须有渐变遮罩。</b>这是叠层方案唯一新增的红线。
+              画面明暗不可控，控制栏与进度条的对比度<b>不能依赖画面本身</b>，
+              必须在底部铺 <code>linear-gradient</code> 由 <code>black 0.82</code> 过渡到透明；
+              面板若是半透明，同样需要暗化底衬。</div></div>
+        </div>
+
+        <div class="panel"><h3>必查项</h3>
+          <ul class="checklist">
+            <li><span class="box done"><svg class="icon" style="width:11px;height:11px"><use href="#i-check"/></svg></span>
+              <div><b>收起后仍有唤回入口</b>：面板左上角那枚按钮在收起态切换为「展开」图标，永远可达</div></li>
+            <li><span class="box"></span><div>播放浮窗默认<b>收起信息面板</b>（沉浸优先，视频占满整宽）；点击播放只在未收起时才收起</div></li>
+            <li><span class="box"></span><div>面板收起时，已选中的 Tab 与滚动位置要记住，唤回后不重置</div></li>
+            <li><span class="box"></span><div>评论区要有加载骨架、空态引导、失败重试</div></li>
+            <li><span class="box"></span><div>「失去焦点即收起」加 <b>150–300ms 延迟</b>，避免鼠标划过就闪收</div></li>
+            <li><span class="box"></span><div>面板并排后视频区变窄，需验证 4K/1080p/最小窗口三档下视频比例与黑边表现</div></li>
+            <li><span class="box"></span><div>窄窗口下面板是否该收窄或自动收起（窄窗口 400px 面板会挤压视频）</div></li>
+            <li><span class="box"></span><div>键盘：<code>Tab</code> 进入面板时不得自动收起，焦点移出才收</div></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="panel"><h3>控制栏规格</h3>
+          <dl class="kv">
+            <dt>定位</dt><dd class="mono">absolute bottom:0，悬浮在画面下沿、横跨整窗</dd>
+            <dt>组成</dt><dd>完整栏：弹幕输入 38 + 进度/操作条 50 = 88px；简略条：3px 进度线（40px hover 热区）</dd>
+            <dt>背景</dt><dd class="mono">#0B0F14 + 1px 顶边线（不需要渐变遮罩）</dd>
+            <dt>播放中</dt><dd>完整栏收起，仅剩<b>一条 3px 进度线</b>：紧贴视频最下沿、<b>横跨整个播放器宽度</b>，无时间、无按钮</dd>
+            <dt>鼠标移入</dt><dd>简略条让位，完整控制栏展开（弹幕输入 + 清晰度 / 倍速 / 音量…）</dd>
+            <dt>暂停态</dt><dd>完整控制栏常驻（暂停时用户多半要操作控件）</dd>
+            <dt>横向范围</dt><dd class="mono">left:0、right:200px <b>固定不变</b>——播放器宽度全程固定，不随面板伸缩</dd>
+            <dt>与面板关系</dt><dd>收起态：面板 200px 不遮挡任何控件；展开态：面板 400px <b>允许</b>盖住控制栏右端</dd>
+          </dl>
+          <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div><b>与叠层能力的关系</b>：技术上控制栏可以浮在画面上（GPUI 同管线合成已验证），
+              代价是底部约 88px 画面被长期遮盖，因此配合「播放中静止 2.5s 自动隐藏」把画面还回去。</div></div>
+        </div>
+
+        <div class="panel"><h3>叠层合成后必须补的验证</h3>
+          <ul class="checklist">
+            <li><span class="box"></span><div>控制栏文字压在<b>亮画面</b>上的对比度实测（遮罩是唯一保障，亮/暗两种素材各测一次）</div></li>
+            <li><span class="box"></span><div>面板展开时横向遮住约 44% 画面——字幕/关键内容是否落在被遮区域需要抽查</div></li>
+            <li><span class="box"></span><div>面板宽度 400→0 过渡期间，视频区重排是否抖动（原生视频层只有布局变化时才重绘）</div></li>
+            <li><span class="box"></span><div>视频帧与 UI 合成后的色彩：NV12 视频与 sRGB 控件叠加是否串色或发灰</div></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 07 登录 ==================== -->
+    <section id="login">
+      <div class="sec-head">
+        <h2><span class="sec-num">07</span>登录与扫码</h2>
+        <p>未登录态是独立页面：垂直居中的玻璃卡片，宽 380、内边距 32×36、<code>ModalRadius</code> 24。
+          二维码区域<b>保持纯白</b>不跟随主题——对比度不足会直接导致扫码失败。</p>
+      </div>
+      <div class="stage">
+        <div class="stage-bar"><div class="traffic"><i></i><i></i><i></i></div>
+          <div class="url">登录页 · 扫码登录</div></div>
+        <div class="app">
+          <div class="login-stage">
+            <div class="login-card">
+              <div style="text-align:center;margin-bottom:20px">
+                <div style="font-size:var(--fs-heading);font-weight:var(--fw-bold);letter-spacing:-0.02em">扫码登录 YKPili</div>
+                <div style="color:var(--text-3);font-size:var(--fs-caption);margin-top:4px">登录后同步你的推荐、收藏与观看进度</div>
+              </div>
+              <div class="qr"><div class="pattern"></div></div>
+              <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:16px;color:var(--text-3);font-size:var(--fs-control)">
+                <svg class="icon icon-sm" style="color:var(--theme-primary)"><use href="#i-refresh"/></svg>
+                等待扫码…二维码 120 秒后失效
+              </div>
+              <button class="btn ghost" style="width:100%;justify-content:center;margin-top:20px">取消登录</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-3" style="margin-top:16px">
+        <div class="panel"><h3>扫码三态</h3>
+          <ul class="clean">
+            <li><b>等待扫码</b>：二维码 + 倒计时提示 + 取消</li>
+            <li><b>已扫码待确认</b>：二维码蒙上主题色遮罩，显示"请在手机上确认"</li>
+            <li><b>已失效</b>：遮罩显示"二维码已失效" + 点击刷新</li>
+          </ul></div>
+        <div class="panel"><h3>约束</h3>
+          <ul class="clean">
+            <li>二维码底色锁定 <code>#FFFFFF</code>，不跟随暗色主题</li>
+            <li>轮询失败需退避重试，不要把错误直接抛给用户</li>
+            <li>登录成功后卡片不闪退，直接切换为首页（保留渐变背景连续性）</li>
+          </ul></div>
+        <div class="panel"><h3>无障碍</h3>
+          <ul class="clean">
+            <li>二维码需提供 <code>alt</code> 文本："用于登录的二维码"</li>
+            <li>状态文案用 <code>aria-live="polite"</code> 播报阶段变化</li>
+            <li>取消按钮是键盘可达的普通按钮，非仅图标</li>
+          </ul></div>
+      </div>
+    </section>
+
+    <!-- ==================== 08 IA ==================== -->
+    <section id="ia">
+      <div class="sec-head">
+        <h2><span class="sec-num">08</span>信息架构与栅格</h2>
+        <p>桌面端采用「顶栏 + 吸顶分类 + 流式网格」结构，Dock 承载跨页导航。
+          刻意<b>不使用底部 Tab 栏</b>：桌面平台没有该习惯，且会永久遮挡内容下沿。</p>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <h3>页面层级</h3>
+          <table>
+            <thead><tr><th>层</th><th>高度</th><th>定位</th></tr></thead>
+            <tbody>
+              <tr><td>应用顶栏</td><td class="mono">64px</td><td>sticky top:0，z-index 30</td></tr>
+              <tr><td>分类导航</td><td class="mono">~54px</td><td>sticky top:64px，z-index 20</td></tr>
+              <tr><td>内容网格</td><td>自适应</td><td>padding 24px 横向，底部 48px</td></tr>
+              <tr><td>左侧 Dock</td><td>浮动</td><td>垂直居中，z-index 25</td></tr>
+              <tr><td>播放浮窗</td><td>高 600</td><td>顶栏下方，视频区<b>铺满整窗</b>，z-index 60（LayerPlayer）</td></tr>
+              <tr><td>播放浮窗 · 视频 + 控制栏</td><td>自适应</td><td>视频 inset:0 铺满；控制栏悬浮在画面下沿（单条 88px）</td></tr>
+              <tr><td>播放浮窗 · 信息面板</td><td class="mono">400px</td><td>右侧<b>浮层</b>（贴边通高、无圆角），不改变视频尺寸；z-index 45</td></tr>
+              <tr><td>播放浮窗 · 面板（兼热区）</td><td class="mono">400 / 200px</td><td>浮层，鼠标进入展开、移出收回到半宽；z-index 50</td></tr>
+            </tbody>
+          </table>
+          <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div>内容区顶部内边距 = <b>顶栏 64 + 分类 54 + 间距 16 = 134px</b>，
+              否则首行卡片被吸顶栏遮挡。</div></div>
+        </div>
+
+        <div class="panel">
+          <h3>响应式列数</h3>
+          <p class="note">列数由视口宽度推导：<code>floor(视口宽 / CellWidth 208)</code>。这不是配置项，是计算结果。</p>
+          <table style="margin-top:8px">
+            <thead><tr><th>分辨率</th><th>视口宽</th><th>列数</th></tr></thead>
+            <tbody>
+              <tr><td>4K</td><td>3840</td><td>18</td></tr>
+              <tr><td>笔记本 1440p</td><td>2560</td><td>12</td></tr>
+              <tr><td>桌面 1080p</td><td>1920</td><td>9</td></tr>
+              <tr><td>小窗</td><td>1280</td><td>6</td></tr>
+              <tr><td>最小窗</td><td>800</td><td>3</td></tr>
+            </tbody>
+          </table>
+          <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+            <div>列数变化时必须<b>全量重建</b>容器池并重置 <code>FirstVisibleRowIndex</code>；
+              仅行数变化则只调整池尾——两者走不同分支，混用会导致滚动位置错乱。</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 09 交互 ==================== -->
+    <section id="interaction">
+      <div class="sec-head">
+        <h2><span class="sec-num">09</span>交互与动效</h2>
+        <p>动效只做三件事：确认操作、表达层级、衔接状态。不做装饰性编排。</p>
+      </div>
+
+      <div class="panel">
+        <table>
+          <thead><tr><th>交互</th><th>反馈</th><th>时长 / 曲线</th><th>注意</th></tr></thead>
+          <tbody>
+            <tr><td>卡片悬停</td><td>缩放 1.03 + 阴影抬升 + 操作按钮浮出 + 封面缓推 1.04</td>
+              <td class="mono">150ms / EaseStandard</td><td>缩放不参与布局，不影响 Canvas 定位</td></tr>
+            <tr><td>卡片按压</td><td>缩回 1.0，不改变布局边界</td>
+              <td class="mono">150ms / EaseEmphasized</td><td>按压态不得引起相邻卡片位移</td></tr>
+            <tr><td>分类切换</td><td>选中 pill 主题色实底 + 阴影；内容区保留滚动位置或回到顶部</td>
+              <td class="mono">200ms / EaseStandard</td><td>切换需保留各 tab 的滚动位置（design_review 判「中」）</td></tr>
+            <tr><td>主题切换</td><td>表面/文字色过渡，卡片需<b>重建</b>控件</td>
+              <td class="mono">200ms / EaseStandard</td><td>卡片是代码后台按当时 token 创建，不重建会停留在旧主题</td></tr>
+            <tr><td>滚动加载</td><td>底部骨架行渐显</td>
+              <td class="mono">300ms / EaseStandard</td><td>滚动事件按行号变化节流，避免每帧重排</td></tr>
+            <tr><td>浮窗入场</td><td>从下方滑入到顶栏下方</td>
+              <td class="mono">300ms / EaseEmphasized</td><td>叠层后可走 <code>translate</code>；视频区尺寸不参与动画</td></tr>
+            <tr><td>面板收起</td><td>宽度 400→200，右半内容被裁掉；<b>视频区尺寸完全不变</b></td>
+              <td class="mono">200ms / EaseStandard</td><td>鼠标移出面板后延迟 220ms 收回；焦点在面板内（如写评论）时不收回</td></tr>
+            <tr><td>面板展开</td><td>宽度 200→400，完整内容展开</td>
+              <td class="mono">200ms / EaseStandard</td><td>鼠标进入面板即触发；热区就是面板本身，不存在边界判定问题</td></tr>
+            <tr><td>搜索建议</td><td>输入防抖 250ms 后展开建议面板</td>
+              <td class="mono">200ms / EaseStandard</td><td>禁止每次按键都发请求（design_review 判「中」）</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="panel"><h3>必须避免</h3>
+          <ul class="clean">
+            <li>只用 <code>hover</code> 承载关键操作——触摸设备上不可达</li>
+            <li><code>transition: all</code> 全属性动画，会带动布局抖动</li>
+            <li>滚动中触发重布局（每帧遍历上百个容器必然掉帧）</li>
+            <li>悬停时改变元素尺寸或外边距，导致网格重排</li>
+            <li>自动播放视频（消耗流量与电量，插件与规范都列为反模式）</li>
+          </ul></div>
+        <div class="panel"><h3>键盘与焦点</h3>
+          <ul class="clean">
+            <li>网格内 <code>↑↓←→</code> 按行列移动焦点，<code>Enter</code> 播放</li>
+            <li>焦点环用 <code>0 0 0 3px ThemePrimary20</code>，两种主题下都可见</li>
+            <li>浮层打开时焦点陷阱在浮层内，关闭后归还触发元素</li>
+            <li>滚动容器可聚焦，支持 <code>PageUp/PageDown/Home/End</code></li>
+          </ul></div>
+      </div>
+    </section>
+
+    <!-- ==================== 10 无障碍与性能 ==================== -->
+    <section id="a11y">
+      <div class="sec-head">
+        <h2><span class="sec-num">10</span>无障碍与性能</h2>
+        <p>design_review 的通用检查清单里，这两项占了近一半条目。</p>
+      </div>
+
+      <div class="grid-2">
+        <div class="panel">
+          <h3>无障碍</h3>
+          <ul class="checklist">
+            <li><span class="box done"><svg class="icon" style="width:11px;height:11px"><use href="#i-check"/></svg></span>
+              <div>无 emoji 结构图标——本页全部图标为内联 SVG sprite，同一线性风格、统一 1.6 描边</div></li>
+            <li><span class="box done"><svg class="icon" style="width:11px;height:11px"><use href="#i-check"/></svg></span>
+              <div>图标尺寸走令牌（icon-sm/md/lg = 16/20/24），不用任意值</div></li>
+            <li><span class="box"></span><div>暗色正文对比度 ≥ 4.5:1、次要文字 ≥ 3:1，两套主题<b>独立测试</b>而非推断</div></li>
+            <li><span class="box"></span><div>信息不靠颜色单独传达：直播角标同时有文字、进度条同时有数值</div></li>
+            <li><span class="box"></span><div>支持 <code>prefers-reduced-motion</code>：关闭脉冲、缩放与入场位移</div></li>
+            <li><span class="box"></span><div>尊重系统动态字体，卡片标题放大后仍保持 2 行截断不溢出</div></li>
+            <li><span class="box"></span><div>图标按钮必须有 <code>accessibilityLabel</code>（"稍后再看"而非"按钮"）</div></li>
+            <li><span class="box"></span><div>鼠标可点元素 <code>cursor: pointer</code>；焦点顺序与视觉顺序一致</div></li>
+          </ul>
+        </div>
+
+        <div class="panel">
+          <h3>性能（项目已有基础）</h3>
+          <ul class="checklist">
+            <li><span class="box done"><svg class="icon" style="width:11px;height:11px"><use href="#i-check"/></svg></span>
+              <div><b>虚拟列表 + 容器池</b>：仅 (可见行+2)×列数 个控件，200 条数据不全量渲染</div></li>
+            <li><span class="box done"><svg class="icon" style="width:11px;height:11px"><use href="#i-check"/></svg></span>
+              <div><b>图片懒加载 + 并发限流</b>：SemaphoreSlim(4)，仅加载可视区域封面</div></li>
+            <li><span class="box done"><svg class="icon" style="width:11px;height:11px"><use href="#i-check"/></svg></span>
+              <div><b>按行节流</b>：滚动未跨行时跳过重排——全屏上百容器时这是流畅度关键</div></li>
+            <li><span class="box done"><svg class="icon" style="width:11px;height:11px"><use href="#i-check"/></svg></span>
+              <div><b>解码尺寸受限</b>：CoverDecodeWidth 384（2× 屏），不按原图解码</div></li>
+            <li><span class="box"></span><div>图片内存缓存需设上限，长滚动后应淘汰远端的封面位图</div></li>
+            <li><span class="box"></span><div>搜索输入防抖 250ms，避免瀑布式请求</div></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== 11 差距 ==================== -->
+    <section id="gap">
+      <div class="sec-head">
+        <h2><span class="sec-num">11</span>差距分析与落地清单</h2>
+        <p>Token 层已经完备（这是项目最强的部分），<b>缺口全部集中在结构与信息层</b>。</p>
+      </div>
+
+      <div class="panel">
+        <h3>现状 vs 目标</h3>
+        <table>
+          <thead><tr><th>能力</th><th>现状</th><th>目标</th><th>优先级</th></tr></thead>
+          <tbody>
+            <tr><td>设计 Token</td><td><span class="tag ok">已完成</span> 6 个字典全覆盖</td><td>保持</td><td>—</td></tr>
+            <tr><td>亮暗双主题</td><td><span class="tag ok">已完成</span> ThemeDictionary + 重建机制</td><td>保持</td><td>—</td></tr>
+            <tr><td>虚拟列表</td><td><span class="tag ok">已完成</span> 容器池 + 按行节流</td><td>保持</td><td>—</td></tr>
+            <tr><td>应用顶栏</td><td><span class="tag err">缺失</span> 窗口内无任何导航</td><td>64px 玻璃顶栏 + 居中搜索 + 右图标组</td><td><span class="sev critical">严重</span></td></tr>
+            <tr><td>分类导航</td><td><span class="tag err">缺失</span> 只有单一推荐流</td><td>吸顶玻璃 pill，5 项，记住各 tab 滚动位</td><td><span class="sev high">高</span></td></tr>
+            <tr><td>卡片信息层</td><td><span class="tag warn">部分</span> 仅封面 + 标题</td><td>+ 播放量/弹幕数/时长/进度/UP 主行</td><td><span class="sev high">高</span></td></tr>
+            <tr><td>跨页导航</td><td><span class="tag err">缺失</span></td><td>左侧浮动 Dock（≤5 项）</td><td><span class="sev high">高</span></td></tr>
+            <tr><td>播放浮窗</td><td><span class="tag warn">部分</span> 900×550 居中模态，仅控制栏</td><td>视频铺满 + 右侧 hover 唤出的 400px 浮层面板（信息/UP主/互动/评论）</td><td><span class="sev high">高</span></td></tr>
+            <tr><td>叠层合成（画面之上放控件）</td><td><span class="tag ok">链路已验证</span> GPUI + CVPixelBuffer 同管线合成</td><td>控制栏与面板浮在画面上，底部加渐变遮罩兜底</td><td><span class="sev high">高</span></td></tr>
+            <tr><td>骨架 / 空 / 错误态</td><td><span class="tag err">缺失</span> 仅 happy path</td><td>四态齐备，骨架复刻真实几何</td><td><span class="sev high">高</span></td></tr>
+            <tr><td>搜索建议</td><td><span class="tag err">缺失</span></td><td>防抖 250ms + 建议面板</td><td><span class="sev medium">中</span></td></tr>
+            <tr><td>键盘导航</td><td><span class="tag warn">部分</span> 仅 Tab 键</td><td>网格方向键 + 焦点归还 + 焦点环令牌</td><td><span class="sev medium">中</span></td></tr>
+            <tr><td>无 BlurEffect 补偿</td><td><span class="tag ok">已有方案</span> on-content 变体</td><td>新增压内容面板一律走 Strong 变体</td><td><span class="sev medium">中</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="grid-2" style="margin-top:16px">
+        <div class="panel"><h3>落地顺序建议</h3>
+          <ol style="margin:0;padding-left:1.3em;color:var(--text-2);font-size:var(--fs-control);line-height:2">
+            <li><b>先扩数据模型</b>：<code>CoverItem</code> 增加 ViewCount / DanmakuCount / Duration / UpName / UpAvatar / Progress。这是所有信息层的前提，且不影响现有虚拟列表。</li>
+            <li><b>再补卡片信息层</b>：同步调整 <code>CellHeight</code>（+ 署名行高度），验证 resize 推导仍正确。</li>
+            <li><b>然后加顶栏与分类</b>：新控件统一引用 <code>on-content</code> / Strong 变体，避免压在网格上时文字糊。</li>
+            <li><b>再改造播放浮窗</b>：保持视频铺满，新增右侧 400px 浮层面板与 hover 热区；控制栏悬浮在画面下沿并自动隐藏。
+              旧底座下「宽度动画导致原生视图每帧重布局」的风险已随叠层合成消失，
+              但仍要验证两点：浮层进出时视频不黑帧、控制栏文字在亮画面上可读。</li>
+            <li><b>最后补状态</b>：骨架 → 空 → 错误 → 离线，四态共用一套 <code>state</code> 样式类。</li>
+            <li><b>Dock 放最后</b>：它依赖多页面存在，页面未就绪时先留位不放功能。</li>
+          </ol></div>
+
+        <div class="panel"><h3>落地时必须核对</h3>
+          <ul class="clean">
+            <li>新增颜色<b>只能</b>来自 <code>Palette/Surfaces</code>，禁止在视图里写 hex</li>
+            <li>新增尺寸走 <code>Dimensions</code>，间距保持 4px 网格</li>
+            <li>随主题变化的资源：XAML 用 <code>DynamicResource</code>；代码后台用
+              <code>TryFindResource(key, ActualThemeVariant, out var v)</code>——漏传变体会静默回退</li>
+            <li>XML 注释里不能出现连续两个连字符，引用 CSS 变量名时写 <code>bew-xxx</code></li>
+            <li>改动后跑一遍 <code>docs/skin-preview</code> 的亮暗截图，两套主题都要看</li>
+          </ul></div>
+      </div>
+    </section>
+
+    <div class="foot">YKPili UX 设计规范 · 生成自 <code>ui-ux-pro-max</code> 设计智能库 + 项目既有 Token 层</div>
+  </main>
+</div>
+
+<script>
+/* ============================================================================
+   预览数据与交互。纯前端，无外部资源。
+   ========================================================================== */
+
+/* 12 条示例数据，文案取自参考界面，便于与目标效果对照 */
+const FEED = [
+  { t: '编程并没有被解决',                 a: '#3B2E5A', b: '#6B4E9E', up: '沙漠在逃',   time: '10小时前', v: '1.1万', d: '3',    len: '25:27' },
+  { t: '10.15炸裂！大肥鱼崩了！',           a: '#1F3A5F', b: '#2E6BA8', up: '最新情报局', time: '7小时前',  v: '1628',  d: '124',  len: '01:35' },
+  { t: '二游最强BOSS战BGM之争',             a: '#5A2A1F', b: '#B85B2E', up: '拾蒲洛夫',   time: '21小时前', v: '5988',  d: '34',   len: '08:54' },
+  { t: '劝大家不要再用 Deepseek 写论文',    a: '#123A3A', b: '#1E8A7A', up: '乔治学长讲论文', time: '昨天', v: '3955',  d: '80',   len: '01:56' },
+  { t: 'GUI 设计师挑战纯 CLI 生活',         a: '#12301E', b: '#2E8A4A', up: '量子菠萝',   time: '9-22',    v: '1641',  d: '33',   len: '15:25' },
+  { t: '大型纪录片《deepseek崩了》',        a: '#4A1518', b: '#B02A32', up: '灵依不想做视频', time: '7小时前', v: '3726', d: '16', len: '01:21' },
+
+  { t: '法官不懂法？气的律师当庭报警',      a: '#5A1F22', b: '#C0392B', up: 'b站精彩名人演讲', time: '10-4', v: '1.2万', d: '56', len: '05:36' },
+  { t: '那些最终被证实成真的古代神话',      a: '#3A2A18', b: '#8A6A2E', up: '生肉烹饪师', time: '21小时前', v: '4.2万', d: '144', len: '17:54' },
+  { t: '5090 禁止出口？那我 B300 哪来的',   a: '#15304A', b: '#2E7AA8', up: '一碗甜子',   time: '10-8',    v: '2.2万', d: '106', len: '29:26' },
+  { t: '卡琳超详细机制速课打法',            a: '#40163A', b: '#9E3A8A', up: '阿哲同学',   time: '9-26',    v: '4414',  d: '91',   len: '43:50' },
+  { t: '6G 显存 + 16G 内存！MiniMax H3',    a: '#2A2E38', b: '#5A6272', up: '班长captain', time: '10-5',  v: '2.6万', d: '99',   len: '08:48' },
+  { t: '吓哭了，这还是原神吗！',            a: '#4A3A12', b: '#B08A20', up: '月夏summer', time: '10-4',    v: '11.2万', d: '133', len: '00:58' }
+];
+
+const I = (id, cls) => `<svg class="icon ${cls || ''}"><use href="#i-${id}"/></svg>`;
+
+function card(d, opt) {
+  opt = opt || {};
+  return `
+  <article class="card" tabindex="0" aria-label="${d.t}">
+    <div class="thumb">
+      <div class="art" style="background:linear-gradient(135deg, ${d.a} 0%, ${d.b} 100%)">
+        <span>${d.t}</span>
+      </div>
+      ${opt.live ? `<span class="badge-live tag err">${I('live','icon-sm')}直播中</span>` : ''}
+      <div class="stats">
+        <i>${I('play','icon-sm')}${d.v}</i>
+        <i>${I('danmaku','icon-sm')}${d.d}</i>
+      </div>
+      <div class="dust">${d.len}</div>
+      ${opt.progress ? `<div class="progress"><i style="width:${opt.progress}%"></i></div>` : ''}
+      <div class="hover-actions">
+        <button title="稍后再看" aria-label="稍后再看">${I('clock','icon-sm')}</button>
+        <button title="下载" aria-label="下载">${I('download','icon-sm')}</button>
+        <button title="更多" aria-label="更多">${I('more','icon-sm')}</button>
+      </div>
+    </div>
+    <div class="title">${d.t}</div>
+    <div class="byline">
+      <span class="up"></span>
+      <span class="name">${d.up}</span>
+      <span class="sep">·</span>
+      <span>${d.time}</span>
+    </div>
+  </article>`;
+}
+
+/* 首页网格：12 张，其中有直播与已观看各一，展示状态差异 */
+document.getElementById('rail').innerHTML = FEED
+  .map((d, i) => card(d, i === 2 ? { progress: 38 } : i === 10 ? { live: true } : null))
+  .join('');
+
+/* 卡片状态实测区：5 张固定状态 */
+const SR = FEED.slice(0, 4);
+document.getElementById('state-rail').innerHTML = `
+  ${card(SR[0], null)}
+  <article class="card" style="background:var(--surface-content);border-color:var(--border-popover);
+      box-shadow:var(--shadow-card-hover);transform:translateY(-2px) scale(1.02)">
+    <div class="thumb">
+      <div class="art" style="background:linear-gradient(135deg,${SR[1].a},${SR[1].b});transform:scale(1.04)"><span>${SR[1].t}</span></div>
+      <div class="stats"><i>${I('play','icon-sm')}${SR[1].v}</i><i>${I('danmaku','icon-sm')}${SR[1].d}</i></div>
+      <div class="dust">${SR[1].len}</div>
+      <div class="hover-actions" style="opacity:1;transform:none">
+        <button>${I('clock','icon-sm')}</button><button>${I('download','icon-sm')}</button><button>${I('more','icon-sm')}</button>
+      </div>
+    </div>
+    <div class="title">${SR[1].t}</div>
+    <div class="byline"><span class="up"></span><span class="name">${SR[1].up}</span><span class="sep">·</span><span>${SR[1].time}</span></div>
+  </article>
+  ${card(SR[2], { live: true })}
+  ${card(SR[3], { progress: 62 })}
+  <article class="card">
+    <div class="sk sk-thumb"></div>
+    <div class="sk sk-line" style="width:92%"></div>
+    <div class="sk sk-line" style="width:58%"></div>
+  </article>`;
+
+/* 初始态在脚本末尾统一设置（见文件底部「初始态」），
+   此处不得调用 syncPlayIcon/setSidebar——它们依赖后面才声明的 const pw。 */
+
+/* ---------- 主题切换 ---------- */
+const thDark = document.getElementById('th-dark'), thLight = document.getElementById('th-light');
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  thDark.setAttribute('aria-pressed', String(t === 'dark'));
+  thLight.setAttribute('aria-pressed', String(t === 'light'));
+  paintTokens();
+}
+thDark.onclick = () => setTheme('dark');
+thLight.onclick = () => setTheme('light');
+
+/* ---------- 渲染引擎切换 ---------- */
+const engA = document.getElementById('eng-avalonia'), engI = document.getElementById('eng-ideal');
+function setEngine(e) {
+  document.documentElement.dataset.engine = e;
+  engA.setAttribute('aria-pressed', String(e === 'avalonia'));
+  engI.setAttribute('aria-pressed', String(e === 'ideal'));
+  /* 理想态下压内容面板可以降低不透明度（有模糊兜底）；Avalonia 实际必须保持 0.92 */
+  document.querySelectorAll('.topbar').forEach(el => {
+    el.style.background = e === 'ideal' ? 'var(--surface-elevated)' : 'var(--surface-elevated-strong)';
+  });
+}
+engA.onclick = () => setEngine('avalonia');
+engI.onclick = () => setEngine('ideal');
+
+/* ============================================================================
+   播放浮窗：视频铺满 + 右侧 hover 唤出的浮层面板
+   实现注意：面板是 absolute 浮层（400px），进出只改 opacity/transform，
+   视频区 inset:0 尺寸全程不变——这正是「播放窗口不动」的含义。
+   唤出与收回由面板自身的 mouseenter/mouseleave 驱动，移出延迟 220ms。
+   ========================================================================== */
+const pw = document.getElementById('pw');
+const pwUrl = document.getElementById('pw-url');
+
+function setSidebar(expanded, why) {
+  pw.classList.toggle('collapsed', !expanded);
+  pwUrl.textContent = expanded
+    ? '播放浮窗 · 面板展开' + (why ? `（${why}）` : '')
+    : '播放浮窗 · 面板收起 · 右侧 hover 唤出' + (why ? `（${why}）` : '');
+  /* 面板左上角那枚按钮的图标随状态切换：
+     展开态显示 ×（收起），收起态显示 ‹（展开）——面板收起后它是唯一的唤回入口。 */
+  const xIcon = document.getElementById('pw-x-icon');
+  if (xIcon) xIcon.setAttribute('href', expanded ? '#i-close' : '#i-chevron-left');
+  const xBtn = document.getElementById('pw-close');
+  if (xBtn) xBtn.title = expanded ? '收起面板' : '展开信息面板';
+  syncPlayIcon();
+}
+
+/* 播放 / 暂停图标同步（完整控制栏与简略进度条两处按钮共用）。 */
+function syncPlayIcon() {
+  const toggle = document.getElementById('pw-toggle');
+  if (toggle) toggle.innerHTML = pw.classList.contains('playing')
+    ? '<svg class="icon icon-sm"><use href="#i-pause"/></svg>'
+    : '<svg class="icon icon-sm"><use href="#i-play"/></svg>';
+}
+/* 简略进度条只有一条线、没有按钮，因此不需要图标同步（保留空实现以便调用处不改） */
+function syncMiniIcon() {}
+
+
+/* 以下绑定逐个容错：任一节点缺失只跳过该条，不会中断后续绑定 */
+const on = (sel, fn) => { const el = document.querySelector(sel); if (el) el.addEventListener('click', fn); };
+on('#pw-expand', () => setSidebar(true, '展开面板'));
+on('#pw-collapse', () => setSidebar(false, '收起面板'));
+on('#pw-close', () => setSidebar(false, '点击收起按钮'));
+
+/* ---------- 诊断：打印浮窗各层实测尺寸 ----------
+   浮窗布局涉及多层绝对定位，肉眼很难判断是「元素被隐藏」还是「窗口太窄被挤没了」。
+   这个按钮把每层的实际宽高与可见性打出来，而不是靠猜。 */
+document.getElementById('pw-measure')?.addEventListener('click', () => {
+  const box = document.getElementById('pw').getBoundingClientRect();
+  const rows = [];
+  const add = (name, el) => {
+    if (!el) { rows.push([name, '不在 DOM']); return; }
+    const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    rows.push([
+      name,
+      `${Math.round(r.width)}×${Math.round(r.height)}  @x=${Math.round(r.left - box.left)}`,
+      `opacity=${cs.opacity}`,
+      `display=${cs.display}`,
+      `z=${cs.zIndex}`
+    ]);
+  };
+  add('浮窗 .pw', document.getElementById('pw'));
+  add('视频区 .pw-main', document.querySelector('.pw-main'));
+  add('信息面板 .pw-side', document.getElementById('pw-side'));
+  add('面板内层 .pw-side-inner', document.querySelector('.pw-side-inner'));
+  add('控制栏 .pw-ctrl', document.querySelector('.pw-ctrl'));
+  console.table(rows.map(r => ({ 元素: r[0], 尺寸: r[1], opacity: r[2], display: r[3], 'z-index': r[4] })));
+  /* 面板内层宽度与外框是否一致：不一致即说明有横向溢出 */
+  const r = document.getElementById('pw-side').getBoundingClientRect();
+  const idem = document.querySelector('.pw-side-inner').getBoundingClientRect();
+  console.log('[UX 诊断] 面板实际可见？',
+    r.width > 0 && getComputedStyle(document.getElementById('pw-side')).opacity !== '0' ? '是' : '否',
+    '| 面板内层宽度与面板外框是否一致？',
+    Math.abs(idem.width - r.width) < 2 ? '一致（无溢出）' : `不一致：内层 ${Math.round(idem.width)} vs 外框 ${Math.round(r.width)}`
+  );
+});
+
+/* 播放：进入观看 —— 按参考图行为收起面板 */
+function play() {
+  pw.classList.add('playing');
+  setSidebar(false, '开始播放');
+  syncMiniIcon();
+}
+/* 暂停：完整控制栏恢复常驻（暂停态下简略条让位给完整控制栏） */
+function pause(why) {
+  pw.classList.remove('playing');
+  syncPlayIcon();
+  syncMiniIcon();
+  if (why) setSidebar(true, why);
+}
+on('#pw-play', play);
+on('#pw-simulate', () => {
+  if (pw.classList.contains('playing')) pause('暂停');
+  else play();
+});
+/* 控制栏播放按钮：只切换播放态，不强制改面板 */
+on('#pw-toggle', () => {
+  pw.classList.toggle('playing');
+  syncPlayIcon();
+  syncMiniIcon();
+});
+/* 以下鼠标事件与 .pw-video / .pw-side 的绑定统一放在文件末尾的 boot() 里，
+   避免重复绑定；此处只保留 Tab 与排序切换。 */
+
+/* 面板内的 Tab 与排序切换 */
+document.querySelectorAll('.pw-tab').forEach(t => {
+  t.onclick = () => {
+    document.querySelectorAll('.pw-tab').forEach(x => x.setAttribute('aria-selected', 'false'));
+    t.setAttribute('aria-selected', 'true');
+  };
+});
+document.querySelectorAll('.pw-sort span').forEach(s => {
+  if (s.textContent.trim() === '|') return;
+  s.onclick = () => {
+    document.querySelectorAll('.pw-sort span').forEach(x => x.classList.remove('on'));
+    s.classList.add('on');
+  };
+});
+
+/* ---------- 分类切换 ---------- */
+document.querySelectorAll('.tabs .tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tabs .tab').forEach(t => t.setAttribute('aria-selected', 'false'));
+    tab.setAttribute('aria-selected', 'true');
+  };
+});
+
+/* ---------- 令牌值实时回填（让表格显示当前主题的真实值） ---------- */
+function paintTokens() {
+  const cs = getComputedStyle(document.documentElement);
+  const set = (id, key) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = cs.getPropertyValue(key).trim();
+  };
+  set('v-bg', '--bg-homepage'); set('v-content', '--surface-content');
+  set('v-elev', '--surface-elevated'); set('v-strong', '--surface-elevated-strong');
+  set('v-t1', '--text-1'); set('v-t3', '--text-3'); set('v-t4', '--text-4');
+  set('v-bp', '--border-popover');
+}
+
+/* ---------- 网格列数随窗口宽度自适应（与项目推导规则一致） ---------- */
+function fitCols() {
+  const rail = document.getElementById('rail');
+  const w = rail.clientWidth;
+  const cols = Math.max(2, Math.min(12, Math.floor(w / 208)));
+  rail.style.setProperty('--cols', cols);
+}
+window.addEventListener('resize', fitCols);
+
+paintTokens();
+fitCols();
+
+/* ---------- 初始态 ----------
+   必须放在 `const pw` 与所有播放器函数声明之后：这些函数内部引用 pw，
+   过早调用会命中暂时性死区（ReferenceError: Cannot access 'pw' before initialization）。
+   面板默认收起（沉浸优先），悬浮控制栏常驻——未播放时不参与自动隐藏。 */
+/* ---------- 初始化（延迟到自检之后） ----------
+   面板默认收起（沉浸优先），悬浮控制栏常驻——未播放时不参与自动隐藏。
+   放进 setTimeout 有两个原因：既保证 const pw 与全部函数已声明，
+   也让自检先跑完；这样初始化里的任何失败都会被收集上报，而不是静默中断后续绑定。 */
+const bootErrors = [];
+function boot() {
+  const need = selector => {
+    const el = document.querySelector(selector);
+    if (!el) { bootErrors.push(selector + ' 不在 DOM'); return null; }
+    return el;
+  };
+  /* 事件绑定逐个容错：单个节点缺失只记录，不中断其余绑定 */
+  const bind = (selector, handler) => { const el = need(selector); if (el) el.addEventListener('click', handler); };
+
+  const side = need('#pw-side');
+  if (side) side.addEventListener('mouseenter', () => {
+    if (document.getElementById('pw').classList.contains('playing')) pause('鼠标移入面板');
+  });
+  /* 仅需存在、无需绑事件的容器：缺了只记录，不抛错 */
+  need('.pw-ctrl');
+
+  bind('#pw-expand', () => setSidebar(true, '点击工具列唤回'));
+  bind('#pw-collapse', () => setSidebar(false, '失去焦点'));
+  bind('#pw-close', () => setSidebar(false, '点击关闭'));
+  bind('#pw-simulate', () => {
+    if (document.getElementById('pw').classList.contains('playing')) pause('暂停'); else play();
+  });
+
+  /* ---------- 面板本体兼作 hover 热区：进入展开、移出收回 ----------
+     收起态面板只占 200px（半宽），这 200px 就是热区——所以不需要额外的热区元素。
+     移出后用 220ms 延迟收回，避免鼠标掠过边界时闪收。 */
+  const sideEl = need('#pw-side');
+  if (sideEl) {
+    let hoverOutTimer = null;
+    sideEl.addEventListener('mouseenter', () => {
+      clearTimeout(hoverOutTimer);
+      setSidebar(true, '鼠标进入面板区域');
+    });
+    sideEl.addEventListener('mouseleave', () => {
+      clearTimeout(hoverOutTimer);
+      hoverOutTimer = setTimeout(() => {
+        /* 焦点在面板内（例如正在写评论）时不收回，否则会打断输入 */
+        if (sideEl.contains(document.activeElement)) return;
+        setSidebar(false, '鼠标移出面板区域');
+      }, 220);
+    });
+  }
+
+  const pwEl = need('#pw');
+  if (pwEl) {
+    setSidebar(false);
+    const video = need('.pw-video');
+    if (video) video.addEventListener('click', e => {
+      if (e.target.closest('.pw-play') || e.target.closest('.pw-watch') || e.target.closest('.pw-ctrl')
+          || e.target.closest('.pw-side')) return;
+      if (!pwEl.classList.contains('collapsed')) setSidebar(false, '点击视频区');
+    });
+  }
+  if (bootErrors.length) reportProblems(bootErrors);
+}
+
+/* ---------- 运行时自检 ----------
+   1) 结构错误：应有的节点缺失 → 控制台打印 + 页面顶部红条提示
+   2) 陈旧缓存：旧版本的浮窗工具列有 9 个按钮，新版已移除该工具列。
+      若检测到旧标记，说明浏览器仍在用缓存副本，而不是当前文件。 */
+function reportProblems(items) {
+  console.error('[UX 预览自检] 异常：', items);
+  const warn = document.createElement('div');
+  warn.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:9999;padding:8px 12px;' +
+    'background:#E5484D;color:#fff;font:13px/1.5 var(--font-ui);';
+  warn.textContent = '预览自检发现问题：' + items.join('；');
+  document.body.prepend(warn);
+}
+
+(function selfCheck() {
+  /* 必须用 CSS 选择器而不是 id：控制栏等元素只有 class，按 id 查会误报 */
+  const required = ['.pw', '#pw-side', '.pw-side-inner', '.pw-ctrl', '#pw-close', '#pw-measure'];
+  const missing = required.filter(sel => !document.querySelector(sel));
+  if (missing.length) reportProblems(missing);
+  /* pw-dock 是 2026-10 改版前的旧类名，仍存在即说明拿到的是缓存副本 */
+  if (document.querySelector('.pw-dock')) {
+    console.warn('[UX 预览自检] 检测到旧版工具列 .pw-dock，页面来自缓存。请强制刷新：⌘⇧R');
+  }
+})();
+
+setTimeout(() => {
+  boot();
+  if (bootErrors.length) console.error('[UX 自检] 初始化未完成项：', bootErrors);
+}, 0);
+</script>
+</body>
+</html>

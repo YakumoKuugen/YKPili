@@ -64,6 +64,8 @@
       <SolidColorBrush x:Key="Fill3" Color="#73838391" />
       <SolidColorBrush x:Key="Fill4" Color="#99838391" />
       <SolidColorBrush x:Key="FillAlt" Color="#73FFFFFF" />
+      <!-- 禁用态底：比 Fill1 更低一档（10%），禁用与普通填充要能一眼分开 -->
+      <SolidColorBrush x:Key="FillDisabled" Color="#1A838391" />
 
       <!-- ===== 边框 ===== -->
       <SolidColorBrush x:Key="BorderSubtle" Color="#2E838391" />
@@ -134,6 +136,8 @@
       <SolidColorBrush x:Key="Fill3" Color="#4D838391" />
       <SolidColorBrush x:Key="Fill4" Color="#66838391" />
       <SolidColorBrush x:Key="FillAlt" Color="#1A838391" />
+      <!-- 禁用态底：亮色主题下用同样的低档不透明度 -->
+      <SolidColorBrush x:Key="FillDisabled" Color="#14838391" />
 
       <!-- ===== 边框 ===== -->
       <SolidColorBrush x:Key="BorderSubtle" Color="#29838391" />

@@ -1,0 +1,31 @@
+[package]
+name = "mpv-wgpu-spike"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mpv-wgpu = "0.1.0"
+wgpu-external-frame = "0.4.0"
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"
+objc2-core-foundation = "0.3.2"
+objc2-core-video = { version = "0.3.2", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVBase", "CVReturn", "CVPixelBufferIOSurface", "objc2-io-surface"] }
+objc2-io-surface = "0.3"
+objc2-foundation = "0.3.2"
+objc2-av-foundation = { version = "0.3.2", features = [
+    "AVAsset",
+    "AVAssetTrack",
+    "AVAssetReader",
+    "AVAssetReaderOutput",
+    "AVMediaFormat",
+    # 音频：系统音频渲染器 + 统一的播放时间轴（主时钟）
+    "AVSampleBufferAudioRenderer",
+    "AVSampleBufferRenderSynchronizer",
+    "AVQueuedSampleBufferRendering",
+    "objc2-core-media",
+] }
+objc2-core-media = { version = "0.3.2", features = ["CMSampleBuffer", "CMTime", "CMBase"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", features = ["NSWindow", "NSView", "NSResponder"] }
+

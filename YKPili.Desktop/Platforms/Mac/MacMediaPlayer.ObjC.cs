@@ -38,6 +38,8 @@ public partial class MacMediaPlayer
     private static IntPtr _selFileURLWithPath;
     private static IntPtr _selTimebase;
     private static IntPtr _selSetRateTime;
+    private static IntPtr _selVolume;
+    private static IntPtr _selSetVolume;
     private static bool _selectorsCached;
 
     // ---- 系统库路径 ----
@@ -119,6 +121,14 @@ public partial class MacMediaPlayer
     [DllImport(CoreMediaLib)]
     private static extern int CMTimebaseSetRate(IntPtr timebase, double rate);
 
+    /// <summary>
+    /// 读取 timebase 的当前时间,用于获取播放进度。
+    /// CMTime 为 24 字节结构体,macOS ARM64 上通过隐藏指针返回,由 .NET 的封送层处理;
+    /// 调用方仍需校验 TimeScale 是否为 0(无效/未就绪时为 0)。
+    /// </summary>
+    [DllImport(CoreMediaLib)]
+    private static extern CMTime CMTimebaseGetTime(IntPtr timebase);
+
     // ================================================================
     // Selector 缓存:首次访问时一次性注册所有需要用到的 ObjC 方法名
     // ================================================================
@@ -146,6 +156,8 @@ public partial class MacMediaPlayer
         _selFileURLWithPath = sel_registerName("fileURLWithPath:");
         _selTimebase = sel_registerName("timebase");
         _selSetRateTime = sel_registerName("setRate:time:");
+        _selVolume = sel_registerName("volume");
+        _selSetVolume = sel_registerName("setVolume:");
     }
 
     // ================================================================

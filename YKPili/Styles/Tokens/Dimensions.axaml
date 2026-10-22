@@ -83,6 +83,24 @@
   <x:Double x:Key="PlayerTransportButtonWidth">48</x:Double>
   <x:Double x:Key="PlayerTransportButtonHeight">36</x:Double>
   <x:Double x:Key="PlayerPauseIndicatorSize">80</x:Double>
+  <!--
+    播放器控制栏高度。两个口径各具其名，不是冲突，而是各自绑定一种底座：
+
+    PlayerControlBarHeight 50
+      现状 / Avalonia 让位口径。视频由 NativeControlHost 的原生视图渲染，
+      Avalonia 绘制的内容无法覆盖它（框架未提供层级控制 API），
+      因此控制栏不能叠在画面上，改为让视频渲染区让出这一段高度。
+
+    PlayerControlBarHeightOverlay 88
+      目标 / GPUI 悬浮口径。视频帧（CVPixelBuffer）与控件在同一条渲染管线里合成，
+      控制栏可以直接悬浮在画面下沿，不再切掉画面高度。
+      88 = 弹幕输入 38 + 操作条 50。
+
+    底座决策见设计文档附录 A 的 D-01：一期维持 Avalonia，二期只迁播放浮窗。
+    迁移时两个令牌的消费方要一起换，不要留半个。
+  -->
+  <x:Double x:Key="PlayerControlBarHeight">50</x:Double>
+  <x:Double x:Key="PlayerControlBarHeightOverlay">88</x:Double>
 
   <!-- ================= 封面网格（首页） ================= -->
   <!-- 与 HomeViewModel 的布局常量保持同一来源，避免样式与布局各改一半 -->
@@ -90,5 +108,31 @@
   <x:Double x:Key="CoverItemHeight">108</x:Double>
   <x:Double x:Key="CoverCellWidth">208</x:Double>
   <x:Double x:Key="CoverCellHeight">166</x:Double>
+
+  <!-- ================= 场景层级（z-index） ================= -->
+  <!--
+    规则：先场景、后层内。播放浮窗是一个独立场景（LayerPlayer 60），
+    信息面板（LayerPanel 45）与骑边界按钮（LayerPanelToggle 46）是它的子元素，
+    只在场景内部排序；不能与 60 平铺成兄弟，否则 45 小于 60，面板会被视频整个盖住。
+    跨场景只比较 0 / 20 / 25 / 30 / 60 / 65 / 70 / 75 这几个场景层号。
+    · 65 LayerMenu    菜单 / 下拉 / Popover —— 必须低于遮罩与模态（70），
+                      模态打开时页面上的菜单要被遮住，而不是浮在对话框上面。
+    · 75 LayerToast   Toast / 通知条 —— 必须在一切之上，操作反馈的可见性
+                      优先于模态的独占性。
+
+    用法：<Border Panel.ZIndex="{DynamicResource LayerPanel}" />
+    视图不得直接写字面量 z-index。
+  -->
+  <x:Int32 x:Key="LayerBase">0</x:Int32>
+  <x:Int32 x:Key="LayerPageFloat">1</x:Int32>
+  <x:Int32 x:Key="LayerStickyNav">20</x:Int32>
+  <x:Int32 x:Key="LayerDock">25</x:Int32>
+  <x:Int32 x:Key="LayerTopBar">30</x:Int32>
+  <x:Int32 x:Key="LayerPanel">45</x:Int32>
+  <x:Int32 x:Key="LayerPanelToggle">46</x:Int32>
+  <x:Int32 x:Key="LayerPlayer">60</x:Int32>
+  <x:Int32 x:Key="LayerMenu">65</x:Int32>
+  <x:Int32 x:Key="LayerOverlay">70</x:Int32>
+  <x:Int32 x:Key="LayerToast">75</x:Int32>
 
 </ResourceDictionary>

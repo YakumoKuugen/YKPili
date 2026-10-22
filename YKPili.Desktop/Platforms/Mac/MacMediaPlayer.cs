@@ -59,6 +59,95 @@ public partial class MacMediaPlayer : IPlatformMediaPlayer
     /// <summary>触发原生视图重新布局(尺寸变化时调用)</summary>
     public void TriggerLayout() => _host?.TriggerLayout();
 
+    // ---- 播放参数与进度 ----
+    // 音量与速率保存在实例上:即使渲染器尚未就绪(下载中)也要能记录用户设定,
+    // 待初始化完成后统一应用。
+    private double _volume = 1.0;
+    private double _rate = 1.0;
+    // 时长解析结果缓存:Duration 会被进度条按帧读取,不能每次都去读文件
+    private string? _durationCachePath;
+    private TimeSpan? _durationCache;
+
+    /// <summary>音量(0.0 - 1.0)</summary>
+    public double Volume
+    {
+        get => _volume;
+        set
+        {
+            _volume = Math.Clamp(value, 0.0, 1.0);
+            if (_initialized && _audioRenderer != IntPtr.Zero)
+            {
+                objc_msgSend_void_float(_audioRenderer, _selSetVolume, (float)_volume);
+                Trace.WriteLine($"[MacPlayer] Volume applied: {_volume:F2}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// 播放速率(1.0 为正常)。暂停状态下只记录数值,Resume 时按该值恢复,
+    /// 因此"暂停 → 改倍速 → 恢复"不会退回 1.0。
+    /// </summary>
+    public double Rate
+    {
+        get => _rate;
+        set
+        {
+            _rate = Math.Clamp(value, 0.25, 4.0);
+            if (_initialized && _isPlaying)
+                objc_msgSend_void_float(_synchronizer, _selSetRate, (float)_rate);
+            Trace.WriteLine($"[MacPlayer] Rate = {_rate:F2} (playing={_isPlaying})");
+        }
+    }
+
+    /// <summary>
+    /// 当前播放位置:读取同步器 timebase 的当前时间。
+    /// timebase 未就绪或时间无效时返回 Zero,由界面据此降级。
+    /// </summary>
+    public TimeSpan Position
+    {
+        get
+        {
+            if (!_initialized || _synchronizer == IntPtr.Zero) return TimeSpan.Zero;
+            try
+            {
+                var timebase = objc_msgSend(_synchronizer, _selTimebase);
+                if (timebase == IntPtr.Zero) return TimeSpan.Zero;
+
+                var cm = CMTimebaseGetTime(timebase);
+                // TimeScale 为 0 表示该 CMTime 无效(尚未开始播放)
+                if (cm.TimeScale == 0) return TimeSpan.Zero;
+
+                var seconds = (double)cm.Value / cm.TimeScale;
+                return seconds > 0 ? TimeSpan.FromSeconds(seconds) : TimeSpan.Zero;
+            }
+            catch
+            {
+                return TimeSpan.Zero;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 媒体总时长:解析本地缓存 MP4 的 mvhd box。
+    /// 结果按文件路径缓存;解析失败返回 Zero(界面降级为只显示已播放时间)。
+    /// </summary>
+    public TimeSpan Duration
+    {
+        get
+        {
+            var path = _videoCachePath;
+            if (_durationCachePath != path)
+            {
+                _durationCachePath = path;
+                _durationCache = string.IsNullOrEmpty(path)
+                    ? null
+                    : YKPili.Services.Media.Mp4DurationReader.TryRead(path);
+                Trace.WriteLine($"[MacPlayer] Duration resolved: {_durationCache?.TotalSeconds:F2}s ({path})");
+            }
+            return _durationCache ?? TimeSpan.Zero;
+        }
+    }
+
     /// <summary>当前是否在播放</summary>
     public bool IsPlaying => _isPlaying;
 
@@ -298,9 +387,11 @@ public partial class MacMediaPlayer : IPlatformMediaPlayer
                     if (hasAudio)
                         audioEnqueuedCount = EnqueueSamples(_audioCachePath!, "soun", _audioRenderer, "音频", 0, ct);
 
-                    // 启动同步播放
-                    Trace.WriteLine($"[MacPlayer] >>> Starting playback at {startPct:P1} buffer (video={videoEnqueuedCount} initial samples, audio={audioEnqueuedCount} initial samples)");
-                    objc_msgSend_void_float(_synchronizer, _selSetRate, 1.0f);
+                    // 启动同步播放:使用当前设定的速率与音量(支持倍速与音量记忆)
+                    Trace.WriteLine($"[MacPlayer] >>> Starting playback at {startPct:P1} buffer (video={videoEnqueuedCount} initial samples, audio={audioEnqueuedCount} initial samples, rate={_rate:F2}, volume={_volume:F2})");
+                    if (_audioRenderer != IntPtr.Zero)
+                        objc_msgSend_void_float(_audioRenderer, _selSetVolume, (float)_volume);
+                    objc_msgSend_void_float(_synchronizer, _selSetRate, (float)_rate);
                     _isPlaying = true;
                     PlaybackStarted?.Invoke();
                 }
@@ -608,12 +699,16 @@ public partial class MacMediaPlayer : IPlatformMediaPlayer
         _isPlaying = false;
     }
 
-    /// <summary>恢复:把同步器 rate 设为 1</summary>
+    /// <summary>恢复:按当前设定的速率恢复播放(支持倍速),同时补应用音量</summary>
     public void Resume()
     {
-        Trace.WriteLine("[MacPlayer] Resume: rate=1.0");
+        Trace.WriteLine($"[MacPlayer] Resume: rate={_rate:F2}");
         if (_initialized)
-            objc_msgSend_void_float(_synchronizer, _selSetRate, 1.0f);
+        {
+            objc_msgSend_void_float(_synchronizer, _selSetRate, (float)_rate);
+            if (_audioRenderer != IntPtr.Zero)
+                objc_msgSend_void_float(_audioRenderer, _selSetVolume, (float)_volume);
+        }
         _isPlaying = true;
     }
 

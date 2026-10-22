@@ -13,6 +13,18 @@ public class NullMediaPlayer : IPlatformMediaPlayer
     /// <summary>始终未在播放</summary>
     public bool IsPlaying => false;
 
+    /// <summary>空实现:音量读写不产生效果</summary>
+    public double Volume { get; set; } = 1.0;
+
+    /// <summary>空实现:速率读写不产生效果</summary>
+    public double Rate { get; set; } = 1.0;
+
+    /// <summary>空实现:无位置信息(界面据此降级)</summary>
+    public TimeSpan Position => TimeSpan.Zero;
+
+    /// <summary>空实现:无时长信息(界面据此降级)</summary>
+    public TimeSpan Duration => TimeSpan.Zero;
+
     /// <summary>无原生宿主控件</summary>
     public NativeControlHost? NativeControlHost => null;
 
