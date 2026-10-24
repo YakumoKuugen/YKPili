@@ -4849,7 +4849,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td><span class="tag ok">已有</span> 宽度与胶囊滑块已落地，颜色仍是硬编码</td>
           <td><code>scroll</code> 模块（<code>Scrollable</code> + <code>Theme.scrollbar_mode</code> +
             <code>ThemeColor.scrollbar</code>）→ 覆盖 <code>scrollbar</code> 色；
-            <b>宽度 6 / 最小 24 文档未提供；只有颜色与显示模式（E-4）</b></td></tr>
+            <b>宽度 6 / 最小 24 可配（base <code>ScrollbarStyles</code>，E-4）</b></td></tr>
         <tr><td>导航</td><td>分页 / 加载更多 / 无限滚动</td>
           <td class="mono">—</td>
           <td><span class="tag warn">部分</span> 有滚动加载逻辑，无「加载更多」与分页 UI</td>
@@ -5857,8 +5857,9 @@ ul.clean li::marker { color: var(--theme-primary); }
             和 HTML 预览是两套写法；<b>迁移后两套都作废</b>，统一由 <code>scroll</code> 模块出。
             ② 原 7 处硬编码 hex（<code>ScrollBarPanningThumbBackground</code> 等）随迁移消失，
             颜色只从 <code>ThemeColor.scrollbar</code> / 项目扩展字段取。
-            ③ <b>文档未提供宽 / 最小长度配置（E-4）</b>：0.8.0 只公开 scrollbar 颜色与
-            <code>ScrollbarMode</code>；要精确 6 / 24 需自绘滚动条或接受默认（thumb 6 / 最小 48 是源码默认）。</div></div>
+            ③ <b>可配（E-4）</b>：base primitives 的 <code>ScrollbarStyles</code> 暴露
+            <code>thumb(|t| t.width(px(6.)).min_length(px(24.)))</code>；默认 thumb 6、最小 48，
+            显式设 24 即可。组件级 Scrollable 页只是没写这段。</div></div>
       </div>
     </div>
 
@@ -6729,8 +6730,9 @@ ul.clean li::marker { color: var(--theme-primary); }
          （<code>invalid</code> 边框 + 外层文案），ARIA 移到未来无障碍 feature。
     [V3] <b>已核实（部分）</b>：文档只保证 focused 时显示焦点环，不区分键盘/指针；
          focus-visible 需自建。
-    [V4] <b>已核实（部分）</b>：文档只公开颜色 / <code>ScrollbarMode</code>；
-         宽 6 / 最小 24 未提供，需自绘或接受默认。
+    [V4] <b>已核实</b>：base <code>Scrollbar</code> 的 <code>ScrollbarStyles</code>
+         可配 track / thumb 的 width、min_length、inset、radius 与 hover/active；
+         默认 thumb 6、最小 48，显式设 24 即可。
     [V5] <b>已核实（部分）</b>：avatar / tooltip 宽可覆盖；switch 仅 small/medium，
          slider / checkbox / radio / tag / badge 目标几何未提供
          （44×24 / 轨道 4 / 16×16 / 最大宽 240 / 箭头 8×8 / 18·34·46 / pill 22 / badge 18）。
@@ -10331,13 +10333,13 @@ ul.clean li::marker { color: var(--theme-primary); }
   <div class="panel">
     <h3>E.0 复核结论（2026-10-24）</h3>
     <div class="callout ok" style="margin-bottom:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>22 条里 5 条已实现、2 条已核实可接受、5 条部分/走退路、10 条仍待核实。</b><br>
+      <div><b>22 条里 5 条已实现、3 条已核实可接受、4 条部分/走退路、10 条仍待核实。</b><br>
         已实现：<b>E-14</b>（弹幕描边）、<b>E-15</b>（deferred 取舍）、<b>E-16</b>（骨架 1.5s）、
         <b>E-19</b>（hover 近似）、<b>E-20</b>（reduce_motion 运行期跟随）。<br>
         已核实可接受：<b>E-1</b>（直接用内建 5s autohide，悬停/焦点暂停内建）、
-        <b>E-2</b>（错误展示自建；ARIA 移到未来无障碍 feature）。<br>
+        <b>E-2</b>（错误展示自建；ARIA 移到未来无障碍 feature）、
+        <b>E-4</b>（base Scrollbar 可配宽度 / 最小长度）。<br>
         部分 / 走退路：<b>E-3</b>（默认焦点环不区分来源，需自建 focus_visible）、
-        <b>E-4</b>（文档只给颜色/显示模式，宽/最小长未提供）、
         <b>E-5</b>（avatar/tooltip 宽可覆盖，switch/slider/badge/箭头等目标几何未提供）、
         <b>E-11</b>（动态字体实现待做）、<b>E-21</b>（iOS 编译过，Android 阻塞）。<br>
         其余 10 条按 E.1–E.4 的「退路」列处理。</div></div>
@@ -10352,6 +10354,11 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>无内建 error 槽或 <code>aria-invalid</code>；错误展示自建
             （<code>invalid</code> 边框 + 外层文案），ARIA 延后</td>
           <td>未来无障碍 feature</td></tr>
+        <tr><td class="mono">E-4</td><td>滚动条宽度 / 最小长度</td>
+          <td>base <code>Scrollbar</code> 的 <code>ScrollbarStyles</code> 可配
+            <code>thumb</code> 的 width / min_length / inset / radius 与 track / hover；
+            默认 thumb 6、最小 48，显式设 24 即可</td>
+          <td>能力已核实；滚动条样式待接</td></tr>
         <tr><td class="mono">E-14</td><td>弹幕「1px 描边 + 投影」</td>
           <td>每条可见弹幕 shape 两次，深色描边 8 方向 + 右下投影；无模糊</td>
           <td>F.3 L-12</td></tr>
@@ -10378,8 +10385,9 @@ ul.clean li::marker { color: var(--theme-primary); }
         ARIA 相关移到未来无障碍 feature。<br>
         <b>E-3</b> 部分：0.8.0 文档只说「focused 时画主题焦点环」，<b>没有键盘/指针区分</b>；
         要 focus-visible 语义得自建（自绘焦点环 + 记录最后一次输入来源）。<br>
-        <b>E-4</b> 部分：0.8.0 文档只公开主题里的 scrollbar 颜色与 <code>ScrollbarMode</code>，
-        <b>没有宽 6 / 最小滑块 24 的配置</b>；要精确值需自绘滚动条或接受默认。<br>
+        <b>E-4</b> 已核实：base primitives 的 <code>Scrollbar</code> 文档公开 <code>ScrollbarStyles</code>，
+        <b>track / thumb 的 width、min_length、inset、radius、hover/active 都可配</b>；
+        默认 thumb 6、最小 48，显式设 24 即可。组件级 Scrollable 页只是没展开写。<br>
         <b>E-5</b> 部分：avatar 可用 <code>.with_size(px(n))</code> 精确设 18/34/46；
         tooltip 可用 Styled <code>.max_w(240)</code>。但 0.8.0 文档里 switch 只有
         <b>small 28×16 / medium 36×20</b>（没有 44×24），slider/checkbox/radio/tag/badge
@@ -10409,7 +10417,10 @@ ul.clean li::marker { color: var(--theme-primary); }
         <tr><td class="mono">E-3</td><td>焦点环是否区分键盘 / 指针来源（原 <code>:focus-visible</code> 语义）</td>
           <td>自写 <code>yk_focus_ring()</code>，已计划这么做</td><td><span class="tag warn">◐ 部分：默认不区分，可自建 focus_visible</span></td></tr>
         <tr><td class="mono">E-4</td><td>滚动条轨道宽 6、最小滑块长 24、悬停加深一档是否可配</td>
-          <td>自绘滚动条（工作量中等）</td><td><span class="tag warn">◐ 部分：颜色/模式可配，宽/最小长未提供</span></td></tr>
+          <td><b>可配（E-4）</b>：base primitives 的 <code>Scrollbar</code> + <code>ScrollbarStyles</code>
+          公开 <code>thumb(|t| t.width(px(6.)).min_length(px(24.)))</code>；
+          track / thumb 的 hover / active 也都能覆盖。默认 thumb 6、最小 48，显式设 24 即可。</td>
+          <td><span class="tag ok">✅ 已核实（可配）</span></td></tr>
         <tr><td class="mono">E-5</td><td>开关 44×24 / 滑块轨道 4 + thumb 14 / 复选单选 16×16 /
           Tooltip 最大宽 240 + 箭头 8×8 / 头像 18·34·46 / pill 22 / badge 18 这些几何是否可覆盖</td>
           <td>不可覆盖则接受组件内定值并更新规范，或自建该组件</td><td><span class="tag warn">◐ 部分：avatar/tooltip 宽可覆盖，其余未提供</span></td></tr>
