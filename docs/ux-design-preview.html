@@ -10075,6 +10075,19 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>外层没有尺寸约束时 <code>size_full()</code> 会退化成 <b>0×0</b>：渲染日志照常打印，
             画面上却什么都没有，很难定位。子视图根元素应写
             <code>.absolute().inset_0()</code>（相对最近的定位祖先）。M3 / M4 各踩一次。</td></tr>
+        <tr><td class="mono">16</td><td><b><code>surface()</code> 与文字叠加会黑屏</b><br>
+          <code>paint_surface</code> 插入 primitive 时 <code>order</code> 写死 <b>0</b>；
+          批处理按 <code>(order, kind)</code> 排序，而 <code>Surface</code> 的 kind 枚举值最大</td>
+          <td><b>实测：只要向 surface 之上绘制 glyph，surface 整块变黑</b>；同尺寸色块则正常。
+            四种挂法全部失败（普通兄弟 / 嵌进视频层 / <code>deferred</code> / <code>canvas</code> 直接 paint glyph）。<br>
+            <b>排除的假设</b>：<code>paint_surface</code> 里 <code>order: 0</code> 看似是 bug，
+            但 <code>scene.rs:94</code> 的 <code>insert_primitive</code> 会用
+            <code>layer_stack.last()</code> 覆盖它 —— 那个 0 根本不起作用。改它无效。<br>
+            <b>当前最可疑</b>：<code>insert_primitive</code> 在
+            <code>clipped_bounds.is_empty()</code> 时<b>直接 return，不报错</b>。
+            若 surface 被 <code>content_mask</code> 裁掉，症状正是「视频黑、文字在」。<br>
+            下一步：在 <code>insert_primitive</code> 的 Surface 分支加日志，确认是被裁剪还是绘制失败。<br>
+            备选绕过：文字离屏渲染成纹理再叠（牺牲亚像素锐度）、原生覆盖层（破坏纯 GPUI）。</td></tr>
         <tr><td class="mono">15</td><td><b>主题覆盖必须在窗口创建之后</b><br>
           先 <code>Theme::change(mode, Some(window), cx)</code>，再覆盖色值</td>
           <td>窗口创建时会再走一次 <code>Theme::change</code>，把组件库默认色值装回来 ——
@@ -10085,7 +10098,7 @@ ul.clean li::marker { color: var(--theme-primary); }
     </table>
     <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
       <div><b>怎么用这张表：</b>写任何一节之前，先扫一遍事实 1–4（决定了「能不能这么画」），
-        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–15 是 M2 / M3 / M4 实施时新踩出来的。</div></div>
+        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–16 是 M2–M8 实施时新踩出来的；16 是 M8 弹幕阶段的核心阻塞。</div></div>
   </div>
 
   <div class="panel">
