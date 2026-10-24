@@ -122,17 +122,35 @@ pub struct PlayerView {
     input_focused: bool,
 }
 
+/// 进程内 `PlayerView` 实例数。
+///
+/// 设计上**只允许 1 个**：输入框的 `InputState` 挂在实例上，重建就等于换一个空输入框
+/// （附录 F L-1）。`AppRoot::ensure_player` 已经保证复用，这里是第二道防线 ——
+/// 以后谁再写一条 `cx.new(|_| PlayerView::new(..))`，会在这里立刻暴露。
+static LIVE_PLAYERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl Drop for PlayerView {
+    fn drop(&mut self) {
+        LIVE_PLAYERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 impl PlayerView {
     pub fn new(theme: YkTheme) -> Self {
-        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        eprintln!("[player] PlayerView::new 第 {n} 次（>1 说明输入框会被换成新的空 state）");
+        let n = LIVE_PLAYERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        assert!(
+            n <= 1,
+            "PlayerView 只能有一个实例（当前 {n} 个）：重建会换掉 InputState，\
+             输入内容随之丢失，见附录 F L-1 / 附录 D 事实 19"
+        );
+        eprintln!("[player] PlayerView::new（实例数 {n}）");
         Self {
             theme,
             frame: TestFrame::new(1280, 720),
-            // worker 不在这里启动：cx.new 的构造闭包可能被重试多次，
-            // 启动线程属于副作用，重复执行会起多个渲染线程。
-            // 改到首次 render 时启动（见 render 里的 tried_worker）。
+            // worker 不在这里启动：构造只做纯赋值，启动线程/打开文件这类副作用
+            // 放到首次 render（见 render 里的 tried_worker）。
+            // 动机是「构造保持无副作用」这条约束，而不是 cx.new 会重试 ——
+            // `Context::new` 收的是 FnOnce，只调用一次。
             #[cfg(target_os = "macos")]
             worker: None,
             tried_worker: false,
@@ -215,8 +233,7 @@ impl Render for PlayerView {
             .detach();
         }
 
-        // 渲染线程：首次 render 启动（cx.new 的构造闭包可能重试多次，
-        // 把线程启动放进去会起多个线程）。
+        // 渲染线程：首次 render 启动一次（构造保持纯赋值，副作用不放在 new 里）。
         #[cfg(target_os = "macos")]
         if !self.tried_worker {
             self.tried_worker = true;
@@ -241,7 +258,14 @@ impl Render for PlayerView {
         // 浮窗是「独立场景」，必须绝对定位铺满最近的定位祖先（AppRoot 根 div 是 relative）。
         // 只写 size_full 不行：作为 children 加入时外层没有尺寸约束，会退化成 0×0，
         // 表现就是「渲染日志有、画面上什么都没有」。
+        //
+        // `.occlude()` 是 L-1 的根因修复：GPUI 的命中测试会穿透没有 hitbox 的普通 div，
+        // 播放器铺满整屏时，点画面任意处都会落到下层封面卡片的 on_click 上 ——
+        // 于是每次点击都 `cx.new` 一个新的 PlayerView，输入框随之换成空的。
+        // BlockMouse 会在播放器根节点截断命中链，下层卡片再也收不到事件；
+        // 自己的子元素（输入框/按钮/面板）的 hitbox 仍在更上层，交互不受影响。
         div()
+            .occlude()
             .absolute()
             .inset_0()
             .bg(rgb(0x000000))
@@ -256,27 +280,8 @@ impl Render for PlayerView {
                     video_layer(&self.frame)
                 }
             })
-            // ①b 弹幕层 —— 暂不启用。
-            //
-            // 实测：只要在同一棵元素树上叠加**文字**，surface 就会整块变黑；
-            // 换成同尺寸的**色块**则正常。三种挂法都试过，全部黑：
-            //   1. 作为根节点的普通 absolute 兄弟
-            //   2. 嵌在 video_layer 内部
-            //   3. deferred(priority 10)
-            //
-            // 形态上不是尺寸或定位问题，是「surface 与文本渲染的合成冲突」。
-            // 之后按文档方案 ② 改用 canvas + window.text_system().shape_line()
-            // 直接 paint 文字（不经过 div+text），**结果同样是黑屏**。
-            //
-            // 综合四次实验，根因确定：**只要向 surface 之上绘制 glyph，
-            // surface 就被破坏**。同尺寸色块则完全正常。
-            // 这是 GPUI Metal renderer 的合成问题，不是用法问题。
-            //
-            // 绕过方向（下一步）：
-            //   a. 文字先渲染到离屏纹理，再当图片叠加（牺牲锐度）
-            //   b. 弹幕用系统原生覆盖层（NSView），脱离 GPUI 合成
-            //   c. 上报 GPUI，等 surface 与 glyph 的纹理槽冲突修复
-            //
+            // ①b 弹幕层：gpui-fast 已解决 surface 与文字的合成冲突，
+            // 直接 canvas 绘制即可（见附录 D 事实 16）。
             .child(self.danmaku_layer())
             // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
             .child(

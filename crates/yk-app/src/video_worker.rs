@@ -46,9 +46,9 @@ pub struct FrameWorker {
 impl FrameWorker {
     /// 启动渲染线程。失败（找不到 libmpv / 打不开文件）返回 `None`。
     pub fn spawn(video: String, width: u32, height: u32) -> Option<Self> {
-        // 防重复：open_window 的 build 闭包在本机被调用了多次（原因待查），
-        // 每次都会构造 PlayerView → 每次都会起一个渲染线程，
-        // 日志里出现过 14 个线程同时解码同一个文件。这里全局只放行一次。
+        // 防重复：历史上 PlayerView 被点击穿透反复重建，每次都会起一个渲染线程，
+        // 日志里出现过 14 个线程同时解码同一个文件。现在实例唯一（附录 F L-1），
+        // 这个全局闸门保留作为兜底。
         static SPAWNED: AtomicBool = AtomicBool::new(false);
         if SPAWNED.swap(true, Ordering::SeqCst) {
             eprintln!("[video] 已有渲染线程，跳过重复启动");

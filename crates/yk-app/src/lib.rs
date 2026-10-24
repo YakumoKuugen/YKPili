@@ -43,8 +43,6 @@ pub struct AppRoot {
     page_state: pages::PageState,
     /// 当前展示的是占位数据还是真实接口数据（用于顶栏角标）
     using_mock: bool,
-    /// 播放器是否已尝试创建过（防止在 render 里反复 cx.new 导致重复 load_file）
-    tried_player: bool,
     #[cfg(feature = "screenshot")]
     frames: u32,
 }
@@ -62,8 +60,21 @@ impl AppRoot {
     /// 这样 PlayerView 只在窗口创建时构造一次，不会因为 render 重入而重复 load_file。
     pub fn with_player(mut self, player: gpui::Entity<player::PlayerView>) -> Self {
         self.playing = Some(player);
-        self.tried_player = true;
         self
+    }
+
+    /// 打开播放器。**只在没有实例时创建，已有就复用。**
+    ///
+    /// 这是附录 F L-1 的修复：`PlayerView` 里唯一的 `InputState` 跟着实例走，
+    /// 一旦重建，输入框内容就换成新的空 state（表现为「打字打一半没了」）。
+    /// 所以所有入口都走这里，绝不无条件 `cx.new`。
+    /// `PlayerView::new` 里另有单实例断言兜底，防止以后又冒出新路径。
+    fn ensure_player(&mut self, cx: &mut Context<Self>) {
+        if self.playing.is_some() {
+            return;
+        }
+        let theme = self.theme.clone();
+        self.playing = Some(cx.new(|_| player::PlayerView::new(theme)));
     }
 
     pub fn new() -> Self {
@@ -81,7 +92,6 @@ impl AppRoot {
             page: None,
             page_state: pages::PageState::Ready,
             using_mock: true,
-            tried_player: false,
             #[cfg(feature = "screenshot")]
             frames: 0,
         }
@@ -102,8 +112,8 @@ impl Render for AppRoot {
                         self.gallery = Some(cx.new(|_| components::ComponentGallery::new(th)));
                     }
                     "player" => {
-                        let th = self.theme.clone();
-                        self.playing = Some(cx.new(|_| player::PlayerView::new(th)));
+                        // 复用唯一实例；重复 cx.new 会让输入框换成新的空 state（L-1）
+                        self.ensure_player(cx);
                     }
                     "hot" => self.page = Some(pages::PageKind::Hot),
                     "settings" => self.page = Some(pages::PageKind::Settings),
@@ -404,7 +414,6 @@ fn content_area(
 /// 结构对应第 04 节：封面（16:9）+ 标题（2 行）+ 信息行。
 fn card(t: &YkTheme, item: &CoverItem, cx: &mut Context<AppRoot>) -> impl IntoElement {
     let s = &t.surfaces;
-    let theme = t.clone();
     let title = item.title.clone();
     div()
         .id(("cover", item.index))
@@ -469,11 +478,11 @@ fn card(t: &YkTheme, item: &CoverItem, cx: &mut Context<AppRoot>) -> impl IntoEl
                         .child(item.meta_line()),
                 ),
         )
-        // 点击整张卡片进入播放浮窗（M3 的最小入口）
+        // 点击整张卡片进入播放浮窗（M3 的最小入口）。
+        // 已存在就复用：重建会换掉 PlayerView 里的 InputState，弹幕输入跟着丢（附录 F L-1）。
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             eprintln!("[M3] 进入播放浮窗: {title}");
-            let th = theme.clone();
-            this.playing = Some(cx.new(|_| player::PlayerView::new(th)));
+            this.ensure_player(cx);
             window.refresh();
             cx.notify();
         }))

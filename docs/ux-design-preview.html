@@ -10077,19 +10077,25 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>外层没有尺寸约束时 <code>size_full()</code> 会退化成 <b>0×0</b>：渲染日志照常打印，
             画面上却什么都没有，很难定位。子视图根元素应写
             <code>.absolute().inset_0()</code>（相对最近的定位祖先）。M3 / M4 各踩一次。</td></tr>
-        <tr><td class="mono">19</td><td><b><code>PlayerView</code> 被反复重建，导致输入框内容丢失</b>（遗留）</td><td>
+        <tr><td class="mono">19</td><td><b><code>PlayerView</code> 被反复重建，导致输入框内容丢失</b>（已修）</td><td>
           <b>症状</b>：输入文字后点输入框或画面任意处，内容被清空。<br>
-          <b>根因</b>：<code>PlayerView::new</code> 在运行中持续被调用（实测一次运行内 10 次）。
-          每次重建都会得到一个全新的 <code>InputState</code>（空），所以内容看起来「被清空」。<br>
-          <b>已做的</b>：把 <code>FrameWorker::spawn</code> 从构造闭包移到首次 <code>render</code>
-          （副作用会让 <code>cx.new</code> 重试）——启动时降到 1 次，但<b>运行中仍会多次</b>。<br>
-          <b>未定位</b>：10 次的来源。代码里只有三处创建点（build 闭包、卡片点击、screenshot 分支），
-          build 已确认只跑 1 次，所以嫌疑在卡片点击闭包被反复触发、或交互时 <code>cx.new</code> 重入。<br>
-          <b>正确修法</b>：不要让 <code>InputState</code> 依附于 <code>PlayerView</code> ——
-          把它提升到 <code>AppRoot</code>；或让 <code>PlayerView</code> 只在首次创建并缓存，
-          其余路径一律 <code>self.playing.clone()</code>。修完加
-          <code>assert!(实例数 &lt;= 1)</code> 防回归。<br>
-          <b>为什么优先</b>：这个问题不解决，输入相关的一切都不稳定。</td></tr>
+          <b>根因（不是 <code>cx.new</code> 重试）</b>：播放器浮层的根节点是普通 <code>div</code>，
+          GPUI 只在元素「可交互」时才建 hitbox，普通 div 没有 —— 命中测试于是<b>穿透到下层封面卡片</b>。
+          播放器铺满整屏时，点画面任意处都会触发卡片的 <code>on_click</code>，
+          每次都 <code>cx.new(|_| PlayerView::new(..))</code>，换出一个空的 <code>InputState</code>。
+          此前实测运行中累计 10 次，符合「每点一下画面就多一个」的模式。<br>
+          <b>修法（三层）</b>：<br>
+          ① 播放器根节点加 <code>.occlude()</code>（<code>HitboxBehavior::BlockMouse</code>）——
+          在播放器边界截断命中链，下层卡片再也收不到事件；自己的子元素（输入框/按钮/面板）
+          hitbox 在更上层，交互不受影响；<br>
+          ② 创建入口收敛到 <code>AppRoot::ensure_player</code>：已有实例就复用，
+          卡片点击 / screenshot 分支都不再无条件 <code>cx.new</code>；<br>
+          ③ <code>PlayerView::new</code> 加进程内实例断言（<code>assert!(实例数 &lt;= 1)</code>，
+          <code>Drop</code> 里减计数）——以后谁再写一条创建路径会立刻暴露，而不是悄悄清空输入框。<br>
+          <b>验证</b>：点击卡片进入播放器后输入 <code>l1test</code>，
+          在画面不同位置连续点击 4 次、再点一次输入框——<code>PlayerView::new</code>
+          始终只出现 1 次，输入内容保持不动；随后点「发送」仍能正常发出，
+          说明 <code>.occlude()</code> 只挡住了下层卡片，没有挡住自己的子元素。</td></tr>
         <tr><td class="mono">18</td><td><b>macOS IME 报 <code>IMKCFRunLoopWakeUpReliable</code> Mach port 错误</b></td><td>
           <b>实测日志</b>：<code>error messaging the mach port for IMKCFRunLoopWakeUpReliable</code>。
           <code>IMK</code> 是 Input Method Kit —— 输入法尝试连接但<b>与系统的 Mach port 通信失败</b>，
@@ -10173,7 +10179,7 @@ ul.clean li::marker { color: var(--theme-primary); }
     </table>
     <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
       <div><b>怎么用这张表：</b>写任何一节之前，先扫一遍事实 1–4（决定了「能不能这么画」），
-        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–19 是 M2–M8 实施时新踩出来的；16 弹幕黑屏（已解）、17 播放性能（已改线程模型）、18 IME（已可用）、19 PlayerView 重建（遗留，优先处理）。</div></div>
+        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–19 是 M2–M8 实施时新踩出来的；16 弹幕黑屏（已解）、17 播放性能（已改线程模型）、18 IME（已可用）、19 PlayerView 重建（已修：点击穿透 + 单实例守卫）。</div></div>
   </div>
 
   <div class="panel">
@@ -10272,7 +10278,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td>音频输出</td><td><code>ao=avfoundation</code>（coreaudio 在本机 -50 失败）；实听确认</td><td><span class="tag ok">完成</span></td></tr>
       <tr><td>弹幕滚动</td><td>数据、轨道分配、不重叠性质均有测试；渲染需 <code>gpui-fast</code>（已启用）</td><td><span class="tag ok">完成</span></td></tr>
       <tr><td>弹幕输入</td><td>中文 IME 可用；发送 → 弹幕层 → 清空输入框全通</td><td><span class="tag ok">完成</span></td></tr>
-      <tr><td>PlayerView 重建</td><td>输入框内容被反复清空，见附录 D 事实 19</td><td><span class="tag bad">阻塞</span></td></tr>
+      <tr><td>PlayerView 重建</td><td>点击穿透到下层卡片导致重建、输入被清空；<code>.occlude()</code> + 单实例复用已修，见附录 D 事实 19</td><td><span class="tag ok">已修</span></td></tr>
       <tr><td>回车发送</td><td><code>Input</code> 无 <code>on_enter</code>，需监听 <code>on_key_down</code></td><td><span class="tag warn">待做</span></td></tr>
       <tr><td>无障碍</td><td>按产品要求列为未来 feature，本阶段不做</td><td><span class="tag warn">暂缓</span></td></tr>
       <tr><td>功耗与热</td><td>需连续播放 30 分钟配合 <code>powermetrics</code> 采样</td><td><span class="tag warn">待测</span></td></tr>
@@ -10283,13 +10289,13 @@ ul.clean li::marker { color: var(--theme-primary); }
   <table>
     <thead><tr><th>#</th><th>问题</th><th>影响</th><th>方向</th></tr></thead>
     <tbody>
-      <tr><td class="mono">L-1</td><td><b>PlayerView 反复重建</b></td><td>输入框内容被清空，输入相关的一切都不稳定</td><td>见附录 D 事实 19，最高优先</td></tr>
+      <tr><td class="mono">L-1</td><td><b>PlayerView 反复重建</b> <span class="tag ok">已修</span></td><td>已消除：输入内容不再因点击而丢失</td><td>播放器根节点 <code>.occlude()</code> + 入口收敛到 <code>ensure_player</code> + 单实例断言，见附录 D 事实 19</td></tr>
       <tr><td class="mono">L-2</td><td>视频等比 letterbox</td><td>当前拉伸铺满，比例失真</td><td>按视频宽高比算 <code>object_fit</code></td></tr>
       <tr><td class="mono">L-3</td><td>首页滚动</td><td>内容超出后无法滚动</td><td>接 GPUI 的 <code>overflow_y_scroll</code></td></tr>
       <tr><td class="mono">L-4</td><td>iOS 真实解码</td><td>目前是占位帧，未接 libmpv</td><td>复用 yk-media，注意跨平台 ABI</td></tr>
       <tr><td class="mono">L-5</td><td>Android 接入</td><td>未开始</td><td>需 <code>gpui-pre-mobile</code>，与 0.8.0 的 <code>gpui-pre</code> 版本需对齐</td></tr>
       <tr><td class="mono">L-6</td><td>自动截图失效</td><td><code>screenshot</code> feature 与 <code>gpui-fast</code> 互斥（cocoa 冲突）</td><td>改用系统 <code>screencapture</code> 或接受人工验收</td></tr>
-      <tr><td class="mono">L-7</td><td><code>build</code> 闭包副作用重试</td><td>构造闭包内做 I/O 会让 <code>cx.new</code> 重试多次</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
+      <tr><td class="mono">L-7</td><td>构造闭包里做副作用</td><td>线程/文件句柄等会跟着创建次数一起放大；<code>cx.new</code> 只调一次闭包，问题在创建被重复触发，不是重试</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
     </tbody>
   </table>
 
