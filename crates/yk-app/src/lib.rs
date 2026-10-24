@@ -15,8 +15,10 @@
 //! GPUI 没有 z-index，「谁在上」只由 child 的先后顺序决定（见设计文档附录 D · D.1 事实 2）。
 //! 因此这个文件里 child 的排列顺序**就是**层级契约本身，改动顺序等于改动层级。
 
+use gpui::component::{v_virtual_list, VirtualListScrollHandle};
 use gpui::prelude::*;
 use gpui::{InteractiveElement, ImageSource, StatefulInteractiveElement, *};
+use std::rc::Rc;
 use yk_core::api::models::{RecommendVideoItem, VideoOwner, VideoStat};
 use yk_core::models::CoverItem;
 use yk_core::Feed;
@@ -43,8 +45,8 @@ pub struct AppRoot {
     page_state: pages::PageState,
     /// 当前展示的是占位数据还是真实接口数据（用于顶栏角标）
     using_mock: bool,
-    /// 内容区滚动位置（首页与各页面共用）
-    content_scroll: ScrollHandle,
+    /// 内容区滚动句柄：首页虚拟列表用它，页面容器复用它的 base handle
+    content_scroll: VirtualListScrollHandle,
     #[cfg(feature = "screenshot")]
     frames: u32,
 }
@@ -94,7 +96,7 @@ impl AppRoot {
             page: None,
             page_state: pages::PageState::Ready,
             using_mock: true,
-            content_scroll: ScrollHandle::new(),
+            content_scroll: VirtualListScrollHandle::new(),
             #[cfg(feature = "screenshot")]
             frames: 0,
         }
@@ -191,6 +193,7 @@ impl Render for AppRoot {
                         self.feed.items(),
                         self.page,
                         self.page_state,
+                        window,
                         &self.content_scroll,
                         cx,
                     )),
@@ -371,64 +374,81 @@ fn content_area(
     items: &[CoverItem],
     page: Option<pages::PageKind>,
     state: pages::PageState,
-    scroll: &ScrollHandle,
+    window: &Window,
+    scroll: &VirtualListScrollHandle,
     cx: &mut Context<AppRoot>,
-) -> impl IntoElement {
-    // 内容区顶部内边距 = 64 + 54 + 16 的说法针对「吸顶遮挡」；
-    // 这里顶栏与分类是常规流式排布（不在滚动容器内），所以只需 16 的呼吸间距。
-    let mut grid = div()
-        .flex()
-        .flex_wrap()
-        .gap(px(SPACE_4))
-        .w_full()
-        .pb(px(SPACE_8));
+) -> AnyElement {
+    // Dock 是浮层（absolute），内容区必须为它让出左边距，
+    // 否则第一列卡片会被压在 Dock 下面 —— 浮层「在上」不等于内容可以钻到它背后。
+    // 让位宽度 = Dock 左边距 12 + 按钮宽 44 + 呼吸 16 = 72。
+    const DOCK_GUTTER: f32 = 72.0;
 
     if let Some(kind) = page {
-        // 非首页：交给 pages 模块；外壳（顶栏/分类/Dock）不动
-        // 页面容器要不透明铺满：否则底层的光晕会从内容区两侧透上来
+        // 非首页：交给 pages 模块；外壳（顶栏/分类/Dock）不动。
+        // 页面容器不透明铺满，否则底层光晕会从内容区两侧透上来。
         return div()
             .id("content-scroll")
             .flex_1()
             // flex 子项的 min-height 默认是 auto，不压到 0 的话内容会撑开父级，
             // overflow_y_scroll 就不会真正滚动。
             .min_h(px(0.))
-            .track_scroll(scroll)
+            .track_scroll(scroll.base_handle())
             .overflow_y_scroll()
             .bg(t.surfaces.bg_base)
             .child(
-            div()
-                .pl(px(72.))
-                .pr(px(SPACE_4))
-                .pt(px(SPACE_4))
-                .pb(px(SPACE_8))
-                .w_full()
-                .child(pages::render(t, kind, state)),
-        );
+                div()
+                    .pl(px(72.))
+                    .pr(px(SPACE_4))
+                    .pt(px(SPACE_4))
+                    .pb(px(SPACE_8))
+                    .w_full()
+                    .child(pages::render(t, kind, state)),
+            )
+            .into_any_element();
     }
 
-    for item in items {
-        grid = grid.child(card(t, item, cx));
-    }
+    // ---- 首页：按视口宽把卡片分组为「行」，交给 v_virtual_list ----
+    // 列数 = 可用宽度能放下几个 208 + 16 的槽位；至少 1 列。
+    // 窗口缩放时列数会变，item_sizes 每帧重算（行数很少，成本可忽略）。
+    let available = (window.viewport_size().width.as_f32() - DOCK_GUTTER - SPACE_4)
+        .max(COVER_CELL_WIDTH);
+    let cols = (((available + SPACE_4) / (COVER_CELL_WIDTH + SPACE_4)).floor() as usize).max(1);
+    let rows = items.len().div_ceil(cols);
+    // 行高 = 卡片高 + 行间距；行内只画卡片，多出来的 16 就是行距。
+    let row_h = COVER_CELL_HEIGHT + SPACE_4;
+    let sizes = Rc::new(vec![size(px(available), px(row_h)); rows]);
 
-    // Dock 是浮层（absolute），但内容区必须为它让出左边距，
-    // 否则第一列卡片会被压在 Dock 下面 —— 浮层「在上」不等于内容可以钻到它背后。
-    // 让位宽度 = Dock 左边距 12 + 按钮宽 44 + 呼吸 16 = 72。
-    const DOCK_GUTTER: f32 = 72.0;
-    div()
-        .id("content-scroll")
-        .flex_1()
-        .min_h(px(0.))
-        .track_scroll(scroll)
-        .overflow_y_scroll()
-        .child(
-            div()
-                .pl(px(DOCK_GUTTER))
-                .pr(px(SPACE_4))
-                .pt(px(SPACE_4))
-                .pb(px(SPACE_8))
-                .w_full()
-                .child(grid),
-        )
+    let entity = cx.entity();
+    let theme = t.clone();
+    v_virtual_list(
+        entity,
+        "home-grid",
+        sizes,
+        move |this, visible_rows, _window, cx| {
+            visible_rows
+                .map(|row| {
+                    let start = row * cols;
+                    let all = this.feed.items();
+                    let end = (start + cols).min(all.len());
+                    let mut row_el = div()
+                        .flex()
+                        .gap(px(SPACE_4))
+                        .w_full()
+                        .h(px(COVER_CELL_HEIGHT));
+                    for item in &all[start..end] {
+                        row_el = row_el.child(card(&theme, item, cx));
+                    }
+                    row_el
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .track_scroll(scroll)
+    .pl(px(DOCK_GUTTER))
+    .pr(px(SPACE_4))
+    .pt(px(SPACE_4))
+    .pb(px(SPACE_8))
+    .into_any_element()
 }
 
 /// 封面卡片：208 × 166（COVER_CELL_WIDTH / COVER_CELL_HEIGHT）。
@@ -557,7 +577,9 @@ fn dock(t: &YkTheme, active: usize, cx: &mut Context<AppRoot>) -> impl IntoEleme
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.page = target;
                     // 切页回到顶部：滚动位置属于「上一页」，不该带到新页面。
-                    this.content_scroll.scroll_to_top_of_item(0);
+                    // 虚拟列表走 scroll_to_item；页面容器走 base handle。
+                    this.content_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    this.content_scroll.base_handle().scroll_to_top_of_item(0);
                     window.refresh();
                     cx.notify();
                 })),
