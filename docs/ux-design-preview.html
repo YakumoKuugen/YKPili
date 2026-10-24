@@ -2079,6 +2079,9 @@ ul.clean li::marker { color: var(--theme-primary); }
           <code>crates/yk-app/src/views/root.rs</code> 的 Root 子树顺序约定，
           <b>不再有 <code>Layer*</code> 数值常量</b>。视图侧不允许出现任何「层级数字」。</p>
       </div>
+      <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+        <div><b>E-15 已核实：</b>不用 <code>deferred</code> 承载「常驻整层」；
+          改用 <code>relative()</code> + 绝对定位子树，按声明顺序表达层叠。</div></div>
     </section>
 
     <!-- ==================== 02 令牌 ==================== -->
@@ -2386,6 +2389,9 @@ ul.clean li::marker { color: var(--theme-primary); }
           <code>div()</code> 树，换主题只是替换 <code>Theme</code> 对象再 <code>cx.notify()</code> 重绘
           （契约 §1.7 / §2.3）—— Avalonia 时代「按当时 token 创建、切主题需重建控件」的结论<b>作废</b>。</p>
       </div>
+      <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+        <div><b>E-19 已核实：</b>1.03 / 1.04 用负 <code>inset</code> 近似，不是等比矩阵；
+          外层裁剪，进入/离开 150ms（F.3 L-10）。</div></div>
     </section>
 
     <!-- ==================== 05 状态 ==================== -->
@@ -2410,9 +2416,9 @@ ul.clean li::marker { color: var(--theme-primary); }
             <br><b>实现侧（GPUI）</b>：几何骨架用 <code>gpui_component::skeleton</code>（契约 §1.6）；
             但 <code>Skeleton</code> 把脉冲写死成 2s bounce、未暴露时长参数，
             要保住 1.5s 就得用同样的 <code>div()</code> + <code>with_animation</code> 自绘
-            —— <b>已裁决：自绘 1.5s</b>（见附录 E · E-16）。
+            —— <b>已裁决：自绘 1.5s</b>（E-16 已核实）。
             <br>减少动效偏好：GPUI 没有 CSS 媒体查询；已接入系统辅助功能设置
-            （启动读取 + 每 2s 轮询，见附录 E · E-20）。</p>
+            （E-20 已核实：启动读取 + 每 2s 轮询）。</p>
         </div>
 
         <div class="panel">
@@ -2804,7 +2810,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         <div class="panel"><h3>无障碍</h3>
           <ul class="clean">
             <li>二维码需提供 <code>alt</code> 文本："用于登录的二维码"（GPUI：<code>.aria_label("用于登录的二维码")</code>，需带稳定 <code>id</code> 才进无障碍树）</li>
-            <li>状态文案用 <code>aria-live="polite"</code> 播报阶段变化（GPUI：<code>.role(Role::Status)</code> + <code>cx.notify()</code> 重建该节点）<span class="tag warn">待核实</span>：GPUI / AccessKit 是否把节点文本变化作为 live announcement 上报，本地源码未给出等价能力</li>
+            <li>状态文案用 <code>aria-live="polite"</code> 播报阶段变化（GPUI：<code>.role(Role::Status)</code> + <code>cx.notify()</code> 重建该节点）<span class="tag warn">暂缓（第 10 节）</span>：GPUI / AccessKit 是否把节点文本变化作为 live announcement 上报，留给无障碍 feature</li>
             <li>取消按钮是键盘可达的普通按钮，非仅图标</li>
           </ul></div>
       </div>
@@ -3030,7 +3036,8 @@ ul.clean li::marker { color: var(--theme-primary); }
               Windows <code>SPI_GETCLIENTAREAANIMATION</code>、Linux XDG portal 的 <code>reduced-motion</code>。
               动画只要走 <code>with_animation</code> / <code>EffectTransition</code> 就<b>自动降级为终态</b>；
               但 macOS/Windows 没有可订阅的变更通知，运行期用户改开关后需再调一次
-              <code>gpui_base::apply_system_reduce_motion(cx)</code></div></li>
+              <code>gpui_base::apply_system_reduce_motion(cx)</code>。
+              <b>已实现（F.3 L-11）：AppRoot 每 2s 重读，运行期切换 2s 内生效。</b></div></li>
             <li><span class="box"></span><div>尊重系统动态字体，卡片标题放大后仍保持 2 行截断不溢出。
               <b>GPUI 不提供读取入口，但平台层有</b>——需要自己接一层「字号倍率」：
               iOS 读 <code>UIApplication.shared.preferredContentSizeCategory</code>、Android 读
@@ -3041,7 +3048,7 @@ ul.clean li::marker { color: var(--theme-primary); }
               <code>NSFont.preferredFont</code> 不跟随该设置 → 只能提供应用内字号选项。
               读到倍率后<b>统一乘到字号与行高上</b>——项目 13/15/28 走 <code>text_size(px(n))</code> 不吃 rem，
               所以<b>不能只调 <code>window.set_rem_size</code></b>。各平台 API 与限制见
-              <a href="#appendix-e">附录 E · E-11</a>
+              <a href="#a11y">第 10 节 · 动态字体（E-11，暂缓）</a>
       <a href="#appendix-f">附录 F · 迁移进度</a>。</div></li>
             <li><span class="box"></span><div>图标按钮必须有 <code>accessibilityLabel</code>（"稍后再看"而非"按钮"）。
               <b>GPUI 写法</b>：API 名是 <code>aria_label</code>，而不是 <code>accessibility_label</code>——
@@ -3095,7 +3102,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <div class="panel" style="margin-top:16px">
         <h3>待核实项 · 无障碍（暂缓，未来 feature）</h3>
         <div class="callout warn"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
-          <div><b>产品决定：本阶段不做无障碍。</b>以下 7 项从附录 E 移入此处，
+          <div><b>产品决定：本阶段不做无障碍。</b>以下 7 项从待核实清单移入此处，
             暂不排期、不阻塞当前里程碑；E-2 的错误展示槽已自建，只有 ARIA 部分随本组暂缓。</div></div>
         <table>
           <thead><tr><th>#</th><th>项</th><th>结论 / 暂缓原因</th></tr></thead>
@@ -3118,7 +3125,7 @@ ul.clean li::marker { color: var(--theme-primary); }
               <td>M8 再验；无障碍与 IME 部分随本组延后，生命周期另计。</td></tr>
           </tbody>
         </table>
-        <p class="note">恢复条件：进入「无障碍」feature 时，从这里逐条移回附录 E / 正文；
+        <p class="note">恢复条件：进入「无障碍」feature 时，从这里逐条移回正文对应章节；
           在此之前不检查、不排期。E-2 的非 ARIA 部分（错误槽）不受影响。</p>
       </div>
     </section>
@@ -3847,7 +3854,7 @@ ul.clean li::marker { color: var(--theme-primary); }
             <code>sort_type</code>（排序，<code>online</code> = 在线人气）· <code>page</code>（页码，每页 20 个直播间）</td>
           <td>接口路径与上述参数名<b>已实测确认</b>；但官方文档中<b>未见该接口的完整返回字段表</b>，
             落地时按实际响应校对后再固化模型</td>
-          <td><span class="tag warn">部分核实</span><br />返回字段待补，列入附录 E 待核项</td>
+          <td><span class="tag warn">部分核实</span><br />返回字段待补，列入附录 E · E-23</td>
         </tr>
         <tr>
           <td><b>在线 / 看过人数</b><br /><span class="tag ghost">卡片角标</span></td>
@@ -4754,7 +4761,7 @@ ul.clean li::marker { color: var(--theme-primary); }
          推荐直播用 webMain/getMoreRecList（参数与返回字段已完整核实，含 online / watched_show /
          area_v2_* / is_ad）；分区直播列表用 second/getList（接口路径与参数名 parent_area_id /
          area_id / sort_type / page 已实测确认，**返回字段表官方文档缺失**，已在正文标注
-         「部分核实」并列入附录 E 待核项，未编造字段名）。
+         「部分核实」并列入附录 E · E-23，未编造字段名）。
          另据实修正了「在线人数」的语义：online 是**在线人气**不是在线人数，
          角标文案统一改为「{n} 看过」（取自 watched_show.text_small）。
     [S7] 设置页四态 → 【已裁决：采纳】12.8「设置页」行改为明确表述：
@@ -5088,7 +5095,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <code>ButtonBackgroundDisabled</code> 在令牌层没有对应值——
           迁移后它们由 disabled 计算派生；若要独立取值，只能作为
           <b>项目扩展字段</b>（<code>YkSurfaces</code>）补，<b>不要</b>去改组件库的
-          <code>ThemeColor</code> 语义。<b>该字段在 <code>gpui-component</code> 里是否有对应项：待核实。</b></div></div>
+          <code>ThemeColor</code> 语义。<b>该字段在 <code>gpui-component</code> 里是否有对应项：待核实（E-10）。</b></div></div>
     </div>
   </div>
 
@@ -5201,7 +5208,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <b>需要自建的部分</b>：① 下方错误文案行（caption 12 + <code>i-alert</code>）与
           字数统计行——<code>Input</code> 本身不画这两行；
           ② 「错误文案 + 输入框」的 <code>aria-describedby</code> 关联，
-          GPUI 侧的无障碍桥接字段<b>待核实</b>。</div></div>
+          GPUI 侧的无障碍桥接字段<b>暂缓（第 10 节，E-9）</b>。</div></div>
     </div>
   </div>
 
@@ -5320,9 +5327,9 @@ ul.clean li::marker { color: var(--theme-primary); }
           翻转后仍保持与触发元素的 4px（<code>--space-1</code>）间距。
           <br><b>触发方式</b>：① 按钮点击（<code>menu::PopupMenu</code>）② 右键（<code>menu::ContextMenu</code>，
           锚点由光标给）③ <code>Shift+F10</code> / <code>菜单键</code>（键盘唤出，右键菜单必须有此路径；
-          GPUI 侧的键位绑定方式<b>待核实</b>）。
+          GPUI 侧的键位绑定方式<b>暂缓（第 10 节，E-7）</b>）。
           <br><b>贴边翻转</b>：<code>gpui-component</code> 的 popover / menu 走 <code>Placement</code>，
-          翻转是否自动处理<b>待核实</b>；若不自动，则由项目侧按可用空间选 <code>Placement</code>。
+          翻转是否自动处理<b>未核实（E-8）</b>；若不自动，则由项目侧按可用空间选 <code>Placement</code>。
           <br><b>以上是组件级键盘模型；全局键位总表（各键的全局绑定）由第 14 节统一收口</b>，
           本节不另立一份全局键位清单。菜单项尾标的快捷键文案同样由第 14 节分配，
           本节只规定「有快捷键的项在右侧留出尾标槽位」这一组件形态。</div></div>
@@ -5468,7 +5475,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           危险确认走 <code>window.open_alert_dialog</code> + <code>DialogButtonProps</code>
           （<code>ok_variant(ButtonVariant::Danger)</code>）。
           <b>需要自建的部分</b>：危险确认的「初始焦点落在取消」——<code>gpui-component</code> 是否支持
-          指定初始焦点<b>待核实</b>，若不支持则在 <code>Dialog</code> 打开后手动 <code>focus</code> 取消按钮。</div></div>
+          指定初始焦点<b>暂缓（第 10 节，E-6）</b>；恢复时若不支持，则在 <code>Dialog</code> 打开后手动 <code>focus</code> 取消按钮。</div></div>
     </div>
   </div>
 
@@ -5508,7 +5515,7 @@ ul.clean li::marker { color: var(--theme-primary); }
             <tr><td>动效</td><td class="mono">只淡入淡出，200ms / EaseStandard</td>
               <td class="mono">--dur-normal / --ease-standard；
                 组件的退出时长常量已是 200ms（<code>NOTIFICATION_EXIT_DURATION</code>），
-                进入时长是 400ms，<b>是否可配置待核实</b></td></tr>
+                进入时长是 400ms 固定常量，暂不单独配置</td></tr>
           </tbody>
         </table>
       </div>
@@ -5825,7 +5832,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         <br>· 令牌层<b>已经有</b> <code>SwitchBg</code>（亮暗两套各一个浅灰值，
         注释与变量名均写作「控件专用」），但<b>没有任何控件消费它</b>——
         这是一个「先有令牌、后有控件」的孤儿键。<b>迁移后直接废除该孤儿键</b>：
-        关态轨道颜色读 <code>ThemeColor</code> 的对应字段（<b>具体字段名待核实</b>），
+        关态轨道颜色读 <code>ThemeColor</code> 的对应字段（<b>具体字段名待核实（E-10）</b>），
         开态读 <code>ThemeColor.primary</code>。
         <br>· 第 04 节规划的<b>观看进度条</b>（卡片第 3 层）与<b>播放器进度条</b>是同一套滑块几何，
         但目前 <code>VideoPlayerView.axaml</code> 的进度条是手写的 <code>Border</code> 叠放
@@ -6312,7 +6319,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       每一行只回答三件事：<b>用哪个 <code>gpui-component</code> 模块</b>、
       <b>覆盖哪些主题字段</b>、<b>哪些部分必须自建</b>。
       模块名全部来自 <code>gpui-component-0.7.3/src/lib.rs</code> 的 <code>pub mod</code>；
-      标「待核实」的条目是本地源码未确认、需要实现时再核的细节。</p>
+      标「待核实」的只剩附录 E 的 6 条；其余组件结论已归档在下方「组件能力核实结论」。</p>
     <table>
       <thead><tr><th>组件</th><th><code>gpui-component</code> 模块</th><th>需覆盖的主题字段</th><th>需自建的部分</th></tr></thead>
       <tbody>
@@ -6337,7 +6344,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td class="mono">dialog::{Dialog, DialogButtonProps, DialogFooter}<br />+
             <code>WindowExt::{open_dialog, open_alert_dialog}</code></td>
           <td><code>popover</code> / <code>overlay</code>（遮罩）/ <code>radius_lg</code>（24）/ <code>ring</code></td>
-          <td>危险确认的初始焦点落「取消」（是否可配<b>待核实</b>）；
+          <td>危险确认的初始焦点落「取消」（随无障碍暂缓，第 10 节）；
             自解释按钮文案属内容层</td></tr>
         <tr><td>Toast</td>
           <td class="mono">notification::{Notification, NotificationSettings, NotificationType}<br />+
@@ -6349,25 +6356,25 @@ ul.clean li::marker { color: var(--theme-primary); }
         <tr><td>Tooltip</td>
           <td class="mono">tooltip::Tooltip<br />（<code>show_delay</code> + <code>ManagedTooltipExt</code>）</td>
           <td><code>popover</code> / <code>border</code> / <code>foreground</code></td>
-          <td>最大宽 240 / 箭头 8×8（是否可配<b>待核实</b>）；
+          <td>最大宽 240 可用 <code>.max_w</code> 覆盖；箭头 8×8 <b>未内建</b>，需自绘；
             键盘聚焦时立即显示（不等 500ms）</td></tr>
         <tr><td>开关</td>
           <td class="mono">switch::Switch</td>
-          <td><code>primary</code>（开态）；关态轨道色对应的字段名<b>待核实</b>；<code>ring</code></td>
-          <td>44×24 轨道 + ⌀20 圆钮的尺寸（组件内定，覆盖方式<b>待核实</b>）</td></tr>
+          <td><code>primary</code>（开态）；关态轨道色字段名<b>待核实（E-10）</b>；<code>ring</code></td>
+          <td>文档仅 small 28×16 / medium 36×20，<b>44×24 未提供</b>（E-5）</td></tr>
         <tr><td>滑块</td>
           <td class="mono">slider::Slider</td>
           <td><code>primary</code>（已播放段）；轨道底色走项目扩展 <code>fill_3</code>；<code>ring</code></td>
-          <td>轨道高 4 / thumb ⌀14（覆盖方式<b>待核实</b>）；
+          <td>文档未给轨道 / thumb 几何（E-5，源码默认 6 / 16）；
             只读的观看进度条改用 <code>progress::Progress</code>，不要用 Slider</td></tr>
         <tr><td>复选 / 单选</td>
           <td class="mono">checkbox::Checkbox<br />radio::{Radio, RadioGroup}</td>
           <td><code>primary</code>（选中）/ <code>border</code>（描边）/ <code>ring</code></td>
-          <td>16×16 与 ⌀16 的尺寸、勾 / 点的形状（覆盖方式<b>待核实</b>）</td></tr>
+          <td>文档按字号档，无 16 固定值（E-5，默认约 16）</td></tr>
         <tr><td>滚动条</td>
           <td class="mono">scroll 模块<br />（<code>Scrollable</code> + <code>ScrollbarMode</code>）</td>
           <td><code>scrollbar</code>（滑块色）；<code>Theme.scrollbar_mode</code></td>
-          <td>轨道宽 6 / 最小滑块长 24 / 悬停加深一档（是否可配<b>待核实</b>）</td></tr>
+          <td>可配（E-4）：base <code>ScrollbarStyles</code> 的 width / min_length / hover；默认 6 / 48，设 24 即可</td></tr>
         <tr><td>分页 / 加载更多 / 无限滚动</td>
           <td class="mono">pagination::Pagination<br />list::List<br /><code>v_virtual_list</code></td>
           <td><code>foreground</code> / <code>primary</code>（当前页）/ <code>muted_foreground</code></td>
@@ -6439,7 +6446,7 @@ ul.clean li::marker { color: var(--theme-primary); }
               各组件的 <code>FocusLine</code>），自建元素才手写这两段</td></tr>
             <tr><td>生效时机</td><td class="mono">键盘导航时出现，鼠标点击不出现
               （原 <code>:focus-visible</code> 语义；GPUI 的 <code>Theme.focus_ring</code>
-              文档只保证 focused 时显示，未提键盘/指针区分；需自建 focus-visible（E-3））</td></tr>
+              文档只保证 focused 时显示，未提键盘/指针区分；<b>随无障碍暂缓（第 10 节，E-3）</b>）</td></tr>
             <tr><td>圆角跟随</td><td class="mono">与宿主同半径（胶囊按钮 → 胶囊焦点环）</td></tr>
             <tr><td>对比度</td><td class="mono">焦点环与相邻底色 ≥ 3:1</td></tr>
             <tr><td>Tab 顺序</td><td class="mono">= 视觉顺序 = 元素树顺序，三者必须一致</td></tr>
@@ -6456,7 +6463,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         <p class="note">下表是<b>语义</b>要求，与实现框架无关。GPUI 侧的对应 API 是
           <code>Role</code> / <code>accessibility_label</code> / <code>aria_label</code>
           （<code>Button::accessibility_label</code> 等组件方法），
-          到 macOS / Windows 无障碍树的逐条映射<b>待核实</b>（见 NOTES [V10]）。</p>
+          到 macOS / Windows 无障碍树的逐条映射<b>暂缓（第 10 节，E-9）</b>。</p>
         <table>
           <thead><tr><th>组件</th><th>role</th><th>必备状态 / 属性</th></tr></thead>
           <tbody>
@@ -6502,13 +6509,35 @@ ul.clean li::marker { color: var(--theme-primary); }
           按钮 <code>scale</code> 按压反馈、卡片悬停抬升。
           GPUI 侧动效走 <code>animation</code> / <code>with_animation</code> 与
           <code>Theme.motion</code>；「是否随系统减少动效开关一起降级」<b>已满足</b>
-          （<code>AnimationExt</code> 自动读取 <code>App::reduce_motion</code>，见 E-20）。
+          （<code>AnimationExt</code> 自动读取 <code>App::reduce_motion</code>，见 F.3 L-11）。
           ⑤ <b>尊重系统动态字体</b>：卡片标题放大后仍保持 2 行截断不溢出
           （GPUI 的 <code>Theme.font_size</code> + <code>rem</code> 缩放，文本截断靠
-          <code>line_clamp(2)</code> 一类约束，<b>具体 API 待核实</b>）。
+          <code>line_clamp(2)</code> 一类约束，<b>随无障碍暂缓（第 10 节，E-11）</b>）。
           ⑥ <b>目标尺寸 ≥ 24×24</b>（WCAG 2.2 Target Size Minimum），
           主操作 ≥ 34（<code>--control-h</code>）。</div></div>
     </div>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>组件能力核实结论（已归档，2026-10）</h3>
+    <table>
+      <thead><tr><th>#</th><th>项</th><th>结论</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">E-1</td><td>Notification 自动消失</td>
+          <td>默认 <code>autohide(true)</code> 5s；悬停 / 键盘焦点时暂停，离开后继续。
+            <b>直接用它，不自己计时</b>；需要 2s/3s 档时再包一层。</td></tr>
+        <tr><td class="mono">E-2</td><td>Input 错误槽 / ARIA</td>
+          <td>无内建 error 槽或 <code>aria-invalid</code>；错误展示自建
+            （<code>InputGroup.invalid(true)</code> + 外层文案）。ARIA 移到
+            <a href="#a11y">第 10 节</a>暂缓。</td></tr>
+        <tr><td class="mono">E-4</td><td>滚动条宽度 / 最小长度</td>
+          <td>base <code>ScrollbarStyles</code> 可配 track/thumb 的 width、min_length、
+            inset、radius 与 hover/active；默认 thumb 6、最小 48，显式设 24 即可。</td></tr>
+        <tr><td class="mono">E-5</td><td>组件几何覆盖</td>
+          <td>avatar 可用 <code>.with_size(px(n))</code> 精确设 18/34/46；tooltip 可用
+            <code>.max_w(240)</code>。switch 文档只有 small 28×16 / medium 36×20；
+            slider/checkbox/radio/tag/badge 目标几何未提供，按各自退路走。</td></tr>
+      </tbody>
+    </table>
   </div>
 </section>
 
@@ -6683,7 +6712,7 @@ ul.clean li::marker { color: var(--theme-primary); }
        —— 原 StatusError70Brush / StatusError80Brush 不再需要：
           <code>ButtonVariant::Danger</code> 的 hover / active 由主题计算。
        —— 原 FillDisabledBrush / TextOnAccentDisabledBrush 若要独立取值，
-          作为第二层扩展字段补；组件内是否已有对应项<b>待核实</b>。
+          作为第二层扩展字段补；组件内是否已有对应项<b>待核实（E-10）</b>。
        （补充记录：StatusError70/80Brush 由主题计算；FillDisabledBrush 与 TextOnAccentDisabledBrush 若需独立取值，归第二层扩展字段。）
 
 【五、存疑点 / 需要 Lead 拍板】
@@ -6754,7 +6783,7 @@ ul.clean li::marker { color: var(--theme-primary); }
     15.【快捷键归属】本节所有键位描述均为<b>组件级键盘模型</b>；
         全局键位总表由第 14 节统一收口，本节不另立全局键位清单。
 
-    —— 迁移后新增的【待核实】项（都是本地源码未确认的细节，实现时必须先核）：
+    —— 迁移后新增项的核实状态（已核实的回正文，暂缓的进第 10 节，未核实的进附录 E）：
     [V1] <b>已核实</b>：默认 <code>autohide(true)</code> 5s，悬停/焦点暂停；暂直接用，不自己计时。
     [V2] <b>已核实</b>：无内建 error 槽 / <code>aria-invalid</code>；错误展示自建
          （<code>invalid</code> 边框 + 外层文案），ARIA 移到未来无障碍 feature。
@@ -6766,15 +6795,15 @@ ul.clean li::marker { color: var(--theme-primary); }
     [V5] <b>已核实（部分）</b>：avatar / tooltip 宽可覆盖；switch 仅 small/medium，
          slider / checkbox / radio / tag / badge 目标几何未提供
          （44×24 / 轨道 4 / 16×16 / 最大宽 240 / 箭头 8×8 / 18·34·46 / pill 22 / badge 18）。
-    [V6] 危险确认对话框能否指定初始焦点落「取消」；<code>Dialog</code> 的 Tab 循环是否内建。
+    [V6] <b>暂缓（第 10 节）</b>：危险确认初始焦点落「取消」；<code>Dialog</code> 的 Tab 循环待验。
     [V7] <b>已核实（部分）</b>：最大宽可用 Styled <code>.max_w(240)</code>；
          箭头 8×8 未内建，需自绘。
-    [V8] <code>ContextMenu</code> 的键盘唤出路径（Shift+F10 / 菜单键）如何绑定；
-         <code>native_menu::NativeMenu</code> 是否承担系统菜单键。
-    [V9] popover / menu / tooltip 的贴边翻转是否自动处理（<code>Placement</code>）。
-    [V10] GPUI 的无障碍桥接细节：<code>accessibility_label</code> / <code>aria_label</code> /
-          <code>Role</code> 到 macOS / Windows 无障碍树的映射（本节的 aria-* 表按语义对齐，
-          具体 API 名以源码为准）。
+    [V8] <b>暂缓（第 10 节）</b>：<code>ContextMenu</code> 的键盘唤出路径
+         （Shift+F10 / 菜单键）与 <code>native_menu::NativeMenu</code> 的职责待验。
+    [V9] <b>未核实（附录 E · E-8）</b>：popover / menu / tooltip 的贴边翻转是否自动处理。
+    [V10] <b>暂缓（第 10 节）</b>：GPUI 的无障碍桥接细节——<code>accessibility_label</code> /
+          <code>aria_label</code> / <code>Role</code> 到 macOS / Windows 无障碍树的映射
+          （本节 aria-* 表按语义对齐，具体 API 名以源码为准）。
 -->
 
 <!-- ===== 第 14 节 · 施工队产出 ===== -->
@@ -7992,7 +8021,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         <ul class="checklist">
           <li><span class="box"></span><div><b>弹幕在白画面上</b>：弹幕自带 1px 描边 + 投影，
             但白底白字仍会糊 → 描边色必须是<b>深色</b>（走 <code>#0B0F14</code> 的 alpha 变体），
-            不能用白色描边</div></li>
+            不能用白色描边<br><b>已实现（2026-10）：</b>深色描边 8 方向 + 右下投影，见 F.3 L-12。</div></li>
           <li><span class="box"></span><div><b>字幕在任意画面上</b>：字幕必须自带底衬
             （<code>rgba(11,15,20,.72)</code> + 圆角 <code>--radius-sm</code>），
             <b>不允许</b>依赖画面暗度</div></li>
@@ -8681,7 +8710,7 @@ ul.clean li::marker { color: var(--theme-primary); }
             <b>尺寸令牌只提供兜底默认值</b>（普通机型），运行时值覆盖它。
             （<code>PlatformWindow::insets()</code> / <code>on_insets_changed</code> 在
             <code>platform.rs:1356 / 1365</code>，但 <code>Window::platform_window</code> 目前是
-            <code>pub(crate)</code>，壳层若要直接订阅需要自己封装一层——<b>具体暴露方式待核实</b>。）</div></div>
+            <code>pub(crate)</code>，壳层若要直接订阅需要自己封装一层——<b>具体暴露方式待核实（E-17）</b>。）</div></div>
       </div>
 
       <div class="panel">
@@ -9015,6 +9044,10 @@ ul.clean li::marker { color: var(--theme-primary); }
         视图取同一组常量、由平台配置决定取哪一档——
         这样「桌面 32 / 移动 44」是<b>取值差异</b>而不是<b>代码分支</b>。</div></div>
   </div>
+  <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-info"/></svg>
+    <div><b>E-21 已核实（部分）：</b>iOS 的 <code>aarch64-apple-ios</code> / <code>-ios-sim</code>
+      target 已装，两端 <code>cargo check</code> 通过；但缺完整 Xcode，真机/模拟器未验。
+      Android 无 SDK / NDK / <code>cargo-ndk</code>，仍阻塞。M8 尚未开始。</div></div>
 </section>
 
 <!-- NOTES:
@@ -10099,7 +10132,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           radio / tag / badge / avatar / progress / skeleton / empty / pagination / kbd / table /
           tab / list / scroll / popover / sheet / sidebar / virtual_list …</td>
           <td><b>不要自建重复实现</b>。第 13 节的组件从「设计 + 新建样式文件」改为「选用 + 主题覆盖」；
-            但组件内部定的几何不一定能覆盖，见附录 E。</td></tr>
+            但组件内部定的几何不一定能覆盖，结论见第 13 节「组件能力核实结论」。</td></tr>
         <tr><td class="mono">12</td><td><b>渐变只有线性，且只支持 2 个色标</b><br>
           <code>linear_gradient(angle, from, to)</code>，内部是 <code>[LinearColorStop; 2]</code>；
           <b>没有 <code>radial_gradient</code></b></td>
@@ -10278,7 +10311,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         ① <b>层级</b>：不是「换个写法」，是<b>换了一种模型</b>——数值没了，只能靠树顺序表达意图。<br>
         ② <b>缩放</b>：没有元素级 scale，1.03 / 1.04 只能用负 inset 近似。<br>
         ③ <b>主题切换</b>：不再重建，这个认知要改。<br>
-        ④ <b>组件</b>：从「自建样式」变成「用现成的 + 覆盖」，能改的余量变少了（见附录 E）。</div></div>
+        ④ <b>组件</b>：从「自建样式」变成「用现成的 + 覆盖」，能改的余量变少了（见第 13 节核实结论）。</div></div>
   </div>
 </section>
 
@@ -10353,262 +10386,51 @@ ul.clean li::marker { color: var(--theme-primary); }
 <section id="appendix-e">
   <div class="sec-head">
     <h2><span class="sec-num">附录 E</span>待核实清单</h2>
-    <p><b>这里不是「待定决策」，是「还没验证过的能力」。</b>
-      正文里那些标了「待核实」的条目全部收在这里，开工前应当先逐条核一遍——
-      已满足的标 ✅（状态列），能做的补进正文，不能做的降级设计。
-      它们分四类：组件能力、框架能力缺口、API 可见性、需真机验收；<b>状态以本页「状态」列为准</b>，
-      正文里的「待核实」是设计时备注。其中 <b>E-11（系统动态字体）</b>另有跨平台取值细则，见 E.2 之后。</p>
+    <p><b>这里只收还没核实的项。</b>已核实的结论已经回到正文对应章节——
+      组件能力见 <a href="#components">第 13 节</a>，布局/状态/卡片见第 01 / 04 / 05 节，
+      播放器见第 14 节，无障碍见 <a href="#a11y">第 10 节</a>（暂缓），移动端见第 15 节。
+      当前只剩 <b>6 条</b>。</p>
   </div>
 
   <div class="panel">
-    <h3>E.0 复核结论（2026-10-24）</h3>
-    <div class="callout ok" style="margin-bottom:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>22 条里 5 条已实现、3 条已核实可接受、2 条部分、7 条无障碍暂缓、5 条仍待核实。</b><br>
-        已实现：<b>E-14</b>（弹幕描边）、<b>E-15</b>（deferred 取舍）、<b>E-16</b>（骨架 1.5s）、
-        <b>E-19</b>（hover 近似）、<b>E-20</b>（reduce_motion 运行期跟随）。<br>
-        已核实可接受：<b>E-1</b>（内建 5s autohide）、<b>E-2</b>（错误槽自建；ARIA 暂缓）、
-        <b>E-4</b>（base Scrollbar 可配宽度 / 最小长度）。<br>
-        部分/走退路：<b>E-5</b>（avatar/tooltip 宽可覆盖，其余目标几何未提供）、
-        <b>E-21</b>（iOS 编译过，Android 阻塞）。<br>
-        <b>无障碍暂缓（移到 <a href="#a11y">第 10 节</a>，暂不排期）：</b>E-3、E-6、E-7、E-9、E-11、E-13、E-22，
-        外加 E-2 的 ARIA 部分。<br>
-        其余 5 条（E-8、E-10、E-12、E-17、E-18）仍按 E.1–E.4 的「退路」列处理。</div></div>
+    <h3>E.1 组件与框架</h3>
     <table>
-      <thead><tr><th>#</th><th>已实现 / 已核实项</th><th>结论 / 验证</th><th>对应改动</th></tr></thead>
+      <thead><tr><th>#</th><th>待核实</th><th>未核实前的退路</th></tr></thead>
       <tbody>
-        <tr><td class="mono">E-1</td><td>Notification 自动消失</td>
-          <td>内建 <code>autohide</code> 默认 5s；指针悬停 / 键盘焦点时暂停，离开后继续，
-            窗口非激活也继续计时。暂直接用它，不自己计时</td>
-          <td>组件内建，暂不接</td></tr>
-        <tr><td class="mono">E-2</td><td>Input 错误槽 / ARIA</td>
-          <td>无内建 error 槽或 <code>aria-invalid</code>；错误展示自建
-            （<code>invalid</code> 边框 + 外层文案），ARIA 延后</td>
-          <td>未来无障碍 feature</td></tr>
-        <tr><td class="mono">E-4</td><td>滚动条宽度 / 最小长度</td>
-          <td>base <code>Scrollbar</code> 的 <code>ScrollbarStyles</code> 可配
-            <code>thumb</code> 的 width / min_length / inset / radius 与 track / hover；
-            默认 thumb 6、最小 48，显式设 24 即可</td>
-          <td>能力已核实；滚动条样式待接</td></tr>
-        <tr><td class="mono">E-14</td><td>弹幕「1px 描边 + 投影」</td>
-          <td>每条可见弹幕 shape 两次，深色描边 8 方向 + 右下投影；无模糊</td>
-          <td>F.3 L-12</td></tr>
-        <tr><td class="mono">E-15</td><td><code>deferred</code> 承载常驻整层</td>
-          <td>决定不用 <code>deferred</code>，改用相对定位 + 绝对定位子树表达层叠</td>
-          <td>实现决策</td></tr>
-        <tr><td class="mono">E-16</td><td>骨架脉冲 1.5s</td>
-          <td>自绘 <code>div()</code> + <code>with_animation</code>，<code>SKELETON_PULSE_MS = 1500</code> 有编译期断言</td>
-          <td>M6 状态组件</td></tr>
-        <tr><td class="mono">E-19</td><td>卡片 hover 1.03 / 封面 1.04</td>
-          <td>负 <code>inset</code> 近似 + 外层裁剪，150ms 进入/离开；不是等比矩阵</td>
-          <td>F.3 L-10</td></tr>
-        <tr><td class="mono">E-20</td><td><code>reduce_motion</code> 运行期变更</td>
-          <td>每 2s 重读；macOS 切换系统开关后 2s 内生效，动画自动静态化</td>
-          <td>F.3 L-11</td></tr>
+        <tr><td class="mono">E-8</td><td>popover / menu / tooltip 的贴边翻转是否自动
+          （<code>Placement</code>）</td>
+          <td>按可用空间自己选 <code>Placement</code></td></tr>
+        <tr><td class="mono">E-10</td><td>开关关态的轨道色对应哪个 <code>ThemeColor</code> 字段
+          （字段名未核实）</td>
+          <td>用项目扩展字段 <code>yk.switch_track</code> 补</td></tr>
+        <tr><td class="mono">E-12</td><td>图片内存缓存无公开淘汰接口
+          （<code>asset_cache.rs</code> 只有内部 <code>CachedLoad</code>）</td>
+          <td>在 <code>yk-media</code> 自建 LRU 或自持位图</td></tr>
       </tbody>
     </table>
-    <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-info"/></svg>
-      <div><b>E-1 ～ E-5 核实结论（2026-10-24）：</b><br>
-        <b>E-1</b> 默认 <code>autohide(true)</code> 就是 5s，且内部已处理「悬停 / 键盘焦点暂停」；
-        暂直接用它，不自己计时。需要 2s / 3s 档时再包一层计时 + <code>dismiss()</code>。<br>
-        <b>E-2</b> 已核实：<code>InputGroup::invalid(bool)</code> 只做边框/焦点环视觉，
-        <b>没有内建错误槽或 aria-invalid</b>；错误展示由项目自建（invalid + 外层文案），
-        ARIA 相关移到未来无障碍 feature。<br>
-        <b>E-3</b> 已移入第 10 节（无障碍暂缓）：文档只说 focused 时画主题焦点环，
-        不区分键盘/指针；focus-visible 需自建。<br>
-        <b>E-4</b> 已核实：base primitives 的 <code>Scrollbar</code> 文档公开 <code>ScrollbarStyles</code>，
-        <b>track / thumb 的 width、min_length、inset、radius、hover/active 都可配</b>；
-        默认 thumb 6、最小 48，显式设 24 即可。组件级 Scrollable 页只是没展开写。<br>
-        <b>E-5</b> 部分：avatar 可用 <code>.with_size(px(n))</code> 精确设 18/34/46；
-        tooltip 可用 Styled <code>.max_w(240)</code>。但 0.8.0 文档里 switch 只有
-        <b>small 28×16 / medium 36×20</b>（没有 44×24），slider/checkbox/radio/tag/badge
-        都不给目标几何；tooltip 也<b>没有内建箭头</b>。<br>
-        <b>E-6 / E-7 / E-9 / E-11 / E-13 / E-22</b> 与 E-3 一起移入第 10 节，暂缓。</div></div>
-
-    <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>与附录 F 的对应：</b>L-1 PlayerView 重建、L-2 letterbox、L-3 滚动 + 虚拟列表、
-        L-7 构造闭包无副作用、L-9 离线态、L-10 hover、L-11 reduce_motion、
-        L-12 弹幕描边、L-13 离线重试<b>均已落地</b>；L-6 自动截图<b>已删除</b>（非产品需求）；
-        功耗移到「整体完成后再做」；L-4 iOS 真实解码、L-5 Android 接入仍在移动端阶段。</div></div>
   </div>
 
   <div class="panel">
-    <h3>E.1 组件能力（<code>gpui-component</code> 是否能做到）</h3>
+    <h3>E.2 平台 / 数据</h3>
     <table>
-      <thead><tr><th>#</th><th>待核实</th><th>做不到时的退路</th><th>状态</th></tr></thead>
+      <thead><tr><th>#</th><th>待核实</th><th>未核实前的退路</th></tr></thead>
       <tbody>
-        <tr><td class="mono">E-1</td><td><code>Notification</code> 是否有 per-notification 自动消失时长 API
-          （现状：<code>autohide(bool)</code>，时长在 <code>NotificationList</code> 内固定 5s）</td>
-          <td><b>已核实：默认 <code>autohide(true)</code> 就是 5s</b>，内部会处理
-          「指针悬停 / 键盘焦点时暂停、离开后继续」，窗口非激活也继续计时。
-          暂直接用它，不自己计时；只有需要 2s / 3s 档时，才在包装层计时后调 <code>dismiss()</code></td><td><span class="tag ok">✅ 已核实（暂用内建 5s autohide）</span></td></tr>
-        <tr><td class="mono">E-2</td><td><code>Input</code> 的错误态 / 校验提示槽；<code>aria-invalid</code> / <code>aria-describedby</code> 等价物</td>
-          <td><b>错误展示自建</b>：<code>InputGroup.invalid(true)</code> 管边框/焦点环，
-          外层加错误文案；<code>aria-invalid</code> / <code>aria-describedby</code>
-          移到未来无障碍 feature（与 F.2「无障碍暂缓」一致）</td><td><span class="tag ok">✅ 已核实（错误槽自建；ARIA 延后）</span></td></tr>
-        <tr><td class="mono">E-3</td><td>焦点环是否区分键盘 / 指针来源（原 <code>:focus-visible</code> 语义）</td>
-          <td>自写 <code>yk_focus_ring()</code>，已计划这么做</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
-        <tr><td class="mono">E-4</td><td>滚动条轨道宽 6、最小滑块长 24、悬停加深一档是否可配</td>
-          <td><b>可配（E-4）</b>：base primitives 的 <code>Scrollbar</code> + <code>ScrollbarStyles</code>
-          公开 <code>thumb(|t| t.width(px(6.)).min_length(px(24.)))</code>；
-          track / thumb 的 hover / active 也都能覆盖。默认 thumb 6、最小 48，显式设 24 即可。</td>
-          <td><span class="tag ok">✅ 已核实（可配）</span></td></tr>
-        <tr><td class="mono">E-5</td><td>开关 44×24 / 滑块轨道 4 + thumb 14 / 复选单选 16×16 /
-          Tooltip 最大宽 240 + 箭头 8×8 / 头像 18·34·46 / pill 22 / badge 18 这些几何是否可覆盖</td>
-          <td>不可覆盖则接受组件内定值并更新规范，或自建该组件</td><td><span class="tag warn">◐ 部分：avatar/tooltip 宽可覆盖，其余未提供</span></td></tr>
-        <tr><td class="mono">E-6</td><td>危险确认对话框能否指定初始焦点落「取消」；<code>Dialog</code> 的 Tab 循环是否内建</td>
-          <td>打开后手动 <code>window.focus(&amp;cancel)</code></td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
-        <tr><td class="mono">E-7</td><td><code>ContextMenu</code> 的键盘唤出（Shift+F10 / 菜单键）如何绑定；
-          <code>native_menu::NativeMenu</code> 是否承担系统菜单键</td>
-          <td>用 <code>on_key_down</code> 手动分派</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
-        <tr><td class="mono">E-8</td><td>popover / menu / tooltip 的贴边翻转是否自动（<code>Placement</code>）</td>
-          <td>按可用空间自己选 <code>Placement</code></td><td><span class="tag ghost">☐ 待核实</span></td></tr>
-        <tr><td class="mono">E-9</td><td>GPUI 无障碍桥接：<code>aria_label</code> / <code>role</code> 到
-          macOS / Windows 无障碍树的逐条映射</td>
-          <td>逐平台实测，缺的用原生桥接补</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
-        <tr><td class="mono">E-10</td><td>开关关态的轨道色对应哪个 <code>ThemeColor</code> 字段（字段名待核实）</td>
-          <td>用项目扩展字段 <code>yk.switch_track</code> 补</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+        <tr><td class="mono">E-17</td><td><code>Window::platform_window</code> 的可见性 /
+          安全区订阅方式</td>
+          <td>移动端安全区要用；未核实前按固定内边距处理</td></tr>
+        <tr><td class="mono">E-18</td><td><code>tokio::sync::Semaphore</code> 不在直接依赖</td>
+          <td>需要限流时再补依赖，或用 <code>buffer_unordered</code></td></tr>
+        <tr><td class="mono">E-23</td><td>直播分区列表 <code>second/getList</code> 的完整返回字段表
+          官方文档缺失</td>
+          <td>按实际响应校对后固化模型；未核实前不编造字段名</td></tr>
       </tbody>
     </table>
   </div>
 
-  <div class="panel">
-    <h3>E.2 框架能力缺口（GPUI 层面没有，需自行接一层或降级）</h3>
-    <table>
-      <thead><tr><th>#</th><th>缺口</th><th>影响与退路</th><th>状态</th></tr></thead>
-      <tbody>
-        <tr><td class="mono">E-11</td><td><b>系统动态字体：GPUI 不提供读取入口，但平台 API 能读</b><br>
-          GPUI 只有 <code>window.set_rem_size(px(..))</code>，且项目字号走 <code>text_size(px(n))</code>
-          不吃 rem，所以单靠它无效</td>
-          <td><b>结论：不是能力缺口，是「大部分平台能读，需自己接一层」。</b>
-            按平台 API 读倍率后统一乘到字号与行高上（细则见下方 E-11 表）。
-            <b>唯一例外是 macOS</b>——第三方 app 读不到系统字号设置，只能提供应用内选项。</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
-        <tr><td class="mono">E-12</td><td>图片内存缓存无公开淘汰接口（<code>asset_cache.rs</code> 只有内部 <code>CachedLoad</code>）</td>
-          <td>在 <code>yk-media</code> 自建 LRU 或自持位图</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
-        <tr><td class="mono">E-13</td><td><code>aria-live</code> 等价物：<code>Role::Status</code> 有，
-          但「节点文本变化是否作为 live announcement 上报」源码看不出</td>
-          <td>扫码三态等需要播报的场景，实测后决定是否用原生桥接</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
-        <tr><td class="mono">E-14</td><td>弹幕的「1px 描边 + 投影」在文本渲染层怎么画，源码里没核实到 stroke 能力</td>
-          <td><span class="tag ok">已实现（2026-10）</span> <code>ShapedLine</code> 的颜色烘在 layout 里，
-            所以每条文本 shape 两次：深色 <code>#0B0F14D9</code> 描边 + 原色字身；
-            描边按 8 方向偏移 1px，投影在右下 1,2px 再画一次。<b>投影无模糊</b>，是偏移近似。</td><td><span class="tag ok">✅ 已满足（L-12）</span></td></tr>
-        <tr><td class="mono">E-15</td><td><code>deferred</code> 承载「常驻整层」（控制栏 / 信息面板）技术上可行但非主流用法</td>
-          <td>文档同时给了「<code>relative()</code> + 绝对定位子树按声明顺序」的等效写法；
-            同一组层只能选一种，实现时定死。</td><td><span class="tag ok">✅ 已满足（不用 deferred）</span></td></tr>
-        <tr><td class="mono">E-16</td><td>骨架脉冲：<code>skeleton::Skeleton</code> 把脉冲写死 2s bounce，只暴露 <code>secondary()</code></td>
-          <td>保留项目 1.5s 就自绘 <code>div()</code> + <code>with_animation</code>——
-            <b>建议这么做</b>，1.5s 是设计节奏，不为复用组件而改。</td><td><span class="tag ok">✅ 已满足（自绘 1.5s）</span></td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <div class="panel">
-    <h3>E-11 细则 · 各平台字号缩放怎么读</h3>
-    <p class="note">GPUI 不管这件事，但每个平台都有入口。读到倍率后<b>统一乘到字号与行高上</b>，
-      而不是只调 <code>window.set_rem_size</code>（项目字号不走 rem，那样无效）。</p>
-    <table style="margin-top:10px">
-      <thead><tr><th>平台</th><th>取值入口</th><th>变化通知</th><th>备注</th></tr></thead>
-      <tbody>
-        <tr><td><b>iOS</b></td>
-          <td>读 <code>UIApplication.shared.preferredContentSizeCategory</code>（<code>UIContentSizeCategory</code>）；
-            原生控件直接 <code>adjustsFontForContentSizeCategory = true</code>；
-            自定义字号用 <code>UIFontMetrics(forTextStyle:).scaledFont(for:)</code> 换算</td>
-          <td><code>UIContentSizeCategory.didChangeNotification</code></td>
-          <td>最完整的动态字体模型；建议直接用它算出的 point 值，不要自己乘系数</td></tr>
-        <tr><td><b>Android</b></td>
-          <td>读 <code>resources.configuration.fontScale</code>（float，1.0 为默认）；
-            换算用 <code>FontScaleConverter</code>（API 34+）；等价写法 <code>scaledDensity / density</code></td>
-          <td><code>Activity.onConfigurationChanged</code> 里比对 <code>fontScale</code></td>
-          <td>Android 14+ 支持 per-app 字号缩放，要按应用维度取；<code>FontScaleConverter</code> 专门处理「字号非线性缩放」</td></tr>
-        <tr><td><b>Windows</b></td>
-          <td>读 <code>UISettings.TextScaleFactor</code>（WinRT，double，<b>值域 1.0 – 2.25</b>）</td>
-          <td><code>UISettings.TextScaleFactorChanged</code></td>
-          <td><b>与 DPI 缩放是两件事</b>：DPI 由 GPUI 处理。官方说明「字号越大受影响越小」，所以不是纯线性倍率</td></tr>
-        <tr><td><b>macOS</b></td>
-          <td><b>读不到，且没有 API 可解。</b>Dynamic Type 不是 macOS 特性；macOS 26 的
-            「Preferred Text Size」不对第三方开放（Apple DTS 原话：
-            “That feature can't be used by 3rd party apps on macOS”）；
-            <code>NSFont.preferredFont(forTextStyle:)</code> <b>不跟随</b>该设置</td>
-          <td>无可订阅通知</td>
-          <td><b>只能提供应用内字号选项</b>（设置页 100% / 115% / 130%），不要指望跟随系统</td></tr>
-        <tr><td><b>Linux</b></td>
-          <td>GNOME：GSettings <code>org.gnome.desktop.interface text-scaling-factor</code>（1.0 默认）；
-            KDE：<code>kdeglobals</code> 的 <code>ForceFontDPI</code></td>
-          <td>GSettings <code>changed</code> 信号</td>
-          <td>跨桌面不统一；读不到时用 DPI 兜底，或直接按 1.0 处理</td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>四个平台能自动跟随，一个不能——这决定了「要不要做应用内字号设置」。</b><br>
-        <b>能跟随</b>：iOS / Android / Windows / Linux（GNOME）都有可读的倍率与变化通知，
-        接上就能跟随系统。<br>
-        <b>不能跟随</b>：<b>macOS</b>。这不是「没查对 API」，是平台没开放——
-        所以 macOS 上<b>必须</b>在设置页提供应用内字号选项，否则该用户群完全无法调整字号。<br>
-        这条同时解释了为什么本项目<b>不能只依赖系统设置</b>：只要 macOS 在支持列表里，
-        应用内字号选项就是必需的兜底，而不是可选功能。</div></div>
-
-    <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
-      <div><b>落地时有三件事必须一起做，只改字号会撑破布局。</b><br>
-        ① <b>行高跟着乘</b>：字号 ×1.3 而行高不动，两行标题会挤在一起；<code>LineHeight*</code> 要一起缩放。<br>
-        ② <b>容器高度重算</b>：卡片 <code>COVER_CELL_HEIGHT</code> 是基准字号下的 184，放大后 2 行标题可能放不下——
-        要么让卡片高度随倍率增长，要么对标题做更严格的截断。<br>
-        ③ <b>限幅</b>：建议把倍率夹在 <b>0.85 – 1.3</b> 之间。超出范围的极端设置（iOS 最大档 ≈ 2.35 倍）
-        会把整个布局压垮，此时应回退到「只放大正文字号 + 允许滚动」，而不是等比放大所有尺寸。<br>
-        <b>不需要跟着缩放的</b>：触控热区 44×44（物理尺寸）、图标边长（几何不是文字）、
-        1px 描边与圆角。</div></div>
-    <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>建议的封装形式</b>（对应第 10 节的无障碍条目）：<br>
-        <code>yk_app::platform::text_scale() -&gt; f32</code> 读一次并缓存，平台层变化时更新全局；<br>
-        所有字号不直接写 <code>.text_size(px(n))</code>，而是走 <code>.yk_text(n)</code>，
-        内部 <code>px(n * scale)</code>。这样字号阶（12/13/15/20/24/28）保持不变，
-        倍率只在一个地方生效——<b>与附录 D · D.1 事实 7「不为套框架改字号阶」是同一个原则</b>。</div></div>
-  </div>
-
-  <div class="panel">
-    <h3>E.3 API 可见性（存在但应用层够不到）</h3>
-    <table>
-      <thead><tr><th>#</th><th>待核实</th><th>退路</th><th>状态</th></tr></thead>
-      <tbody>
-        <tr><td class="mono">E-17</td><td><code>Window::platform_window</code> 是 <code>pub(crate)</code>，
-          因此 <code>PlatformWindow::insets()</code> / <code>on_insets_changed</code> 应用层不能直接订阅</td>
-          <td>壳层自己封装一层；可用的替代是 <code>window.fully_visible_bounds()</code></td><td><span class="tag ghost">☐ 待核实</span></td></tr>
-        <tr><td class="mono">E-18</td><td><code>tokio::sync::Semaphore</code> 不在 <code>gpui-kit</code> 的直接依赖里</td>
-          <td>在 <code>yk-app</code> 显式声明 <code>tokio = { version = "1", features = ["sync"] }</code>，
-            或改用 <code>futures::buffer_unordered(4)</code></td><td><span class="tag ghost">☐ 待核实</span></td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <div class="panel">
-    <h3>E.4 需真机 / 实测验收（跑一下才知道）</h3>
-    <table>
-      <thead><tr><th>#</th><th>要验什么</th><th>为什么必须实测</th><th>状态</th></tr></thead>
-      <tbody>
-        <tr><td class="mono">E-19</td><td>卡片悬停 1.03 / 封面 1.04 的「负 inset 近似」观感</td>
-          <td>不是等比矩阵，x/y 会略各向异性；必要时改 <code>with_spring</code> 或自定义 Element 走 <code>TransformationMatrix</code></td><td><span class="tag ok">✅ 已满足（L-10，近似）</span></td></tr>
-        <tr><td class="mono">E-20</td><td><code>reduce_motion</code> 运行期变更（用户在系统设置里改开关）</td>
-          <td><span class="tag ok">已实测（2026-10）</span> AppRoot 每 2s 调一次
-            <code>gpui::base::apply_system_reduce_motion</code>，变化时 <code>cx.notify()</code>；
-            macOS 下切换系统「减弱动态效果」，2s 内日志 false→true→false，
-            <code>AnimationExt</code> 动画自动静态化/恢复。Linux 由 gpui-base 跟随 portal。</td><td><span class="tag ok">✅ 已满足（L-11，实测）</span></td></tr>
-        <tr><td class="mono">E-21</td><td>移动端播放链路整体可行性</td>
-          <td>已单列为 <b>M8 里程碑</b>（见第 16 节）。<b>当前部分满足</b>：
-            iOS 的 <code>aarch64-apple-ios</code> / <code>-ios-sim</code> target 已装，
-            两端 <code>cargo check</code> 通过；但本机只有 Command Line Tools，
-            缺完整 Xcode，真机/模拟器运行未验。
-            <b>Android 仍阻塞</b>：无 SDK / NDK / <code>cargo-ndk</code>，也没有
-            <code>aarch64-linux-android</code> target。M8 开工前必须先补齐工具链
-            （见第 16 节 M8 的前置条件）。</td><td><span class="tag warn">◐ 部分：iOS 编译过，Android 阻塞</span></td></tr>
-        <tr><td class="mono">E-22</td><td>移动端 IME 组合 / 无障碍 / 生命周期钩子</td>
-          <td>官方自述未完成；M8 里逐项验，不通就降级（例如移动端不发弹幕）</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>使用方式：</b>开工前把 E-1 ～ E-18 逐条核一遍——核完能做的，把结论补回正文对应节；
-        做不到的，按「退路」列降级并在正文改口径。E-19 ～ E-22 只在实际做到那一步时才验，
-        不用提前核。已满足的条目在「状态」列标 ✅，保留记录。<br>
-        <b>无障碍项已暂缓：</b>E-3 / E-6 / E-7 / E-9 / E-11 / E-13 / E-22 与 E-2 的 ARIA 部分
-        已移到 <a href="#a11y">第 10 节 · 无障碍与性能</a>，不在本轮开工程序内。</div></div>
-  </div>
+  <div class="callout info"><svg class="icon icon-sm ti"><use href="#i-info"/></svg>
+    <div><b>已核实项去哪了：</b>组件能力 → 第 13 节；布局/状态/卡片 → 第 01 / 04 / 05 节；
+      播放器 → 第 14 节；无障碍 → 第 10 节（暂缓）；移动端 → 第 15 节。
+      本表不再保留已核实条目。</div></div>
 </section>
 
 <!-- NOTES:
