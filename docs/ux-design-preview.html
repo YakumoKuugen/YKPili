@@ -4849,7 +4849,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td><span class="tag ok">已有</span> 宽度与胶囊滑块已落地，颜色仍是硬编码</td>
           <td><code>scroll</code> 模块（<code>Scrollable</code> + <code>Theme.scrollbar_mode</code> +
             <code>ThemeColor.scrollbar</code>）→ 覆盖 <code>scrollbar</code> 色；
-            <b>轨道宽 6 是否可配待核实</b></td></tr>
+            <b>轨道宽 6 / 最小滑块 24 可配（E-4）</b></td></tr>
         <tr><td>导航</td><td>分页 / 加载更多 / 无限滚动</td>
           <td class="mono">—</td>
           <td><span class="tag warn">部分</span> 有滚动加载逻辑，无「加载更多」与分页 UI</td>
@@ -5516,7 +5516,8 @@ ul.clean li::marker { color: var(--theme-primary); }
           <code>autohide(bool)</code>，自动消失时长在 <code>NotificationList</code> 内部固定为 5s
           （<code>notification.rs:872</code>），所以 2000 / 3000 / 5000 这三档
           <b>需要在包装层自己计时后调 <code>dismiss()</code></b>，或改用自建 toast host——
-          是否存在 per-notification 时长 API <b>待核实</b>；「错误常驻」用
+          <b>E-1 已核实：无 per-notification 时长 API</b>（5s 写死在 <code>notification.rs:872</code>），
+          按「包装层自计时 + <code>dismiss()</code>」处理；「错误常驻」用
           <code>autohide(false)</code> 即可。</p>
       </div>
     </div>
@@ -5667,9 +5668,11 @@ ul.clean li::marker { color: var(--theme-primary); }
           <br><b>目标</b>：选 <code>tooltip::Tooltip</code>，通过
           <code>ManagedTooltipExt</code> 直接挂在按钮上（<code>Button</code> 自带 tooltip 入口）；
           500ms 延迟用 <code>show_delay</code>；表面读 <code>popover</code> / <code>border</code>。
-          <b>需要自建 / 待核实</b>：Tooltip 最大宽 240、内边距 4 8、箭头 8×8 旋转 45° 这几项
-          组件是否暴露为参数<b>待核实</b>；键盘聚焦即时显示（0ms）与
-          <code>aria-describedby</code> 的无障碍桥接<b>待核实</b>。</div></div>
+          <b>E-5 已核实</b>：最大宽可用 <code>.max_w(px(240.))</code> 覆盖，内边距可用
+          <code>px_2().py_0p5()</code> 近似；<b>箭头 8×8 组件未内建</b>，需自绘。
+          键盘聚焦即时显示可用 <code>show_delay(Duration::ZERO)</code>；
+          <code>aria-describedby</code> 没有按 ID 关联的能力，退化为
+          <code>aria_description</code> 文本。</div></div>
     </div>
   </div>
 
@@ -5854,8 +5857,8 @@ ul.clean li::marker { color: var(--theme-primary); }
             和 HTML 预览是两套写法；<b>迁移后两套都作废</b>，统一由 <code>scroll</code> 模块出。
             ② 原 7 处硬编码 hex（<code>ScrollBarPanningThumbBackground</code> 等）随迁移消失，
             颜色只从 <code>ThemeColor.scrollbar</code> / 项目扩展字段取。
-            ③ <b>最小滑块长度 24 与轨道宽 6 是否可配：待核实</b>——若组件按比例算最小长度，
-            长列表下可能缩到不可拖，届时需在自建 wrapper 里补偿。</div></div>
+            ③ <b>可配（E-4）</b>：<code>ScrollbarStyles.thumb(|t| t.width(px(6.)).min_length(px(24.)))</code>；
+            默认最小长度是 48，显式设 24 即可。</div></div>
       </div>
     </div>
 
@@ -6405,7 +6408,7 @@ ul.clean li::marker { color: var(--theme-primary); }
               各组件的 <code>FocusLine</code>），自建元素才手写这两段</td></tr>
             <tr><td>生效时机</td><td class="mono">键盘导航时出现，鼠标点击不出现
               （原 <code>:focus-visible</code> 语义；GPUI 的 <code>Theme.focus_ring</code>
-              是否区分键盘 / 指针来源<b>待核实</b>）</td></tr>
+              支持（E-3）：<code>.focus_visible(..)</code> 只在 <code>last_input_was_keyboard()</code> 时生效）</td></tr>
             <tr><td>圆角跟随</td><td class="mono">与宿主同半径（胶囊按钮 → 胶囊焦点环）</td></tr>
             <tr><td>对比度</td><td class="mono">焦点环与相邻底色 ≥ 3:1</td></tr>
             <tr><td>Tab 顺序</td><td class="mono">= 视觉顺序 = 元素树顺序，三者必须一致</td></tr>
@@ -10326,14 +10329,24 @@ ul.clean li::marker { color: var(--theme-primary); }
   <div class="panel">
     <h3>E.0 复核结论（2026-10-24）</h3>
     <div class="callout ok" style="margin-bottom:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>22 条里 5 条已满足、2 条部分满足、15 条仍待核实。</b><br>
-        已满足：<b>E-14</b>（弹幕描边）、<b>E-15</b>（deferred 取舍）、<b>E-16</b>（骨架 1.5s）、
+      <div><b>22 条里 5 条已实现、2 条已核实可做、5 条部分/走退路、10 条仍待核实。</b><br>
+        已实现：<b>E-14</b>（弹幕描边）、<b>E-15</b>（deferred 取舍）、<b>E-16</b>（骨架 1.5s）、
         <b>E-19</b>（hover 近似）、<b>E-20</b>（reduce_motion 运行期跟随）。<br>
-        部分满足：<b>E-11</b>（结论已定，动态字体实现待做）、<b>E-21</b>（iOS 编译过，Android 工具链阻塞）。<br>
-        其余 15 条仍按 E.1–E.4 的「退路」列处理。</div></div>
+        已核实可做：<b>E-3</b>（focus_visible 区分键盘/指针）、<b>E-4</b>（滚动条几何可配）。<br>
+        部分 / 走退路：<b>E-1</b>（无 per-notification 时长）、<b>E-2</b>（有 invalid 样式、无 aria-invalid）、
+        <b>E-5</b>（多数几何可覆盖，slider/badge/箭头不行）、<b>E-11</b>（动态字体实现待做）、
+        <b>E-21</b>（iOS 编译过，Android 阻塞）。<br>
+        其余 10 条按 E.1–E.4 的「退路」列处理。</div></div>
     <table>
-      <thead><tr><th>#</th><th>已满足项</th><th>结论 / 验证</th><th>对应改动</th></tr></thead>
+      <thead><tr><th>#</th><th>已实现 / 已核实项</th><th>结论 / 验证</th><th>对应改动</th></tr></thead>
       <tbody>
+        <tr><td class="mono">E-3</td><td>焦点环区分键盘 / 指针</td>
+          <td>支持：<code>.focus_visible(..)</code> 只在 <code>window.last_input_was_keyboard()</code> 时生效</td>
+          <td>P2 焦点环接入</td></tr>
+        <tr><td class="mono">E-4</td><td>滚动条几何可配</td>
+          <td>支持：<code>ScrollbarStyles</code> 可设 thumb <code>width</code> / <code>min_length</code> / inset / radius / 颜色；
+            默认 thumb 6、最小 48，设 24 即可</td>
+          <td>能力已核实；滚动条样式待接</td></tr>
         <tr><td class="mono">E-14</td><td>弹幕「1px 描边 + 投影」</td>
           <td>每条可见弹幕 shape 两次，深色描边 8 方向 + 右下投影；无模糊</td>
           <td>F.3 L-12</td></tr>
@@ -10351,6 +10364,20 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>F.3 L-11</td></tr>
       </tbody>
     </table>
+    <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-info"/></svg>
+      <div><b>E-1 ～ E-5 核实结论（2026-10-24）：</b><br>
+        <b>E-1</b> 无 per-notification 时长 API：只有 <code>autohide(bool)</code>，
+        自动消失固定 5s（<code>notification.rs:872</code>）；走「包装层自计时 + <code>dismiss()</code>」。<br>
+        <b>E-2</b> 部分：<code>InputGroup::invalid(bool)</code> 有错误态边框/焦点环，但纯视觉；
+        没有 <code>aria-invalid</code>，<code>aria_description</code> 只能传一段描述文本（无 ID 关联）。<br>
+        <b>E-3</b> 可做：<code>.focus_visible(..)</code> 只在 <code>window.last_input_was_keyboard()</code>
+        时生效，自建焦点环可用它实现 focus-visible 语义。<br>
+        <b>E-4</b> 可配：<code>ScrollbarStyles</code> 暴露 thumb 的 width / min_length / inset / radius /
+        hover 样式；默认 thumb 6、最小 48，显式设 24 即可。<br>
+        <b>E-5</b> 部分：switch（Large 44×24）、checkbox/radio（默认 16）、avatar（<code>Size::Size(px)</code>）、
+        tag（可 <code>.h</code>）、tooltip（可 <code>.max_w(240)</code>）可覆盖；
+        <b>slider 轨道 6 / thumb 16、badge 16/24 写死</b>，tooltip 也没有内建箭头。</div></div>
+
     <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
       <div><b>与附录 F 的对应：</b>L-1 PlayerView 重建、L-2 letterbox、L-3 滚动 + 虚拟列表、
         L-7 构造闭包无副作用、L-9 离线态、L-10 hover、L-11 reduce_motion、
@@ -10365,16 +10392,16 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tbody>
         <tr><td class="mono">E-1</td><td><code>Notification</code> 是否有 per-notification 自动消失时长 API
           （现状：<code>autohide(bool)</code>，时长在 <code>NotificationList</code> 内固定 5s）</td>
-          <td>包装层自计时后调 <code>dismiss()</code>，或自建 toast host</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>包装层自计时后调 <code>dismiss()</code>，或自建 toast host</td><td><span class="tag warn">☑ 已核实：无时长 API（走退路）</span></td></tr>
         <tr><td class="mono">E-2</td><td><code>Input</code> 的错误态 / 校验提示槽；<code>aria-invalid</code> / <code>aria-describedby</code> 等价物</td>
-          <td>外层包一层错误文案 + 改边框色</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>外层包一层错误文案 + 改边框色</td><td><span class="tag warn">☑ 已核实（部分）：invalid 有，aria-invalid 无</span></td></tr>
         <tr><td class="mono">E-3</td><td>焦点环是否区分键盘 / 指针来源（原 <code>:focus-visible</code> 语义）</td>
-          <td>自写 <code>yk_focus_ring()</code>，已计划这么做</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>自写 <code>yk_focus_ring()</code>，已计划这么做</td><td><span class="tag ok">✅ 已核实（可做：focus_visible）</span></td></tr>
         <tr><td class="mono">E-4</td><td>滚动条轨道宽 6、最小滑块长 24、悬停加深一档是否可配</td>
-          <td>自绘滚动条（工作量中等）</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>自绘滚动条（工作量中等）</td><td><span class="tag ok">✅ 已核实（可做：ScrollbarStyles 可配）</span></td></tr>
         <tr><td class="mono">E-5</td><td>开关 44×24 / 滑块轨道 4 + thumb 14 / 复选单选 16×16 /
           Tooltip 最大宽 240 + 箭头 8×8 / 头像 18·34·46 / pill 22 / badge 18 这些几何是否可覆盖</td>
-          <td>不可覆盖则接受组件内定值并更新规范，或自建该组件</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>不可覆盖则接受组件内定值并更新规范，或自建该组件</td><td><span class="tag warn">☑ 已核实（部分）：多数可覆盖</span></td></tr>
         <tr><td class="mono">E-6</td><td>危险确认对话框能否指定初始焦点落「取消」；<code>Dialog</code> 的 Tab 循环是否内建</td>
           <td>打开后手动 <code>window.focus(&amp;cancel)</code></td><td><span class="tag ghost">☐ 待核实</span></td></tr>
         <tr><td class="mono">E-7</td><td><code>ContextMenu</code> 的键盘唤出（Shift+F10 / 菜单键）如何绑定；
