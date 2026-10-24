@@ -268,7 +268,7 @@ impl Render for PlayerView {
             )
             // ③ 控制栏（deferred priority 30）
             .child(
-                deferred(control_bar(&t, &self.state, self.danmaku_input.as_ref(), cx.listener(
+                deferred(control_bar(&t, &self.state, self.danmaku_input.as_ref(), cx, cx.listener(
                     |this, _: &ClickEvent, window, cx| {
                         this.state.toggle_play();
                         window.refresh();
@@ -436,6 +436,7 @@ fn control_bar(
     t: &YkTheme,
     state: &PlayerState,
     danmaku_input: Option<&Entity<InputState>>,
+    cx: &mut Context<PlayerView>,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let (time_now, time_total) = state.time_texts();
@@ -459,11 +460,24 @@ fn control_bar(
                 .items_center()
                 .gap(px(SPACE_2))
                 .child(match danmaku_input {
-                    Some(st) => div()
-                        .flex_1()
-                        .h(px(26.))
-                        .child(Input::new(st).appearance(false).bordered(false))
-                        .into_any_element(),
+                    Some(st) => {
+                        // Input 元素本身不 track_focus，键盘事件不会路由过去。
+                        // 必须由外层接管焦点：track_focus 让元素参与焦点系统，
+                        // 点击时显式 window.focus() 把输入焦点交给它。
+                        let handle = st.read(cx).focus_handle(cx);
+                        div()
+                            .flex_1()
+                            .h(px(26.))
+                            .track_focus(&handle)
+                            .on_mouse_down(MouseButton::Left, {
+                                let handle = handle.clone();
+                                move |_ev, window, cx| {
+                                    window.focus(&handle, cx);
+                                }
+                            })
+                            .child(Input::new(st).appearance(false).bordered(false))
+                            .into_any_element()
+                    }
                     None => div()
                         .flex_1()
                         .h(px(26.))
