@@ -9,6 +9,7 @@
 
 pub mod api;
 pub mod cache;
+pub mod danmaku;
 pub mod feed;
 pub mod format;
 pub mod login;
@@ -17,6 +18,7 @@ pub mod player;
 pub mod session;
 
 pub use cache::CacheManager;
+pub use danmaku::{Danmaku, DanmakuMode, DanmakuSet, LaneAllocator};
 pub use feed::{Feed, MAX_ITEMS};
 pub use login::{LoginFlow, PollAction, POLL_INTERVAL_MS};
 pub use session::{AppShell, Screen};

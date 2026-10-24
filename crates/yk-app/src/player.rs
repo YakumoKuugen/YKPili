@@ -15,6 +15,7 @@
 
 use gpui::prelude::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement, *};
+use yk_core::danmaku::{Danmaku, DanmakuSet, LaneAllocator};
 use yk_core::player::PlayerState;
 use yk_ui::theme::*;
 
@@ -49,8 +50,10 @@ impl MpvFrameSource {
     ///
     /// 每次都重新建 CVPixelBuffer —— 验证阶段够用，但它是一帧一次分配，
     /// 真机上应该改成「复用 buffer + 只更新两个平面」。
-    pub fn pump(&mut self) {
+    /// 取一帧最新画面，返回当前播放位置（秒）。播放循环每帧调一次。
+    pub fn pump(&mut self) -> f64 {
         self.player.drain_events();
+        let t = self.player.get_property_double("time-pos").unwrap_or(0.0);
         // 诊断：时间轴到底有没有在走
         self.tick = self.tick.wrapping_add(1);
         if self.tick % 60 == 1 {
@@ -66,6 +69,7 @@ impl MpvFrameSource {
             let nv12 = yk_media::convert::rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
             self.buffer = yk_media::pixel_buffer::nv12_to_pixel_buffer(&nv12);
         }
+        t
     }
 
     pub fn buffer(&self) -> objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer> {
@@ -95,6 +99,11 @@ pub struct PlayerView {
     tab: usize,
     /// 播放状态（音量/倍速/进度/全屏）全部来自 yk-core 的 PlayerState。
     state: PlayerState,
+    /// 弹幕：已按时间排序，且每条都预分配了轨道
+    danmaku: Vec<(Danmaku, usize)>,
+    lanes: LaneAllocator,
+    /// 最近一次从 mpv 读到的播放位置（秒），弹幕位置靠它算
+    play_time: f64,
 }
 
 impl PlayerView {
@@ -122,6 +131,21 @@ impl PlayerView {
             loop_started: false,
             expanded: true,
             tab: 0,
+            danmaku: {
+                let set = mock_danmaku();
+                // 预分配轨道：一次算完，播放时只查时间
+                let mut lanes = LaneAllocator::new(1280.0, 220.0);
+                let mut out = Vec::with_capacity(set.len());
+                for d in set.items() {
+                    if d.mode.is_scroll() {
+                        let lane = lanes.assign(d);
+                        out.push((d.clone(), lane));
+                    }
+                }
+                out
+            },
+            lanes: LaneAllocator::new(1280.0, 220.0),
+            play_time: 0.0,
             state: {
                 let mut st = PlayerState::new();
                 st.duration_secs = 754.0;
@@ -136,7 +160,7 @@ impl PlayerView {
     #[cfg(target_os = "macos")]
     pub fn pump_now(&mut self) {
         if let Some(m) = self.mpv.as_mut() {
-            m.pump();
+            self.play_time = m.pump();
         }
     }
 
@@ -164,7 +188,7 @@ impl Render for PlayerView {
                         .await;
                     let alive = this.update(cx, |view, cx| {
                         if let Some(m) = view.mpv.as_mut() {
-                            m.pump();
+                            view.play_time = m.pump();
                         }
                         cx.notify();
                     });
@@ -185,7 +209,7 @@ impl Render for PlayerView {
             .absolute()
             .inset_0()
             .bg(rgb(0x000000))
-            // ① 视频层
+            // ① 视频层（弹幕作为它的子元素，避免形成独立的合成层把 surface 遮掉）
             .child({
                 #[cfg(target_os = "macos")]
                 {
@@ -196,6 +220,20 @@ impl Render for PlayerView {
                     video_layer(&self.frame)
                 }
             })
+            // ①b 弹幕层 —— 暂不启用。
+            //
+            // 实测：只要在同一棵元素树上叠加**文字**，surface 就会整块变黑；
+            // 换成同尺寸的**色块**则正常。三种挂法都试过，全部黑：
+            //   1. 作为根节点的普通 absolute 兄弟
+            //   2. 嵌在 video_layer 内部
+            //   3. deferred(priority 10)
+            //
+            // 形态上不是尺寸或定位问题，是「surface 与文本渲染的合成冲突」。
+            // 正解在文档第 14 节已写明：弹幕要用**自定义 Element 的 paint**
+            // （text_system().shape_line + ShapedLine::paint），
+            // 而不是 div + text 的方式。那是下一步的工作。
+            //
+            // .child(deferred(self.danmaku_layer()).with_priority(10usize))
             // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
             .child(
                 div().absolute().left_0().right_0().bottom_0().h(px(CTRL_H + 120.)).bg(
@@ -245,6 +283,56 @@ impl Render for PlayerView {
                 .with_priority(61usize),
             )
     }
+}
+
+// ================= 弹幕层 =================
+
+impl PlayerView {
+    /// 当前时刻该显示的滚动弹幕。
+    ///
+    /// 每帧只为「可见窗口」内的弹幕生成元素，不是全量 —— 一场直播可能有上万条，
+    /// 全量遍历会直接掉帧。窗口前半段留 15 秒是因为一条弹幕最长要飞这么久。
+    fn danmaku_layer(&self) -> impl IntoElement {
+        let now = self.play_time;
+        let mut layer = div().absolute().inset_0();
+        let visible: Vec<_> = self
+            .danmaku
+            .iter()
+            .filter(|(d, _)| self.lanes.visible_at(d, now))
+            .take(80) // 硬上限：极端情况下也不要一次画几百条
+            .collect();
+        for (d, lane) in visible {
+            let x = self.lanes.x_at(d, now);
+            let color = d.rgb();
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(8.0 + *lane as f32 * 30.0))
+                    .text_size(px(d.font_size))
+                    .text_color(rgb(color))
+                    .child(d.text.clone()),
+            );
+        }
+        layer
+    }
+}
+
+/// 占位弹幕（真实数据要从 `/x/v1/dm/list.so` 拉 XML，属于后续）。
+fn mock_danmaku() -> DanmakuSet {
+    const TEXTS: [&str; 12] = [
+        "前方高能", "这也太真实了", "哈哈哈哈", "有一说一，确实", "第一次看到这种",
+        "好家伙", "这个可以", "泪目", "up主加油", "妙啊", "学到了", "名场面",
+    ];
+    let raw = (0..300).map(|i| {
+        // 从 -6 秒开始：这样首帧（play_time≈0）就有弹幕在屏幕上，
+        // 便于截图验收；真实数据里时间是 0 起。
+        let t = (i as f64) * 0.22 - 6.0;
+        let color = if i % 7 == 0 { 16777215u32 } else { 65280 };
+        let p = format!("{t},1,25,{color},0,0,0,0");
+        (p, TEXTS[i % TEXTS.len()].to_string())
+    });
+    DanmakuSet::from_raw(raw)
 }
 
 // ================= 视频层 =================
