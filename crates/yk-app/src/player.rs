@@ -13,7 +13,7 @@
 //! **D-05 规格（用户已调好，不要改）**：
 //! 收起态是 **200px 半宽仍可见**，不是消失；且**面板本体即 hover 热区**。
 
-use gpui::component::input::{Input, InputState};
+use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::prelude::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement, *};
 use yk_core::danmaku::{Danmaku, DanmakuSet, LaneAllocator};
@@ -115,6 +115,9 @@ pub struct PlayerView {
     play_time: f64,
     /// 弹幕输入框状态（首次 render 时创建，那时才有 window）
     danmaku_input: Option<Entity<InputState>>,
+    /// 输入框按了 Enter（`InputEvent::PressEnter`），下一轮 render 里发送。
+    /// 订阅回调拿不到 `Window`，而清空输入框需要，所以用 defer 转一手。
+    submit_requested: bool,
     /// 是否已尝试启动渲染线程（防重复）
     tried_worker: bool,
     /// 输入框是否处于聚焦。聚焦时暂停渲染循环 ——
@@ -176,6 +179,7 @@ impl PlayerView {
             lanes: LaneAllocator::new(1280.0, 220.0),
             play_time: 0.0,
             danmaku_input: None,
+            submit_requested: false,
             input_focused: false,
             state: {
                 let mut st = PlayerState::new();
@@ -199,6 +203,10 @@ impl PlayerView {
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         eprintln!("[M3] PlayerView::render 被调用");
+        if self.submit_requested {
+            self.submit_requested = false;
+            cx.defer_in(window, |view, window, cx| view.send_danmaku(window, cx));
+        }
         // 播放循环：每 16ms 取一帧最新画面并重绘（≈60fps）。
         // libmpv 已在自动播放，这里只负责「把当前帧搬到 surface 上」。
         #[cfg(target_os = "macos")]
@@ -249,6 +257,22 @@ impl Render for PlayerView {
             let state = cx.new(|cx| {
                 InputState::new(window, cx).placeholder("发一条友善的弹幕吧")
             });
+            // Enter 走 Input 自己的 Enter action（外层补了 key_context("Input") 才匹配），
+            // 由它发出 PressEnter。Shift+Enter 不发送。
+            // 中文输入法组合中的 Enter 应由输入法先消费（用于选词）；
+            // 这条依赖平台 IME 行为，真机选词场景还要再验一次。
+            cx.subscribe(&state, |view, _state, event: &InputEvent, cx| {
+                if let InputEvent::PressEnter {
+                    secondary: false,
+                    shift: false,
+                } = event
+                {
+                    eprintln!("[input] Enter → 发送");
+                    view.submit_requested = true;
+                    cx.notify();
+                }
+            })
+            .detach();
             eprintln!("[input] InputState 已创建");
             self.danmaku_input = Some(state);
         }
@@ -476,7 +500,11 @@ fn video_layer(
     div()
         .absolute()
         .inset_0()
-        .child(surface(buffer).size_full())
+        // 等比 letterbox（L-2）：`surface()` 的 object_fit 默认就是 Contain，
+        // 按 CVPixelBuffer 的真实尺寸缩放并居中留黑边。这里显式写出来，
+        // 避免以后有人改默认值或误用 Fill 把画面拉变形。
+        // 实测：4:3 片源在 1280×820 窗口里保持 4:3，左右留黑边。
+        .child(surface(buffer).object_fit(ObjectFit::Contain).size_full())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -536,6 +564,9 @@ fn control_bar(
                             .id("danmaku-input")
                             .flex_1()
                             .h(px(26.))
+                            // Enter 的绑定是 `KeyBinding::new("enter", Enter, Some("Input"))`；
+                            // 焦点落在这个外层 div 上，必须补 key_context 才能匹配到 Input 的 action。
+                            .key_context("Input")
                             .track_focus(&handle)
                             .on_mouse_down(
                                 MouseButton::Left,

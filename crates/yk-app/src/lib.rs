@@ -43,6 +43,8 @@ pub struct AppRoot {
     page_state: pages::PageState,
     /// 当前展示的是占位数据还是真实接口数据（用于顶栏角标）
     using_mock: bool,
+    /// 内容区滚动位置（首页与各页面共用）
+    content_scroll: ScrollHandle,
     #[cfg(feature = "screenshot")]
     frames: u32,
 }
@@ -92,6 +94,7 @@ impl AppRoot {
             page: None,
             page_state: pages::PageState::Ready,
             using_mock: true,
+            content_scroll: ScrollHandle::new(),
             #[cfg(feature = "screenshot")]
             frames: 0,
         }
@@ -183,7 +186,14 @@ impl Render for AppRoot {
                     .flex_col()
                     .child(top_bar(t))
                     .child(category_bar(t, self.active_category))
-                    .child(content_area(t, self.feed.items(), self.page, self.page_state, cx)),
+                    .child(content_area(
+                        t,
+                        self.feed.items(),
+                        self.page,
+                        self.page_state,
+                        &self.content_scroll,
+                        cx,
+                    )),
             )
             // Dock 是「页面场景内的浮层」，挂在内容之后
             .child(dock(t, self.active_category, cx))
@@ -361,6 +371,7 @@ fn content_area(
     items: &[CoverItem],
     page: Option<pages::PageKind>,
     state: pages::PageState,
+    scroll: &ScrollHandle,
     cx: &mut Context<AppRoot>,
 ) -> impl IntoElement {
     // 内容区顶部内边距 = 64 + 54 + 16 的说法针对「吸顶遮挡」；
@@ -376,8 +387,13 @@ fn content_area(
         // 非首页：交给 pages 模块；外壳（顶栏/分类/Dock）不动
         // 页面容器要不透明铺满：否则底层的光晕会从内容区两侧透上来
         return div()
+            .id("content-scroll")
             .flex_1()
-            .overflow_hidden()
+            // flex 子项的 min-height 默认是 auto，不压到 0 的话内容会撑开父级，
+            // overflow_y_scroll 就不会真正滚动。
+            .min_h(px(0.))
+            .track_scroll(scroll)
+            .overflow_y_scroll()
             .bg(t.surfaces.bg_base)
             .child(
             div()
@@ -398,15 +414,21 @@ fn content_area(
     // 否则第一列卡片会被压在 Dock 下面 —— 浮层「在上」不等于内容可以钻到它背后。
     // 让位宽度 = Dock 左边距 12 + 按钮宽 44 + 呼吸 16 = 72。
     const DOCK_GUTTER: f32 = 72.0;
-    div().flex_1().overflow_hidden().child(
-        div()
-            .pl(px(DOCK_GUTTER))
-            .pr(px(SPACE_4))
-            .pt(px(SPACE_4))
-            .pb(px(SPACE_8))
-            .w_full()
-            .child(grid),
-    )
+    div()
+        .id("content-scroll")
+        .flex_1()
+        .min_h(px(0.))
+        .track_scroll(scroll)
+        .overflow_y_scroll()
+        .child(
+            div()
+                .pl(px(DOCK_GUTTER))
+                .pr(px(SPACE_4))
+                .pt(px(SPACE_4))
+                .pb(px(SPACE_8))
+                .w_full()
+                .child(grid),
+        )
 }
 
 /// 封面卡片：208 × 166（COVER_CELL_WIDTH / COVER_CELL_HEIGHT）。
@@ -534,6 +556,8 @@ fn dock(t: &YkTheme, active: usize, cx: &mut Context<AppRoot>) -> impl IntoEleme
                 .child(*label)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.page = target;
+                    // 切页回到顶部：滚动位置属于「上一页」，不该带到新页面。
+                    this.content_scroll.scroll_to_top_of_item(0);
                     window.refresh();
                     cx.notify();
                 })),

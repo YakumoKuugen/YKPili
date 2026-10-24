@@ -10279,7 +10279,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td>弹幕滚动</td><td>数据、轨道分配、不重叠性质均有测试；渲染需 <code>gpui-fast</code>（已启用）</td><td><span class="tag ok">完成</span></td></tr>
       <tr><td>弹幕输入</td><td>中文 IME 可用；发送 → 弹幕层 → 清空输入框全通</td><td><span class="tag ok">完成</span></td></tr>
       <tr><td>PlayerView 重建</td><td>点击穿透到下层卡片导致重建、输入被清空；<code>.occlude()</code> + 单实例复用已修，见附录 D 事实 19</td><td><span class="tag ok">已修</span></td></tr>
-      <tr><td>回车发送</td><td><code>Input</code> 无 <code>on_enter</code>，需监听 <code>on_key_down</code></td><td><span class="tag warn">待做</span></td></tr>
+      <tr><td>回车发送</td><td>外层补 <code>key_context("Input")</code>，Enter 走 Input 的 Enter action 并发出 <code>PressEnter</code>；Shift+Enter 不发送。<b>IME 选词时回车需真机再验</b></td><td><span class="tag ok">完成</span></td></tr>
       <tr><td>无障碍</td><td>按产品要求列为未来 feature，本阶段不做</td><td><span class="tag warn">暂缓</span></td></tr>
       <tr><td>功耗与热</td><td>需连续播放 30 分钟配合 <code>powermetrics</code> 采样</td><td><span class="tag warn">待测</span></td></tr>
     </tbody>
@@ -10290,12 +10290,13 @@ ul.clean li::marker { color: var(--theme-primary); }
     <thead><tr><th>#</th><th>问题</th><th>影响</th><th>方向</th></tr></thead>
     <tbody>
       <tr><td class="mono">L-1</td><td><b>PlayerView 反复重建</b> <span class="tag ok">已修</span></td><td>已消除：输入内容不再因点击而丢失</td><td>播放器根节点 <code>.occlude()</code> + 入口收敛到 <code>ensure_player</code> + 单实例断言，见附录 D 事实 19</td></tr>
-      <tr><td class="mono">L-2</td><td>视频等比 letterbox</td><td>当前拉伸铺满，比例失真</td><td>按视频宽高比算 <code>object_fit</code></td></tr>
-      <tr><td class="mono">L-3</td><td>首页滚动</td><td>内容超出后无法滚动</td><td>接 GPUI 的 <code>overflow_y_scroll</code></td></tr>
+      <tr><td class="mono">L-2</td><td>视频等比 letterbox <span class="tag ok">已修</span></td><td>已消除：4:3 / 16:9 片源都按原比例显示，不再拉伸</td><td><code>surface()</code> 默认就是 <code>ObjectFit::Contain</code>，已显式写出并加注释；4:3 片源实测保持比例</td></tr>
+      <tr><td class="mono">L-3</td><td>首页滚动 <span class="tag ok">已修</span></td><td>已消除：内容超出后可滚，顶栏/分类/Dock 固定</td><td>内容区接 <code>overflow_y_scroll</code> + <code>ScrollHandle</code>；页面切换回到顶部。虚拟列表仍未接，见 L-8</td></tr>
       <tr><td class="mono">L-4</td><td>iOS 真实解码</td><td>目前是占位帧，未接 libmpv</td><td>复用 yk-media，注意跨平台 ABI</td></tr>
       <tr><td class="mono">L-5</td><td>Android 接入</td><td>未开始</td><td>需 <code>gpui-pre-mobile</code>，与 0.8.0 的 <code>gpui-pre</code> 版本需对齐</td></tr>
       <tr><td class="mono">L-6</td><td>自动截图失效</td><td><code>screenshot</code> feature 与 <code>gpui-fast</code> 互斥（cocoa 冲突）</td><td>改用系统 <code>screencapture</code> 或接受人工验收</td></tr>
       <tr><td class="mono">L-7</td><td>构造闭包里做副作用</td><td>线程/文件句柄等会跟着创建次数一起放大；<code>cx.new</code> 只调一次闭包，问题在创建被重复触发，不是重试</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
+      <tr><td class="mono">L-8</td><td>首页虚拟列表</td><td>30 条以内无感；数据量大时全量构建会掉帧</td><td>按视口宽把卡片分组为行，接 <code>uniform_list</code>（本版本没有 <code>v_virtual_list</code>）</td></tr>
     </tbody>
   </table>
 
