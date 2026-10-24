@@ -518,67 +518,90 @@ fn content_area(
 fn card(t: &YkTheme, item: &CoverItem, cx: &mut Context<AppRoot>) -> impl IntoElement {
     let s = &t.surfaces;
     let title = item.title.clone();
+    // 组名按卡片区分：group_hover 只在「鼠标进入这张卡」时生效。
+    let group = format!("cover-card-{}", item.index);
+    let hover_shadow = t.shadows.shadow_card_hover.clone();
+    let hover_border = s.border_popover;
+    let hover_bg = s.surface_content_hover;
+
     div()
         .id(("cover", item.index))
+        .group(group.clone())
         .relative()
         .w(px(COVER_CELL_WIDTH))
         .h(px(COVER_CELL_HEIGHT))
-        .flex()
-        .flex_col()
         .rounded(px(CARD_RADIUS))
         .overflow_hidden()
         .bg(s.surface_content)
         .border_1()
         .border_color(s.border_subtle)
+        // GPUI 没有元素级 transform/scale：用「内层负 inset 放大 + 外层裁剪」
+        // 近似 1.03 的悬停放大；阴影与描边即时切换（暂无 150ms 过渡）。
+        .hover(move |style| {
+            style
+                .bg(hover_bg)
+                .shadow(hover_shadow)
+                .border_color(hover_border)
+        })
         .child(
-            // 封面区：占位色 + 时长角标
+            // 内容整体放在内层：hover 时负 inset 把内容放大 ~3px，
+            // 外层 overflow_hidden 负责裁掉溢出，观感接近等比放大。
             div()
-                .relative()
-                .w_full()
-                .h(px(COVER_ITEM_HEIGHT))
-                // 占位色垫底：封面未加载完（或加载失败）时显示纯色块，
-                // 不会出现「白洞」。
-                .bg(parse_placeholder(&item.placeholder_color))
-                .child(
-                    // 封面图。B 站图床对 Referer 敏感，若这里显示不出来，
-                    // 说明需要带 Referer 预下载（见 yk-core 的 http 客户端）。
-                    img(ImageSource::from(item.image_url.clone()))
-                        .size_full()
-                        .object_fit(ObjectFit::Cover),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .bottom(px(4.))
-                        .right(px(4.))
-                        .px(px(4.))
-                        .rounded(px(RADIUS_SM))
-                        .bg(rgba(0x000000AB))
-                        .text_size(px(FONT_SIZE_DATA_OVERLAY))
-                        .text_color(rgb(0xFFFFFF))
-                        .child(item.duration_text()),
-                ),
-        )
-        .child(
-            // 文字区
-            div()
+                .absolute()
+                .inset_0()
                 .flex()
                 .flex_col()
-                .gap(px(SPACE_1))
-                .p(px(SPACE_3))
+                .group_hover(group, |style| style.inset(px(-3.)))
                 .child(
+                    // 封面区：占位色 + 时长角标
                     div()
-                        .text_size(px(FONT_SIZE_CONTROL))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(s.text_primary)
-                        .line_clamp(2)
-                        .child(item.title.clone()),
+                        .relative()
+                        .w_full()
+                        .h(px(COVER_ITEM_HEIGHT))
+                        // 占位色垫底：封面未加载完（或加载失败）时显示纯色块，
+                        // 不会出现「白洞」。
+                        .bg(parse_placeholder(&item.placeholder_color))
+                        .child(
+                            // 封面图。B 站图床对 Referer 敏感，若这里显示不出来，
+                            // 说明需要带 Referer 预下载（见 yk-core 的 http 客户端）。
+                            img(ImageSource::from(item.image_url.clone()))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .bottom(px(4.))
+                                .right(px(4.))
+                                .px(px(4.))
+                                .rounded(px(RADIUS_SM))
+                                .bg(rgba(0x000000AB))
+                                .text_size(px(FONT_SIZE_DATA_OVERLAY))
+                                .text_color(rgb(0xFFFFFF))
+                                .child(item.duration_text()),
+                        ),
                 )
                 .child(
+                    // 文字区
                     div()
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(s.text_tertiary)
-                        .child(item.meta_line()),
+                        .flex()
+                        .flex_col()
+                        .gap(px(SPACE_1))
+                        .p(px(SPACE_3))
+                        .child(
+                            div()
+                                .text_size(px(FONT_SIZE_CONTROL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(s.text_primary)
+                                .line_clamp(2)
+                                .child(item.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(FONT_SIZE_MICRO))
+                                .text_color(s.text_tertiary)
+                                .child(item.meta_line()),
+                        ),
                 ),
         )
         // 点击整张卡片进入播放浮窗（M3 的最小入口）。
