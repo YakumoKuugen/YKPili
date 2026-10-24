@@ -11,6 +11,9 @@ use yk_app::AppRoot;
 
 fn main() {
     application()
+        // 关键：GPUI 默认是 NullHttpClient（不发请求、静默失败），
+        // 换成真实的客户端后 img() 才能拉到图床上的封面。
+        .with_http_client(yk_app::http::YkHttpClient::shared())
         .with_assets(assets::Assets)
         .run(|cx| {
             init(cx);

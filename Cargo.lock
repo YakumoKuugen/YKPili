@@ -8272,11 +8272,14 @@ dependencies = [
 name = "yk-app"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "futures",
  "gpui-kit",
  "gpui-pre-macos",
  "image",
  "objc2-core-foundation",
  "objc2-core-video",
+ "reqwest",
  "yk-core",
  "yk-ui",
 ]
