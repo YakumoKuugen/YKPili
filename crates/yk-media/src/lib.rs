@@ -154,7 +154,19 @@ impl MpvPlayer {
             // 离屏：不要窗口、不要音频设备（音频后续由 AVSampleBufferAudioRenderer 承担）
             for (k, v) in [
                 ("vo", "libmpv"), // 用 render API 必须 libmpv，不能 null
-                ("ao", "null"),
+                // 音频交给 mpv 自己播。
+                //
+                // AO 选 avfoundation 而不是 coreaudio：本机实测 coreaudio
+                // 初始化失败（`unable to set the input channel layout`,
+                // OSStatus -50），avfoundation 正常。可用 YK_AO 覆盖。
+                // libmpv **没有**音频回调 API —— render API 只管视频，
+                // 所以不能像 AVFoundation 那样把音频包喂给自定义渲染器。
+                // 让 mpv 播音频的好处：音画同步由它的 playloop 保证，
+                // 我们只需要按时取视频帧。
+                ("ao", std::env::var("YK_AO").unwrap_or_else(|_| "avfoundation".into()).leak()),
+                // 把 mpv 自己的日志打到 stderr，便于确认 AO 是否初始化成功
+                ("terminal", "yes"),
+                ("msg-level", "ao=info,vo=info,cplayer=warn"),
                 ("vid", "1"),
                 ("hwdec", "auto"),
                 ("keep-open", "yes"),
