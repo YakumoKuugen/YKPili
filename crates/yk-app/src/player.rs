@@ -25,6 +25,7 @@ use crate::video::TestFrame;
 pub struct MpvFrameSource {
     player: yk_media::MpvPlayer,
     buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+    tick: u64,
 }
 
 #[cfg(target_os = "macos")]
@@ -40,6 +41,7 @@ impl MpvFrameSource {
         Some(Self {
             player: mpv,
             buffer: yk_media::pixel_buffer::nv12_to_pixel_buffer(&nv12),
+            tick: 0,
         })
     }
 
@@ -49,6 +51,13 @@ impl MpvFrameSource {
     /// 真机上应该改成「复用 buffer + 只更新两个平面」。
     pub fn pump(&mut self) {
         self.player.drain_events();
+        // 诊断：时间轴到底有没有在走
+        self.tick = self.tick.wrapping_add(1);
+        if self.tick % 60 == 1 {
+            let t = self.player.get_property_double("time-pos").unwrap_or(-1.0);
+            let p = self.player.get_property_double("pause").unwrap_or(-1.0);
+            eprintln!("[mpv] time-pos={t:.3}s pause={p} tick={}", self.tick);
+        }
         if let Ok(rgba) = self.player.render_frame() {
             let nv12 = yk_media::convert::rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
             self.buffer = yk_media::pixel_buffer::nv12_to_pixel_buffer(&nv12);

@@ -254,6 +254,28 @@ impl MpvPlayer {
     }
 
     /// 渲染当前帧到内部缓冲区。
+    /// 读一个 double 属性（诊断用）。`MPV_FORMAT_DOUBLE = 5`。
+    pub fn get_property_double(&self, name: &str) -> Option<f64> {
+        unsafe {
+            let get: libloading::Symbol<
+                unsafe extern "C" fn(*mut MpvHandle, *const c_char, c_int, *mut c_void) -> c_int,
+            > = self._lib.get(b"mpv_get_property").ok()?;
+            let c_name = CString::new(name).ok()?;
+            let mut out: f64 = 0.0;
+            let rc = get(
+                self.ctx,
+                c_name.as_ptr(),
+                5, // MPV_FORMAT_DOUBLE
+                &mut out as *mut f64 as *mut c_void,
+            );
+            if rc < 0 {
+                None
+            } else {
+                Some(out)
+            }
+        }
+    }
+
     /// 排空 mpv 的事件队列。
     ///
     /// **必须定期调用**：mpv 的客户端 API 是「拉模式」，不取事件它会认为
