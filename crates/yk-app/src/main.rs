@@ -9,6 +9,12 @@
 use gpui::*;
 use yk_app::AppRoot;
 
+/// 桌面入口。
+///
+/// iOS / Android 上 `gpui_kit::application()` 是**不导出**的 ——
+/// 移动端由原生宿主（Swift / Kotlin）启动，Rust 侧只需提供视图构造入口。
+/// 见下方 `main` 的 iOS 分支。
+#[cfg(not(target_os = "ios"))]
 fn main() {
     application()
         // 关键：GPUI 默认是 NullHttpClient（不发请求、静默失败），
@@ -75,4 +81,14 @@ fn main() {
             )
             .expect("打开窗口失败");
         });
+}
+
+/// iOS：没有 `main` 入口，由宿主 App 调用。
+///
+/// M8 的下一步是在这里导出 `extern "C"` 的启动函数，
+/// 由 Swift 侧创建 `UIWindow` 并挂载 GPUI 的视图。
+/// 当前先让整个 workspace 能过 `cargo check --target aarch64-apple-ios`。
+#[cfg(target_os = "ios")]
+fn main() {
+    eprintln!("[ios] YKPili 由原生宿主启动（M8 待接入 UIWindow）");
 }

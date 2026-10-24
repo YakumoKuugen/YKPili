@@ -76,13 +76,8 @@ impl Render for PlayerView {
             .absolute()
             .inset_0()
             .bg(rgb(0x000000))
-            // ① 视频层：CVPixelBuffer 交给 GPUI 的 surface，与控件同管线合成
-            .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .child(surface(self.frame.buffer()).size_full()),
-            )
+            // ① 视频层
+            .child(video_layer(&self.frame))
             // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
             .child(
                 div().absolute().left_0().right_0().bottom_0().h(px(CTRL_H + 120.)).bg(
@@ -132,6 +127,38 @@ impl Render for PlayerView {
                 .with_priority(61usize),
             )
     }
+}
+
+// ================= 视频层 =================
+
+/// macOS：CVPixelBuffer 交给 GPUI 的 `surface()`，与控件同管线合成。
+///
+/// 其它平台（含 iOS）：`surface()` 在 gpui-pre 0.3.9 里只在 Apple 桌面端可用，
+/// 这里先渲染占位。iOS 的真实链路（libmpv 解码 → 纹理）属于 M8 的后续工作，
+/// 解码方案已定：**libmpv**（跨桌面 + 移动端同一套）。
+#[cfg(target_os = "macos")]
+fn video_layer(frame: &TestFrame) -> impl IntoElement {
+    div()
+        .absolute()
+        .inset_0()
+        .child(surface(frame.buffer()).size_full())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn video_layer(_frame: &TestFrame) -> impl IntoElement {
+    div().absolute().inset_0().bg(rgb(0x101014)).child(
+        div()
+            .absolute()
+            .left(px(12.))
+            .bottom(px(12.))
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(RADIUS_SM))
+            .bg(rgba(0x000000AA))
+            .text_size(px(FONT_SIZE_MICRO))
+            .text_color(rgb(0xFFFFFF))
+            .child("视频层占位 · iOS 待接 libmpv"),
+    )
 }
 
 // ================= 控制栏 =================

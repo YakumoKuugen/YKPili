@@ -20,3 +20,9 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# iOS 编译修复：backtrace 0.3.76 把 iOS 也划入 apple vendor，
+# 但它用的 `_dyld_get_image_name` 是 macOS 私有 API，iOS 上不存在。
+# 见 vendor/backtrace/src/symbolize/gimli.rs 里的注释。
+[patch.crates-io]
+backtrace = { path = "vendor/backtrace" }
