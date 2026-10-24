@@ -6724,17 +6724,19 @@ ul.clean li::marker { color: var(--theme-primary); }
         全局键位总表由第 14 节统一收口，本节不另立全局键位清单。
 
     —— 迁移后新增的【待核实】项（都是本地源码未确认的细节，实现时必须先核）：
-    [V1] <code>Notification</code> 是否有 per-notification 自动消失时长 API
-         （目前只见 <code>autohide(bool)</code>，时长在 <code>NotificationList</code> 内固定 5s）。
-    [V2] <code>Input</code> 的错误态 / 校验提示：是否有内建 error 槽与
-         <code>aria-invalid</code> / <code>aria-describedby</code> 等价物。
-    [V3] 焦点环是否区分键盘 / 指针来源（原 <code>:focus-visible</code> 语义）；
-         <code>Theme.focus_ring</code> 只有 on/off。
-    [V4] 滚动条轨道宽 6、最小滑块长 24、悬停加深一档是否可配。
-    [V5] 开关 / 滑块 / 复选 / 单选 / Tooltip / 头像 / 进度条 / badge 的几何是否可覆盖
+    [V1] <b>已核实</b>：默认 <code>autohide(true)</code> 5s，悬停/焦点暂停；暂直接用，不自己计时。
+    [V2] <b>已核实</b>：无内建 error 槽 / <code>aria-invalid</code>；错误展示自建
+         （<code>invalid</code> 边框 + 外层文案），ARIA 移到未来无障碍 feature。
+    [V3] <b>已核实（部分）</b>：文档只保证 focused 时显示焦点环，不区分键盘/指针；
+         focus-visible 需自建。
+    [V4] <b>已核实（部分）</b>：文档只公开颜色 / <code>ScrollbarMode</code>；
+         宽 6 / 最小 24 未提供，需自绘或接受默认。
+    [V5] <b>已核实（部分）</b>：avatar / tooltip 宽可覆盖；switch 仅 small/medium，
+         slider / checkbox / radio / tag / badge 目标几何未提供
          （44×24 / 轨道 4 / 16×16 / 最大宽 240 / 箭头 8×8 / 18·34·46 / pill 22 / badge 18）。
     [V6] 危险确认对话框能否指定初始焦点落「取消」；<code>Dialog</code> 的 Tab 循环是否内建。
-    [V7] <code>Tooltip</code> 最大宽 240 与箭头 8×8 是否暴露为参数。
+    [V7] <b>已核实（部分）</b>：最大宽可用 Styled <code>.max_w(240)</code>；
+         箭头 8×8 未内建，需自绘。
     [V8] <code>ContextMenu</code> 的键盘唤出路径（Shift+F10 / 菜单键）如何绑定；
          <code>native_menu::NativeMenu</code> 是否承担系统菜单键。
     [V9] popover / menu / tooltip 的贴边翻转是否自动处理（<code>Placement</code>）。
@@ -10329,12 +10331,12 @@ ul.clean li::marker { color: var(--theme-primary); }
   <div class="panel">
     <h3>E.0 复核结论（2026-10-24）</h3>
     <div class="callout ok" style="margin-bottom:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>22 条里 5 条已实现、1 条已核实可接受、6 条部分/走退路、10 条仍待核实。</b><br>
+      <div><b>22 条里 5 条已实现、2 条已核实可接受、5 条部分/走退路、10 条仍待核实。</b><br>
         已实现：<b>E-14</b>（弹幕描边）、<b>E-15</b>（deferred 取舍）、<b>E-16</b>（骨架 1.5s）、
         <b>E-19</b>（hover 近似）、<b>E-20</b>（reduce_motion 运行期跟随）。<br>
-        已核实可接受：<b>E-1</b>（直接用内建 5s autohide，悬停/焦点暂停内建）。<br>
-        部分 / 走退路：<b>E-2</b>（有 invalid 样式、无 aria-invalid）、
-        <b>E-3</b>（默认焦点环不区分来源，需自建 focus_visible）、
+        已核实可接受：<b>E-1</b>（直接用内建 5s autohide，悬停/焦点暂停内建）、
+        <b>E-2</b>（错误展示自建；ARIA 移到未来无障碍 feature）。<br>
+        部分 / 走退路：<b>E-3</b>（默认焦点环不区分来源，需自建 focus_visible）、
         <b>E-4</b>（文档只给颜色/显示模式，宽/最小长未提供）、
         <b>E-5</b>（avatar/tooltip 宽可覆盖，switch/slider/badge/箭头等目标几何未提供）、
         <b>E-11</b>（动态字体实现待做）、<b>E-21</b>（iOS 编译过，Android 阻塞）。<br>
@@ -10346,6 +10348,10 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>内建 <code>autohide</code> 默认 5s；指针悬停 / 键盘焦点时暂停，离开后继续，
             窗口非激活也继续计时。暂直接用它，不自己计时</td>
           <td>组件内建，暂不接</td></tr>
+        <tr><td class="mono">E-2</td><td>Input 错误槽 / ARIA</td>
+          <td>无内建 error 槽或 <code>aria-invalid</code>；错误展示自建
+            （<code>invalid</code> 边框 + 外层文案），ARIA 延后</td>
+          <td>未来无障碍 feature</td></tr>
         <tr><td class="mono">E-14</td><td>弹幕「1px 描边 + 投影」</td>
           <td>每条可见弹幕 shape 两次，深色描边 8 方向 + 右下投影；无模糊</td>
           <td>F.3 L-12</td></tr>
@@ -10367,8 +10373,9 @@ ul.clean li::marker { color: var(--theme-primary); }
       <div><b>E-1 ～ E-5 核实结论（2026-10-24）：</b><br>
         <b>E-1</b> 默认 <code>autohide(true)</code> 就是 5s，且内部已处理「悬停 / 键盘焦点暂停」；
         暂直接用它，不自己计时。需要 2s / 3s 档时再包一层计时 + <code>dismiss()</code>。<br>
-        <b>E-2</b> 部分：<code>InputGroup::invalid(bool)</code> 有错误态边框/焦点环，但纯视觉；
-        没有 <code>aria-invalid</code>，<code>aria_description</code> 只能传一段描述文本（无 ID 关联）。<br>
+        <b>E-2</b> 已核实：<code>InputGroup::invalid(bool)</code> 只做边框/焦点环视觉，
+        <b>没有内建错误槽或 aria-invalid</b>；错误展示由项目自建（invalid + 外层文案），
+        ARIA 相关移到未来无障碍 feature。<br>
         <b>E-3</b> 部分：0.8.0 文档只说「focused 时画主题焦点环」，<b>没有键盘/指针区分</b>；
         要 focus-visible 语义得自建（自绘焦点环 + 记录最后一次输入来源）。<br>
         <b>E-4</b> 部分：0.8.0 文档只公开主题里的 scrollbar 颜色与 <code>ScrollbarMode</code>，
@@ -10396,7 +10403,9 @@ ul.clean li::marker { color: var(--theme-primary); }
           「指针悬停 / 键盘焦点时暂停、离开后继续」，窗口非激活也继续计时。
           暂直接用它，不自己计时；只有需要 2s / 3s 档时，才在包装层计时后调 <code>dismiss()</code></td><td><span class="tag ok">✅ 已核实（暂用内建 5s autohide）</span></td></tr>
         <tr><td class="mono">E-2</td><td><code>Input</code> 的错误态 / 校验提示槽；<code>aria-invalid</code> / <code>aria-describedby</code> 等价物</td>
-          <td>外层包一层错误文案 + 改边框色</td><td><span class="tag warn">◐ 部分：invalid 有，aria-invalid 无</span></td></tr>
+          <td><b>错误展示自建</b>：<code>InputGroup.invalid(true)</code> 管边框/焦点环，
+          外层加错误文案；<code>aria-invalid</code> / <code>aria-describedby</code>
+          移到未来无障碍 feature（与 F.2「无障碍暂缓」一致）</td><td><span class="tag ok">✅ 已核实（错误槽自建；ARIA 延后）</span></td></tr>
         <tr><td class="mono">E-3</td><td>焦点环是否区分键盘 / 指针来源（原 <code>:focus-visible</code> 语义）</td>
           <td>自写 <code>yk_focus_ring()</code>，已计划这么做</td><td><span class="tag warn">◐ 部分：默认不区分，可自建 focus_visible</span></td></tr>
         <tr><td class="mono">E-4</td><td>滚动条轨道宽 6、最小滑块长 24、悬停加深一档是否可配</td>
