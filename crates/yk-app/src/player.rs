@@ -525,7 +525,15 @@ fn control_bar(
                                     }
                                 }),
                             )
-                            .child(Input::new(st).appearance(false).bordered(false))
+                            // Input 自己不撑满时，hitbox 只有文字那么宽 ——
+                            // 点击空白处不会聚焦。这里让它撑满整条。
+                            .child(
+                                Input::new(st)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .w_full()
+                                    .h_full(),
+                            )
                             .into_any_element()
                     }
                     None => div()
