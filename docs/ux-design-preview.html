@@ -10087,13 +10087,20 @@ ul.clean li::marker { color: var(--theme-primary); }
             ② 被 <code>clipped_bounds.is_empty()</code> 裁剪 —— 日志显示 surface 正常入队，
             <code>order=11</code>、bounds 完整、启用弹幕后 order 也不变；<br>
             ③ 没进绘制 —— 日志显示 <code>draw_surfaces</code> <b>确实被调用了</b>（1 个 surface）。<br>
-            <b>结论</b>：surface 入队与绘制都正常，但输出不可见。问题在 Metal 侧 ——
-            最可能是 <b>pipeline 的 blend / alpha 状态</b>：glyph 渲染后改变了目标 alpha，
-            而 surface 的 pipeline 若按 premultiplied alpha 混合，会被当成全透明。<br>
-            下一步：查 <code>surfaces_pipeline_state</code> 创建时的
-            <code>MTLRenderPipelineColorAttachmentDescriptor</code> blend 配置，
-            或在 <code>draw_surfaces</code> 里显式重置 blend 状态试一次。<br>
-            备选绕过：文字离屏渲染成纹理再叠（牺牲亚像素锐度）、原生覆盖层（破坏纯 GPUI）。</td></tr>
+            <b>结论</b>：surface 入队与绘制都正常，但输出不可见。<br>
+            <b>官方文档已确认这是 gpui-pre 的已知限制</b>
+            （gpui-kit 文档 · WebView「Overlay 层级」一节）：<br>
+            <i>「在 gpui-pre 下，原生视图与 Windows 一样直接挂在窗口上，
+            会遮住其 bounds 内的 GPUI 内容，包括 popover、dialog、menu 和 tooltip。
+            原生视图也无法被裁剪。」</i><br>
+            官方给的方向：<b>启用 <code>gpui-fast</code> feature</b> —— macOS 与 Linux 会通过
+            原生合成支持「延后绘制的 GPUI 浮层」显示在原生视图上方；
+            相关上游 PR 是 gpui-kit #2626（依赖 Zed/GPUI #61945 的 layered scene）。<br>
+            <b>实测 0.7.3 启用 <code>gpui-fast</code> 失败</b>：与 <code>gpui-pre</code> 的
+            <code>unicode-properties</code> 版本冲突，<code>cargo fetch</code> 直接拒绝解析。
+            需升级到 <b>0.8.0+</b> 再试（0.7.3 的依赖树解不开）。<br>
+            当前绕过：弹幕层暂不启用（文字会破坏 surface）；备选方案是文字离屏渲染成纹理、
+            或原生 NSView 覆盖层。</td></tr>
         <tr><td class="mono">15</td><td><b>主题覆盖必须在窗口创建之后</b><br>
           先 <code>Theme::change(mode, Some(window), cx)</code>，再覆盖色值</td>
           <td>窗口创建时会再走一次 <code>Theme::change</code>，把组件库默认色值装回来 ——
