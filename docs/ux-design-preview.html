@@ -3091,6 +3091,36 @@ ul.clean li::marker { color: var(--theme-primary); }
           </ul>
         </div>
       </div>
+
+      <div class="panel" style="margin-top:16px">
+        <h3>待核实项 · 无障碍（暂缓，未来 feature）</h3>
+        <div class="callout warn"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+          <div><b>产品决定：本阶段不做无障碍。</b>以下 7 项从附录 E 移入此处，
+            暂不排期、不阻塞当前里程碑；E-2 的错误展示槽已自建，只有 ARIA 部分随本组暂缓。</div></div>
+        <table>
+          <thead><tr><th>#</th><th>项</th><th>结论 / 暂缓原因</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">E-2</td><td><code>aria-invalid</code> / <code>aria-describedby</code>（仅 ARIA 部分）</td>
+              <td>Input 无内建 ARIA；错误展示已自建（invalid 边框 + 外层文案），ARIA 等无障碍 feature。</td></tr>
+            <tr><td class="mono">E-3</td><td>焦点环区分键盘 / 指针</td>
+              <td>0.8.0 文档只保证 focused 时显示主题焦点环，不区分来源；focus-visible 需自建。</td></tr>
+            <tr><td class="mono">E-6</td><td>Dialog 初始焦点 / Tab 循环</td>
+              <td>未核；随无障碍与键盘可达性一起做。</td></tr>
+            <tr><td class="mono">E-7</td><td>ContextMenu 键盘唤出（Shift+F10 / 菜单键）</td>
+              <td>未核；键盘可达性整体延后。</td></tr>
+            <tr><td class="mono">E-9</td><td><code>aria_label</code> / <code>role</code> → macOS / Windows 无障碍树</td>
+              <td>逐平台映射未核；等无障碍 feature 再实测。</td></tr>
+            <tr><td class="mono">E-11</td><td>系统动态字体</td>
+              <td>结论已知，实现待做；macOS 第三方 app 读不到系统字号，只能应用内选项。</td></tr>
+            <tr><td class="mono">E-13</td><td><code>aria-live</code> / <code>Role::Status</code> 播报</td>
+              <td>节点文本变化是否作为 live announcement 上报未核；等无障碍 feature。</td></tr>
+            <tr><td class="mono">E-22</td><td>移动端 IME / 无障碍 / 生命周期钩子</td>
+              <td>M8 再验；无障碍与 IME 部分随本组延后，生命周期另计。</td></tr>
+          </tbody>
+        </table>
+        <p class="note">恢复条件：进入「无障碍」feature 时，从这里逐条移回附录 E / 正文；
+          在此之前不检查、不排期。E-2 的非 ARIA 部分（错误槽）不受影响。</p>
+      </div>
     </section>
 
     <!-- ==================== 11 差距 ==================== -->
@@ -10333,16 +10363,16 @@ ul.clean li::marker { color: var(--theme-primary); }
   <div class="panel">
     <h3>E.0 复核结论（2026-10-24）</h3>
     <div class="callout ok" style="margin-bottom:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>22 条里 5 条已实现、3 条已核实可接受、4 条部分/走退路、10 条仍待核实。</b><br>
+      <div><b>22 条里 5 条已实现、3 条已核实可接受、2 条部分、7 条无障碍暂缓、5 条仍待核实。</b><br>
         已实现：<b>E-14</b>（弹幕描边）、<b>E-15</b>（deferred 取舍）、<b>E-16</b>（骨架 1.5s）、
         <b>E-19</b>（hover 近似）、<b>E-20</b>（reduce_motion 运行期跟随）。<br>
-        已核实可接受：<b>E-1</b>（直接用内建 5s autohide，悬停/焦点暂停内建）、
-        <b>E-2</b>（错误展示自建；ARIA 移到未来无障碍 feature）、
+        已核实可接受：<b>E-1</b>（内建 5s autohide）、<b>E-2</b>（错误槽自建；ARIA 暂缓）、
         <b>E-4</b>（base Scrollbar 可配宽度 / 最小长度）。<br>
-        部分 / 走退路：<b>E-3</b>（默认焦点环不区分来源，需自建 focus_visible）、
-        <b>E-5</b>（avatar/tooltip 宽可覆盖，switch/slider/badge/箭头等目标几何未提供）、
-        <b>E-11</b>（动态字体实现待做）、<b>E-21</b>（iOS 编译过，Android 阻塞）。<br>
-        其余 10 条按 E.1–E.4 的「退路」列处理。</div></div>
+        部分/走退路：<b>E-5</b>（avatar/tooltip 宽可覆盖，其余目标几何未提供）、
+        <b>E-21</b>（iOS 编译过，Android 阻塞）。<br>
+        <b>无障碍暂缓（移到 <a href="#a11y">第 10 节</a>，暂不排期）：</b>E-3、E-6、E-7、E-9、E-11、E-13、E-22，
+        外加 E-2 的 ARIA 部分。<br>
+        其余 5 条（E-8、E-10、E-12、E-17、E-18）仍按 E.1–E.4 的「退路」列处理。</div></div>
     <table>
       <thead><tr><th>#</th><th>已实现 / 已核实项</th><th>结论 / 验证</th><th>对应改动</th></tr></thead>
       <tbody>
@@ -10383,15 +10413,16 @@ ul.clean li::marker { color: var(--theme-primary); }
         <b>E-2</b> 已核实：<code>InputGroup::invalid(bool)</code> 只做边框/焦点环视觉，
         <b>没有内建错误槽或 aria-invalid</b>；错误展示由项目自建（invalid + 外层文案），
         ARIA 相关移到未来无障碍 feature。<br>
-        <b>E-3</b> 部分：0.8.0 文档只说「focused 时画主题焦点环」，<b>没有键盘/指针区分</b>；
-        要 focus-visible 语义得自建（自绘焦点环 + 记录最后一次输入来源）。<br>
+        <b>E-3</b> 已移入第 10 节（无障碍暂缓）：文档只说 focused 时画主题焦点环，
+        不区分键盘/指针；focus-visible 需自建。<br>
         <b>E-4</b> 已核实：base primitives 的 <code>Scrollbar</code> 文档公开 <code>ScrollbarStyles</code>，
         <b>track / thumb 的 width、min_length、inset、radius、hover/active 都可配</b>；
         默认 thumb 6、最小 48，显式设 24 即可。组件级 Scrollable 页只是没展开写。<br>
         <b>E-5</b> 部分：avatar 可用 <code>.with_size(px(n))</code> 精确设 18/34/46；
         tooltip 可用 Styled <code>.max_w(240)</code>。但 0.8.0 文档里 switch 只有
         <b>small 28×16 / medium 36×20</b>（没有 44×24），slider/checkbox/radio/tag/badge
-        都不给目标几何；tooltip 也<b>没有内建箭头</b>。</div></div>
+        都不给目标几何；tooltip 也<b>没有内建箭头</b>。<br>
+        <b>E-6 / E-7 / E-9 / E-11 / E-13 / E-22</b> 与 E-3 一起移入第 10 节，暂缓。</div></div>
 
     <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
       <div><b>与附录 F 的对应：</b>L-1 PlayerView 重建、L-2 letterbox、L-3 滚动 + 虚拟列表、
@@ -10415,7 +10446,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           外层加错误文案；<code>aria-invalid</code> / <code>aria-describedby</code>
           移到未来无障碍 feature（与 F.2「无障碍暂缓」一致）</td><td><span class="tag ok">✅ 已核实（错误槽自建；ARIA 延后）</span></td></tr>
         <tr><td class="mono">E-3</td><td>焦点环是否区分键盘 / 指针来源（原 <code>:focus-visible</code> 语义）</td>
-          <td>自写 <code>yk_focus_ring()</code>，已计划这么做</td><td><span class="tag warn">◐ 部分：默认不区分，可自建 focus_visible</span></td></tr>
+          <td>自写 <code>yk_focus_ring()</code>，已计划这么做</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
         <tr><td class="mono">E-4</td><td>滚动条轨道宽 6、最小滑块长 24、悬停加深一档是否可配</td>
           <td><b>可配（E-4）</b>：base primitives 的 <code>Scrollbar</code> + <code>ScrollbarStyles</code>
           公开 <code>thumb(|t| t.width(px(6.)).min_length(px(24.)))</code>；
@@ -10425,15 +10456,15 @@ ul.clean li::marker { color: var(--theme-primary); }
           Tooltip 最大宽 240 + 箭头 8×8 / 头像 18·34·46 / pill 22 / badge 18 这些几何是否可覆盖</td>
           <td>不可覆盖则接受组件内定值并更新规范，或自建该组件</td><td><span class="tag warn">◐ 部分：avatar/tooltip 宽可覆盖，其余未提供</span></td></tr>
         <tr><td class="mono">E-6</td><td>危险确认对话框能否指定初始焦点落「取消」；<code>Dialog</code> 的 Tab 循环是否内建</td>
-          <td>打开后手动 <code>window.focus(&amp;cancel)</code></td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>打开后手动 <code>window.focus(&amp;cancel)</code></td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
         <tr><td class="mono">E-7</td><td><code>ContextMenu</code> 的键盘唤出（Shift+F10 / 菜单键）如何绑定；
           <code>native_menu::NativeMenu</code> 是否承担系统菜单键</td>
-          <td>用 <code>on_key_down</code> 手动分派</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>用 <code>on_key_down</code> 手动分派</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
         <tr><td class="mono">E-8</td><td>popover / menu / tooltip 的贴边翻转是否自动（<code>Placement</code>）</td>
           <td>按可用空间自己选 <code>Placement</code></td><td><span class="tag ghost">☐ 待核实</span></td></tr>
         <tr><td class="mono">E-9</td><td>GPUI 无障碍桥接：<code>aria_label</code> / <code>role</code> 到
           macOS / Windows 无障碍树的逐条映射</td>
-          <td>逐平台实测，缺的用原生桥接补</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>逐平台实测，缺的用原生桥接补</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
         <tr><td class="mono">E-10</td><td>开关关态的轨道色对应哪个 <code>ThemeColor</code> 字段（字段名待核实）</td>
           <td>用项目扩展字段 <code>yk.switch_track</code> 补</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
       </tbody>
@@ -10450,12 +10481,12 @@ ul.clean li::marker { color: var(--theme-primary); }
           不吃 rem，所以单靠它无效</td>
           <td><b>结论：不是能力缺口，是「大部分平台能读，需自己接一层」。</b>
             按平台 API 读倍率后统一乘到字号与行高上（细则见下方 E-11 表）。
-            <b>唯一例外是 macOS</b>——第三方 app 读不到系统字号设置，只能提供应用内选项。</td><td><span class="tag warn">◐ 部分：结论已定，实现待做</span></td></tr>
+            <b>唯一例外是 macOS</b>——第三方 app 读不到系统字号设置，只能提供应用内选项。</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
         <tr><td class="mono">E-12</td><td>图片内存缓存无公开淘汰接口（<code>asset_cache.rs</code> 只有内部 <code>CachedLoad</code>）</td>
           <td>在 <code>yk-media</code> 自建 LRU 或自持位图</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
         <tr><td class="mono">E-13</td><td><code>aria-live</code> 等价物：<code>Role::Status</code> 有，
           但「节点文本变化是否作为 live announcement 上报」源码看不出</td>
-          <td>扫码三态等需要播报的场景，实测后决定是否用原生桥接</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>扫码三态等需要播报的场景，实测后决定是否用原生桥接</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
         <tr><td class="mono">E-14</td><td>弹幕的「1px 描边 + 投影」在文本渲染层怎么画，源码里没核实到 stroke 能力</td>
           <td><span class="tag ok">已实现（2026-10）</span> <code>ShapedLine</code> 的颜色烘在 layout 里，
             所以每条文本 shape 两次：深色 <code>#0B0F14D9</code> 描边 + 原色字身；
@@ -10568,13 +10599,15 @@ ul.clean li::marker { color: var(--theme-primary); }
             <code>aarch64-linux-android</code> target。M8 开工前必须先补齐工具链
             （见第 16 节 M8 的前置条件）。</td><td><span class="tag warn">◐ 部分：iOS 编译过，Android 阻塞</span></td></tr>
         <tr><td class="mono">E-22</td><td>移动端 IME 组合 / 无障碍 / 生命周期钩子</td>
-          <td>官方自述未完成；M8 里逐项验，不通就降级（例如移动端不发弹幕）</td><td><span class="tag ghost">☐ 待核实</span></td></tr>
+          <td>官方自述未完成；M8 里逐项验，不通就降级（例如移动端不发弹幕）</td><td><span class="tag warn">⏸ 暂缓（第 10 节）</span></td></tr>
       </tbody>
     </table>
     <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
       <div><b>使用方式：</b>开工前把 E-1 ～ E-18 逐条核一遍——核完能做的，把结论补回正文对应节；
         做不到的，按「退路」列降级并在正文改口径。E-19 ～ E-22 只在实际做到那一步时才验，
-        不用提前核。已满足的条目在「状态」列标 ✅，保留记录。</div></div>
+        不用提前核。已满足的条目在「状态」列标 ✅，保留记录。<br>
+        <b>无障碍项已暂缓：</b>E-3 / E-6 / E-7 / E-9 / E-11 / E-13 / E-22 与 E-2 的 ARIA 部分
+        已移到 <a href="#a11y">第 10 节 · 无障碍与性能</a>，不在本轮开工程序内。</div></div>
   </div>
 </section>
 
