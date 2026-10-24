@@ -53,6 +53,7 @@ impl MpvFrameSource {
     /// 真机上应该改成「复用 buffer + 只更新两个平面」。
     /// 取一帧最新画面，返回当前播放位置（秒）。播放循环每帧调一次。
     pub fn pump(&mut self) -> f64 {
+        let t0 = std::time::Instant::now();
         self.player.drain_events();
         let t = self.player.get_property_double("time-pos").unwrap_or(0.0);
         // 诊断：时间轴到底有没有在走
@@ -69,6 +70,10 @@ impl MpvFrameSource {
         if let Ok(rgba) = self.player.render_frame() {
             let nv12 = yk_media::convert::rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
             self.buffer = yk_media::pixel_buffer::nv12_to_pixel_buffer(&nv12);
+        }
+        let cost = t0.elapsed();
+        if cost.as_millis() >= 8 {
+            eprintln!("[player] pump 耗时 {}ms（>8ms 会拖慢 UI）", cost.as_millis());
         }
         t
     }
@@ -111,6 +116,7 @@ pub struct PlayerView {
 
 impl PlayerView {
     pub fn new(theme: YkTheme) -> Self {
+        eprintln!("[player] PlayerView::new 被调用（每次都会重新 load_file）");
         Self {
             theme,
             frame: TestFrame::new(1280, 720),

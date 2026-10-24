@@ -42,6 +42,8 @@ pub struct AppRoot {
     page_state: pages::PageState,
     /// 当前展示的是占位数据还是真实接口数据（用于顶栏角标）
     using_mock: bool,
+    /// 播放器是否已尝试创建过（防止在 render 里反复 cx.new 导致重复 load_file）
+    tried_player: bool,
     #[cfg(feature = "screenshot")]
     frames: u32,
 }
@@ -69,6 +71,7 @@ impl AppRoot {
             page: None,
             page_state: pages::PageState::Ready,
             using_mock: true,
+            tried_player: false,
             #[cfg(feature = "screenshot")]
             frames: 0,
         }
@@ -131,8 +134,11 @@ impl Render for AppRoot {
             }
         }
         // 验收辅助：设了 YK_VIDEO 且还没进播放器，就直接进（不依赖 screenshot feature）
+        // 只创建一次：cx.new 会触发一次渲染，若条件一直为真就会递归创建，
+        // 表现成 PlayerView::new 被调用多次、每次都重新 load_file（播放重头开始）。
         #[cfg(target_os = "macos")]
-        if self.playing.is_none() && std::env::var("YK_VIDEO").is_ok() {
+        if !self.tried_player && self.playing.is_none() && std::env::var("YK_VIDEO").is_ok() {
+            self.tried_player = true;
             let th = self.theme.clone();
             self.playing = Some(cx.new(|_| player::PlayerView::new(th)));
         }
