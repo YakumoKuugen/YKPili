@@ -523,7 +523,12 @@ fn control_bar(
                                 cx.listener({
                                     let handle = handle.clone();
                                     move |view, _ev: &MouseDownEvent, window, cx| {
-                                        // 焦点交给输入框，同时让渲染循环让路
+                                        // 已经聚焦就什么都不做 ——
+                                        // 重复 window.focus + notify 会让 Input 重建，
+                                        // 表现为「点一下已输入内容的输入框，内容被清掉」。
+                                        if handle.is_focused(window) {
+                                            return;
+                                        }
                                         view.input_focused = true;
                                         window.focus(&handle, cx);
                                         cx.notify();
