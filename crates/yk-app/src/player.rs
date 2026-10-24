@@ -112,6 +112,9 @@ pub struct PlayerView {
     play_time: f64,
     /// 弹幕输入框状态（首次 render 时创建，那时才有 window）
     danmaku_input: Option<Entity<InputState>>,
+    /// 输入框是否处于聚焦。聚焦时暂停渲染循环 ——
+    /// 因为 pump() 在 UI 线程要做 10-25ms 的转换，会把输入事件和音频都拖卡。
+    input_focused: bool,
 }
 
 impl PlayerView {
@@ -156,6 +159,7 @@ impl PlayerView {
             lanes: LaneAllocator::new(1280.0, 220.0),
             play_time: 0.0,
             danmaku_input: None,
+            input_focused: false,
             state: {
                 let mut st = PlayerState::new();
                 st.duration_secs = 754.0;
@@ -197,6 +201,13 @@ impl Render for PlayerView {
                         .timer(std::time::Duration::from_millis(16))
                         .await;
                     let alive = this.update(cx, |view, cx| {
+                        // 输入聚焦时完全不碰 UI 线程的重活：
+                        // pump() 要做 mpv 渲染 + 色彩转换 + 新建 buffer（10-25ms），
+                        // 和输入事件抢同一个线程，表现就是「一输入就卡、音频也卡」。
+                        // 这里直接跳过，代价是输入期间画面暂停（可接受，且符合直觉）。
+                        if view.input_focused {
+                            return;
+                        }
                         if let Some(m) = view.mpv.as_mut() {
                             view.play_time = m.pump();
                         }
@@ -217,6 +228,7 @@ impl Render for PlayerView {
             let state = cx.new(|cx| {
                 InputState::new(window, cx).placeholder("发一条友善的弹幕吧")
             });
+            eprintln!("[input] InputState 已创建");
             self.danmaku_input = Some(state);
         }
 
@@ -278,6 +290,8 @@ impl Render for PlayerView {
                 // 而且 deferred 元素的 hit-test 有问题：输入框收不到点击。
                 control_bar(&t, &self.state, self.danmaku_input.as_ref(), cx, cx.listener(
                     |this, _: &ClickEvent, window, cx| {
+                        // 点播放按钮 = 放弃输入焦点，恢复渲染循环
+                        this.input_focused = false;
                         this.state.toggle_play();
                         window.refresh();
                         cx.notify();
@@ -471,16 +485,24 @@ fn control_bar(
                         // 必须由外层接管焦点：track_focus 让元素参与焦点系统，
                         // 点击时显式 window.focus() 把输入焦点交给它。
                         let handle = st.read(cx).focus_handle(cx);
+                        // 记录聚焦状态需要在 PlayerView 上，这里通过回调设置
                         div()
+                            .id("danmaku-input")
                             .flex_1()
                             .h(px(26.))
                             .track_focus(&handle)
-                            .on_mouse_down(MouseButton::Left, {
-                                let handle = handle.clone();
-                                move |_ev, window, cx| {
-                                    window.focus(&handle, cx);
-                                }
-                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener({
+                                    let handle = handle.clone();
+                                    move |view, _ev: &MouseDownEvent, window, cx| {
+                                        // 焦点交给输入框，同时让渲染循环让路
+                                        view.input_focused = true;
+                                        window.focus(&handle, cx);
+                                        cx.notify();
+                                    }
+                                }),
+                            )
                             .child(Input::new(st).appearance(false).bordered(false))
                             .into_any_element()
                     }
