@@ -325,7 +325,7 @@ impl PlayerView {
     /// 每帧只为「可见窗口」内的弹幕生成元素，不是全量 —— 一场直播可能有上万条，
     /// 全量遍历会直接掉帧。窗口前半段留 15 秒是因为一条弹幕最长要飞这么久。
     /// 把输入框里的文本作为一条弹幕发出去（本地回显，不接服务端）。
-    fn send_danmaku(&mut self, cx: &mut Context<Self>) {
+    fn send_danmaku(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(st) = self.danmaku_input.as_ref() else {
             return;
         };
@@ -350,6 +350,11 @@ impl PlayerView {
         let lane = self.lanes.assign(&d);
         self.danmaku.push((d, lane));
         eprintln!("[danmaku] 已发送，轨道 {lane}，共 {} 条", self.danmaku.len());
+
+        // 清空输入框（set_value 在 gpui-base 的 InputState 上，三参）
+        if let Some(st) = self.danmaku_input.as_ref() {
+            st.update(cx, |st, cx| st.set_value("", window, cx));
+        }
         cx.notify();
     }
 
@@ -562,8 +567,8 @@ fn control_bar(
                         .text_color(rgb(0xFFFFFF))
                         .cursor_pointer()
                         .on_click(cx.listener(
-                            |view, _: &ClickEvent, _window, cx| {
-                                view.send_danmaku(cx);
+                            |view, _: &ClickEvent, window, cx| {
+                                view.send_danmaku(window, cx);
                             },
                         ))
                         .child("发送"),
