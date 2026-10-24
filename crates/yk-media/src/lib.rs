@@ -102,6 +102,7 @@ pub struct MpvPlayer {
     render_free: unsafe extern "C" fn(*mut MpvRenderCtx),
     terminate: unsafe extern "C" fn(*mut MpvHandle),
     wait_event: unsafe extern "C" fn(*mut MpvHandle, f64) -> *mut c_void,
+    report_swap: unsafe extern "C" fn(*mut MpvRenderCtx),
 }
 
 unsafe impl Send for MpvPlayer {}
@@ -113,7 +114,7 @@ impl MpvPlayer {
 
         // 把这个块单独隔离：`Symbol` 借用 `lib`，块结束即释放，
         // 之后才能把 `lib` move 进 Self。
-        let (ctx, render, render_fn, free_fn, term_fn, wait_fn) = unsafe {
+        let (ctx, render, render_fn, free_fn, term_fn, wait_fn, report_fn) = unsafe {
             let create: unsafe extern "C" fn() -> *mut MpvHandle =
                 *lib.get(b"mpv_create").map_err(|e| MpvError::Library(e.to_string()))?;
             let init: unsafe extern "C" fn(*mut MpvHandle) -> c_int =
@@ -138,6 +139,11 @@ impl MpvPlayer {
                     .map_err(|e| MpvError::Library(e.to_string()))?;
             let wait_fn: unsafe extern "C" fn(*mut MpvHandle, f64) -> *mut c_void =
                 *lib.get(b"mpv_wait_event")
+                    .map_err(|e| MpvError::Library(e.to_string()))?;
+            // SW 渲染后必须 report_swap，否则 mpv 认为「上一帧还没显示」，
+            // 不会推进播放（表现就是画面永远停在第一帧）。
+            let report_fn: unsafe extern "C" fn(*mut MpvRenderCtx) =
+                *lib.get(b"mpv_render_context_report_swap")
                     .map_err(|e| MpvError::Library(e.to_string()))?;
 
             let ctx = create();
@@ -180,7 +186,7 @@ impl MpvPlayer {
                 return Err(MpvError::RenderCtx(rc));
             }
 
-            (ctx, render, render_fn, free_fn, term_fn, wait_fn)
+            (ctx, render, render_fn, free_fn, term_fn, wait_fn, report_fn)
         };
 
         let stride = (width * 4) as usize;
@@ -198,6 +204,7 @@ impl MpvPlayer {
             render_free: free_fn,
             terminate: term_fn,
             wait_event: wait_fn,
+            report_swap: report_fn,
         })
     }
 
@@ -247,6 +254,23 @@ impl MpvPlayer {
     }
 
     /// 渲染当前帧到内部缓冲区。
+    /// 排空 mpv 的事件队列。
+    ///
+    /// **必须定期调用**：mpv 的客户端 API 是「拉模式」，不取事件它会认为
+    /// 调用方没在处理，内部队列满了就不推进解码 —— 表现就是画面停在第一帧。
+    pub fn drain_events(&self) {
+        loop {
+            let ev = unsafe { (self.wait_event)(self.ctx, 0.0) };
+            if ev.is_null() {
+                break;
+            }
+            // event_id == 0 表示 MPV_EVENT_NONE：队列已空
+            if unsafe { *(ev as *const i32) } == 0 {
+                break;
+            }
+        }
+    }
+
     pub fn render_frame(&mut self) -> Result<RgbaFrame, MpvError> {
         // MPV_RENDER_PARAM_SW_SIZE 要的是 `int[2]`，不是两个独立 int ——
         // 传单个 int 时 mpv 会把相邻栈内存当作高度，直接触发 mp_image_set_size 断言。
@@ -266,6 +290,7 @@ impl MpvPlayer {
         if rc < 0 {
             return Err(MpvError::Render(rc));
         }
+        unsafe { (self.report_swap)(self.render) };
 
         Ok(RgbaFrame {
             width: self.width,

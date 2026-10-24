@@ -23,6 +23,7 @@ use crate::video::TestFrame;
 /// 真实视频源（libmpv 解一帧）。拿到就用它，拿不到退回测试帧。
 #[cfg(target_os = "macos")]
 pub struct MpvFrameSource {
+    player: yk_media::MpvPlayer,
     buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
 }
 
@@ -36,7 +37,22 @@ impl MpvFrameSource {
         std::thread::sleep(std::time::Duration::from_millis(350));
         let rgba = mpv.render_frame().ok()?;
         let nv12 = yk_media::convert::rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
-        Some(Self { buffer: yk_media::pixel_buffer::nv12_to_pixel_buffer(&nv12) })
+        Some(Self {
+            player: mpv,
+            buffer: yk_media::pixel_buffer::nv12_to_pixel_buffer(&nv12),
+        })
+    }
+
+    /// 取一帧最新画面。播放循环每帧调一次。
+    ///
+    /// 每次都重新建 CVPixelBuffer —— 验证阶段够用，但它是一帧一次分配，
+    /// 真机上应该改成「复用 buffer + 只更新两个平面」。
+    pub fn pump(&mut self) {
+        self.player.drain_events();
+        if let Ok(rgba) = self.player.render_frame() {
+            let nv12 = yk_media::convert::rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
+            self.buffer = yk_media::pixel_buffer::nv12_to_pixel_buffer(&nv12);
+        }
     }
 
     pub fn buffer(&self) -> objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer> {
@@ -57,6 +73,9 @@ pub struct PlayerView {
     /// 真实视频帧（libmpv 解出）。None 时视频层显示测试帧。
     #[cfg(target_os = "macos")]
     mpv: Option<MpvFrameSource>,
+    /// 播放循环是否已启动（render 首帧时启动一次）
+    #[cfg(target_os = "macos")]
+    loop_started: bool,
     /// 面板是否展开（hover 唤起）。
     expanded: bool,
     /// 当前 Tab：0 评论 / 1 弹幕 / 2 选集。
@@ -86,6 +105,8 @@ impl PlayerView {
                     }
                 }
             },
+            #[cfg(target_os = "macos")]
+            loop_started: false,
             expanded: true,
             tab: 0,
             state: {
@@ -95,6 +116,14 @@ impl PlayerView {
                 st.playing = true;
                 st
             },
+        }
+    }
+
+    /// 外部强制取一帧（截图验证用）。
+    #[cfg(target_os = "macos")]
+    pub fn pump_now(&mut self) {
+        if let Some(m) = self.mpv.as_mut() {
+            m.pump();
         }
     }
 
@@ -110,6 +139,30 @@ impl PlayerView {
 impl Render for PlayerView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         eprintln!("[M3] PlayerView::render 被调用");
+        // 播放循环：每 16ms 取一帧最新画面并重绘（≈60fps）。
+        // libmpv 已在自动播放，这里只负责「把当前帧搬到 surface 上」。
+        #[cfg(target_os = "macos")]
+        if !self.loop_started && self.mpv.is_some() {
+            self.loop_started = true;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(16))
+                        .await;
+                    let alive = this.update(cx, |view, cx| {
+                        if let Some(m) = view.mpv.as_mut() {
+                            m.pump();
+                        }
+                        cx.notify();
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+
         let t = self.theme.clone();
 
         // 浮窗是「独立场景」，必须绝对定位铺满最近的定位祖先（AppRoot 根 div 是 relative）。
