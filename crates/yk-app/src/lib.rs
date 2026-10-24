@@ -47,6 +47,10 @@ pub struct AppRoot {
     using_mock: bool,
     /// 内容区滚动句柄：首页虚拟列表用它，页面容器复用它的 base handle
     content_scroll: VirtualListScrollHandle,
+    /// 当前是否离线（启动时拉取失败 / 显式 YK_OFFLINE）
+    offline: bool,
+    /// 离线时展示的缓存时间（Unix 秒）；None = 没有可用缓存
+    offline_updated_at: Option<u64>,
     #[cfg(feature = "screenshot")]
     frames: u32,
 }
@@ -81,6 +85,13 @@ impl AppRoot {
         self.playing = Some(cx.new(|_| player::PlayerView::new(theme)));
     }
 
+    /// 标记为离线，并记录缓存时间（None = 没有可用缓存，只能展示占位内容）。
+    pub fn with_offline(mut self, updated_at: Option<u64>) -> Self {
+        self.offline = true;
+        self.offline_updated_at = updated_at;
+        self
+    }
+
     pub fn new() -> Self {
         eprintln!("[app] AppRoot::new 被调用");
         Self {
@@ -97,6 +108,8 @@ impl AppRoot {
             page_state: pages::PageState::Ready,
             using_mock: true,
             content_scroll: VirtualListScrollHandle::new(),
+            offline: false,
+            offline_updated_at: None,
             #[cfg(feature = "screenshot")]
             frames: 0,
         }
@@ -188,6 +201,15 @@ impl Render for AppRoot {
                     .flex_col()
                     .child(top_bar(t))
                     .child(category_bar(t, self.active_category))
+                    .children(if self.offline {
+                        Some(offline_banner(
+                            t,
+                            self.offline_updated_at,
+                            self.feed.items().len(),
+                        ))
+                    } else {
+                        None
+                    })
                     .child(content_area(
                         t,
                         self.feed.items(),
@@ -365,6 +387,45 @@ fn category_bar(t: &YkTheme, active: usize) -> impl IntoElement {
         );
     }
     row
+}
+
+// ================= 离线条 =================
+
+/// 顶部离线条：不遮挡内容，只说明「现在是离线 + 缓存时间」。
+fn offline_banner(t: &YkTheme, updated_at: Option<u64>, count: usize) -> impl IntoElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    let text = match updated_at {
+        Some(ts) => format!(
+            "离线 · 缓存时间：{} · {} 条",
+            yk_core::feed_cache::age_text(ts),
+            count
+        ),
+        None => "离线 · 暂无可用缓存，正在展示占位内容".to_string(),
+    };
+    div()
+        .w_full()
+        .h(px(36.))
+        .px(px(SPACE_6))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_2))
+        .bg(s.surface_elevated_strong)
+        .border_b_1()
+        .border_color(s.border_subtle)
+        .child(
+            div()
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(p.status_warning),
+        )
+        .child(
+            div()
+                .text_size(px(FONT_SIZE_CAPTION))
+                .text_color(s.text_secondary)
+                .child(text),
+        )
 }
 
 // ================= 内容区 =================

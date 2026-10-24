@@ -25,30 +25,60 @@ fn main() {
             init(cx);
 
             // M7：启动时尝试拉一页真实推荐。
-            // 失败不阻塞启动 —— 退回占位数据，并在终端留下一行原因。
-            let real_items = match yk_core::api::client::ReqwestClient::new() {
-                Ok(client) => {
-                    match yk_core::api::client::fetch_recommend(
-                        &client,
-                        "",
-                        30,
-                        yk_core::api::client::now_wts(),
-                    ) {
-                        Ok(items) => {
-                            eprintln!("[api] 真实推荐拉取成功：{} 条", items.len());
-                            Some(items)
-                        }
-                        Err(e) => {
-                            eprintln!("[api] 真实推荐拉取失败，退回占位数据：{e}");
-                            None
+            // 失败不阻塞启动 —— 先回退本地缓存，再退回占位数据。
+            let cache = yk_core::feed_cache::FeedCache::new();
+            let forced_offline = std::env::var("YK_OFFLINE").is_ok();
+            let mut offline = forced_offline;
+            let mut real_items = None;
+
+            if forced_offline {
+                eprintln!("[offline] YK_OFFLINE=1，跳过网络请求");
+            } else {
+                match yk_core::api::client::ReqwestClient::new() {
+                    Ok(client) => {
+                        match yk_core::api::client::fetch_recommend(
+                            &client,
+                            "",
+                            30,
+                            yk_core::api::client::now_wts(),
+                        ) {
+                            Ok(items) => {
+                                eprintln!("[api] 真实推荐拉取成功：{} 条", items.len());
+                                if let Err(e) = cache.save(&items) {
+                                    eprintln!("[cache] 推荐流写入失败：{e}");
+                                }
+                                real_items = Some(items);
+                            }
+                            Err(e) => {
+                                eprintln!("[api] 真实推荐拉取失败，尝试缓存：{e}");
+                                offline = true;
+                            }
                         }
                     }
+                    Err(e) => {
+                        eprintln!("[api] HTTP 客户端初始化失败，尝试缓存：{e}");
+                        offline = true;
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[api] HTTP 客户端初始化失败：{e}");
-                    None
+            }
+
+            // 离线 / 启动失败：有缓存就用缓存，没有就交给 AppRoot::new() 的占位数据。
+            let mut offline_updated_at = None;
+            if real_items.is_none() {
+                match cache.load() {
+                    Some(cached) => {
+                        eprintln!(
+                            "[offline] 使用缓存：{} 条（{}）",
+                            cached.items.len(),
+                            yk_core::feed_cache::age_text(cached.updated_at)
+                        );
+                        offline_updated_at = Some(cached.updated_at);
+                        real_items = Some(cached.items);
+                    }
+                    None if offline => eprintln!("[offline] 没有可用缓存，使用占位数据"),
+                    None => {}
                 }
-            };
+            }
             open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -85,12 +115,17 @@ fn main() {
                     } else {
                         None
                     };
-                    match (real_items, player) {
-                        (Some(items), Some(p)) => cx.new(|_| AppRoot::with_real_data(&items).with_player(p)),
-                        (Some(items), None) => cx.new(|_| AppRoot::with_real_data(&items)),
-                        (None, Some(p)) => cx.new(|_| AppRoot::new().with_player(p)),
-                        (None, None) => cx.new(|_| AppRoot::new()),
+                    let mut app = match real_items {
+                        Some(items) => AppRoot::with_real_data(&items),
+                        None => AppRoot::new(),
+                    };
+                    if offline {
+                        app = app.with_offline(offline_updated_at);
                     }
+                    if let Some(p) = player {
+                        app = app.with_player(p);
+                    }
+                    cx.new(|_| app)
                 },
             )
             .expect("打开窗口失败");

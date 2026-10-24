@@ -11,6 +11,7 @@ pub mod api;
 pub mod cache;
 pub mod danmaku;
 pub mod feed;
+pub mod feed_cache;
 pub mod format;
 pub mod login;
 pub mod models;

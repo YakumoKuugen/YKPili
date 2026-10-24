@@ -10296,6 +10296,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td class="mono">L-5</td><td>Android 接入</td><td>未开始</td><td>需 <code>gpui-pre-mobile</code>，与 0.8.0 的 <code>gpui-pre</code> 版本需对齐</td></tr>
       <tr><td class="mono">L-6</td><td>自动截图失效</td><td><code>screenshot</code> feature 与 <code>gpui-fast</code> 互斥（cocoa 冲突）</td><td>改用系统 <code>screencapture</code> 或接受人工验收</td></tr>
       <tr><td class="mono">L-7</td><td>构造闭包里做副作用</td><td>线程/文件句柄等会跟着创建次数一起放大；<code>cx.new</code> 只调一次闭包，问题在创建被重复触发，不是重试</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
+      <tr><td class="mono">L-9</td><td>离线态 <span class="tag ok">已修</span></td><td>断网时展示上次缓存的推荐流 + 顶部离线条；无缓存时展示占位内容并标注</td><td><code>FeedCache</code>（<code>CacheManager</code> 包）落盘最近 30 条；启动失败自动回退；<code>YK_OFFLINE=1</code> / <code>YK_CACHE_DIR</code> 可验收。<b>重试按钮未接</b></td></tr>
     </tbody>
   </table>
 

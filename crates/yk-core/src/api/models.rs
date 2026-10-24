@@ -3,7 +3,7 @@
 //! 对应 `YKPili/Services/Bilibili/Models/*.cs`。
 //! 字段名与接口一致（snake_case），不额外做驼峰转换 —— 少一层映射就少一处出错。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ================= 首页推荐 =================
 
@@ -24,7 +24,7 @@ pub struct RecommendData {
 /// **注意**：旧 C# 版本定义了 `owner` / `stat` 却没在映射时使用，
 /// 导致卡片上没有 UP 主与播放量（见 `models::CoverItem::from_recommend` 的注释）。
 /// Rust 版必须全量保留。
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct RecommendVideoItem {
     #[serde(default)]
     pub id: i64,
@@ -45,7 +45,7 @@ pub struct RecommendVideoItem {
     pub stat: Option<VideoStat>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct VideoOwner {
     #[serde(default)]
     pub name: String,
@@ -53,7 +53,7 @@ pub struct VideoOwner {
     pub face: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct VideoStat {
     #[serde(default)]
     pub view: u64,
