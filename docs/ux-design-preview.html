@@ -5514,11 +5514,11 @@ ul.clean li::marker { color: var(--theme-primary); }
           <code>warning</code> / <code>danger</code> 派生）。
           <b>停留时长的坑</b>：<code>Notification</code> 只暴露
           <code>autohide(bool)</code>，自动消失时长在 <code>NotificationList</code> 内部固定为 5s
-          （<code>notification.rs:872</code>），所以 2000 / 3000 / 5000 这三档
-          <b>需要在包装层自己计时后调 <code>dismiss()</code></b>，或改用自建 toast host——
-          <b>E-1 已核实：无 per-notification 时长 API</b>（5s 写死在 <code>notification.rs:872</code>），
-          按「包装层自计时 + <code>dismiss()</code>」处理；「错误常驻」用
-          <code>autohide(false)</code> 即可。</p>
+          （<code>notification.rs:872</code>），所以设计里的 2000 / 3000 / 5000 三档不能直接配。
+          <b>E-1 已核实：默认 <code>autohide(true)</code> 固定 5s</b>，内部会处理
+          指针悬停 / 键盘焦点暂停与恢复；<b>暂直接用它，不自己计时</b>。
+          只有确实需要 2s / 3s 档时，才在包装层计时后调 <code>dismiss()</code>。
+          「错误常驻」用 <code>autohide(false)</code> 即可。</p>
       </div>
     </div>
 
@@ -6635,9 +6635,9 @@ ul.clean li::marker { color: var(--theme-primary); }
        TOAST_DURATION_INFO       u32       3000  信息 Toast 停留（ms）
        TOAST_DURATION_WARNING    u32       5000  警告 Toast 停留（ms）
        TOAST_DURATION_ERROR      u32       0     错误 Toast 不自动消失（0 = 常驻）
-       —— 注意：<code>NotificationSettings</code> 只给你 <code>autohide</code>，
-          自动消失时长在组件内部固定 5s（<code>notification.rs:872</code>），
-          这四档需要在包装层自己计时后调 <code>dismiss()</code>（per-notification 时长 API 待核实）。
+       —— 注意：<code>Notification</code> 只给你 <code>autohide</code>，默认 5s
+          （<code>notification.rs:872</code>），内部已处理悬停 / 键盘焦点暂停。
+          <b>暂直接用它，不自己计时</b>；只有要精确 2s / 3s 时才在包装层计时 + <code>dismiss()</code>（E-1）。
 
     C. 主题字段（<code>gpui_component::ThemeColor</code> + 项目 <code>crates/yk-ui/src/theme/surfaces.rs</code>）
        ※ 迁移后<b>不再新增 XAML 色值资源键</b>，改为两层（契约 §3）：
@@ -10329,17 +10329,22 @@ ul.clean li::marker { color: var(--theme-primary); }
   <div class="panel">
     <h3>E.0 复核结论（2026-10-24）</h3>
     <div class="callout ok" style="margin-bottom:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>22 条里 5 条已实现、2 条已核实可做、5 条部分/走退路、10 条仍待核实。</b><br>
+      <div><b>22 条里 5 条已实现、3 条已核实可接受、4 条部分/走退路、10 条仍待核实。</b><br>
         已实现：<b>E-14</b>（弹幕描边）、<b>E-15</b>（deferred 取舍）、<b>E-16</b>（骨架 1.5s）、
         <b>E-19</b>（hover 近似）、<b>E-20</b>（reduce_motion 运行期跟随）。<br>
-        已核实可做：<b>E-3</b>（focus_visible 区分键盘/指针）、<b>E-4</b>（滚动条几何可配）。<br>
-        部分 / 走退路：<b>E-1</b>（无 per-notification 时长）、<b>E-2</b>（有 invalid 样式、无 aria-invalid）、
+        已核实可接受：<b>E-1</b>（直接用内建 5s autohide，暂停/恢复内建）、
+        <b>E-3</b>（focus_visible 区分键盘/指针）、<b>E-4</b>（滚动条几何可配）。<br>
+        部分 / 走退路：<b>E-2</b>（有 invalid 样式、无 aria-invalid）、
         <b>E-5</b>（多数几何可覆盖，slider/badge/箭头不行）、<b>E-11</b>（动态字体实现待做）、
         <b>E-21</b>（iOS 编译过，Android 阻塞）。<br>
         其余 10 条按 E.1–E.4 的「退路」列处理。</div></div>
     <table>
       <thead><tr><th>#</th><th>已实现 / 已核实项</th><th>结论 / 验证</th><th>对应改动</th></tr></thead>
       <tbody>
+        <tr><td class="mono">E-1</td><td>Notification 自动消失</td>
+          <td>内建 <code>autohide</code> 默认 5s；指针悬停 / 键盘焦点时暂停，离开后继续，
+            窗口非激活也继续计时。暂直接用它，不自己计时</td>
+          <td>组件内建，暂不接</td></tr>
         <tr><td class="mono">E-3</td><td>焦点环区分键盘 / 指针</td>
           <td>支持：<code>.focus_visible(..)</code> 只在 <code>window.last_input_was_keyboard()</code> 时生效</td>
           <td>P2 焦点环接入</td></tr>
@@ -10366,8 +10371,8 @@ ul.clean li::marker { color: var(--theme-primary); }
     </table>
     <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-info"/></svg>
       <div><b>E-1 ～ E-5 核实结论（2026-10-24）：</b><br>
-        <b>E-1</b> 无 per-notification 时长 API：只有 <code>autohide(bool)</code>，
-        自动消失固定 5s（<code>notification.rs:872</code>）；走「包装层自计时 + <code>dismiss()</code>」。<br>
+        <b>E-1</b> 默认 <code>autohide(true)</code> 就是 5s，且内部已处理「悬停 / 键盘焦点暂停」；
+        暂直接用它，不自己计时。需要 2s / 3s 档时再包一层计时 + <code>dismiss()</code>。<br>
         <b>E-2</b> 部分：<code>InputGroup::invalid(bool)</code> 有错误态边框/焦点环，但纯视觉；
         没有 <code>aria-invalid</code>，<code>aria_description</code> 只能传一段描述文本（无 ID 关联）。<br>
         <b>E-3</b> 可做：<code>.focus_visible(..)</code> 只在 <code>window.last_input_was_keyboard()</code>
@@ -10392,7 +10397,9 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tbody>
         <tr><td class="mono">E-1</td><td><code>Notification</code> 是否有 per-notification 自动消失时长 API
           （现状：<code>autohide(bool)</code>，时长在 <code>NotificationList</code> 内固定 5s）</td>
-          <td>包装层自计时后调 <code>dismiss()</code>，或自建 toast host</td><td><span class="tag warn">☑ 已核实：无时长 API（走退路）</span></td></tr>
+          <td><b>已核实：默认 <code>autohide(true)</code> 就是 5s</b>，内部会处理
+          「指针悬停 / 键盘焦点时暂停、离开后继续」，窗口非激活也继续计时。
+          暂直接用它，不自己计时；只有需要 2s / 3s 档时，才在包装层计时后调 <code>dismiss()</code></td><td><span class="tag ok">✅ 已核实（暂用内建 5s autohide）</span></td></tr>
         <tr><td class="mono">E-2</td><td><code>Input</code> 的错误态 / 校验提示槽；<code>aria-invalid</code> / <code>aria-describedby</code> 等价物</td>
           <td>外层包一层错误文案 + 改边框色</td><td><span class="tag warn">☑ 已核实（部分）：invalid 有，aria-invalid 无</span></td></tr>
         <tr><td class="mono">E-3</td><td>焦点环是否区分键盘 / 指针来源（原 <code>:focus-visible</code> 语义）</td>
