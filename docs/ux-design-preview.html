@@ -10080,13 +10080,19 @@ ul.clean li::marker { color: var(--theme-primary); }
           批处理按 <code>(order, kind)</code> 排序，而 <code>Surface</code> 的 kind 枚举值最大</td>
           <td><b>实测：只要向 surface 之上绘制 glyph，surface 整块变黑</b>；同尺寸色块则正常。
             四种挂法全部失败（普通兄弟 / 嵌进视频层 / <code>deferred</code> / <code>canvas</code> 直接 paint glyph）。<br>
-            <b>排除的假设</b>：<code>paint_surface</code> 里 <code>order: 0</code> 看似是 bug，
-            但 <code>scene.rs:94</code> 的 <code>insert_primitive</code> 会用
-            <code>layer_stack.last()</code> 覆盖它 —— 那个 0 根本不起作用。改它无效。<br>
-            <b>当前最可疑</b>：<code>insert_primitive</code> 在
-            <code>clipped_bounds.is_empty()</code> 时<b>直接 return，不报错</b>。
-            若 surface 被 <code>content_mask</code> 裁掉，症状正是「视频黑、文字在」。<br>
-            下一步：在 <code>insert_primitive</code> 的 Surface 分支加日志，确认是被裁剪还是绘制失败。<br>
+            <b>已排除的三个假设</b>（加日志实测，vendor <code>gpui-pre</code> /
+            <code>gpui-pre-apple</code> 验证）：<br>
+            ① <code>paint_surface</code> 的 <code>order: 0</code> —— 会被
+            <code>insert_primitive</code> 用 <code>layer_stack.last()</code> 覆盖，改它无效；<br>
+            ② 被 <code>clipped_bounds.is_empty()</code> 裁剪 —— 日志显示 surface 正常入队，
+            <code>order=11</code>、bounds 完整、启用弹幕后 order 也不变；<br>
+            ③ 没进绘制 —— 日志显示 <code>draw_surfaces</code> <b>确实被调用了</b>（1 个 surface）。<br>
+            <b>结论</b>：surface 入队与绘制都正常，但输出不可见。问题在 Metal 侧 ——
+            最可能是 <b>pipeline 的 blend / alpha 状态</b>：glyph 渲染后改变了目标 alpha，
+            而 surface 的 pipeline 若按 premultiplied alpha 混合，会被当成全透明。<br>
+            下一步：查 <code>surfaces_pipeline_state</code> 创建时的
+            <code>MTLRenderPipelineColorAttachmentDescriptor</code> blend 配置，
+            或在 <code>draw_surfaces</code> 里显式重置 blend 状态试一次。<br>
             备选绕过：文字离屏渲染成纹理再叠（牺牲亚像素锐度）、原生覆盖层（破坏纯 GPUI）。</td></tr>
         <tr><td class="mono">15</td><td><b>主题覆盖必须在窗口创建之后</b><br>
           先 <code>Theme::change(mode, Some(window), cx)</code>，再覆盖色值</td>

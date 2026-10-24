@@ -28,3 +28,6 @@ opt-level = 3
 # 见 vendor/backtrace/src/symbolize/gimli.rs 里的注释。
 [patch.crates-io]
 backtrace = { path = "vendor/backtrace" }
+# 临时：给 gpui-pre 加 surface 黑屏的定位日志
+gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }

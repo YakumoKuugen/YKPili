@@ -241,7 +241,7 @@ impl Render for PlayerView {
             //   b. 弹幕用系统原生覆盖层（NSView），脱离 GPUI 合成
             //   c. 上报 GPUI，等 surface 与 glyph 的纹理槽冲突修复
             //
-            // .child(deferred(self.danmaku_layer()).with_priority(10usize))
+            .child(deferred(self.danmaku_layer()).with_priority(10usize))
             // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
             .child(
                 div().absolute().left_0().right_0().bottom_0().h(px(CTRL_H + 120.)).bg(
