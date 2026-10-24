@@ -55,8 +55,12 @@ impl MpvFrameSource {
         self.tick = self.tick.wrapping_add(1);
         if self.tick % 60 == 1 {
             let t = self.player.get_property_double("time-pos").unwrap_or(-1.0);
-            let p = self.player.get_property_double("pause").unwrap_or(-1.0);
-            eprintln!("[mpv] time-pos={t:.3}s pause={p} tick={}", self.tick);
+            let aid = self.player.get_property_double("aid").unwrap_or(-1.0);
+            let vol = self.player.get_property_double("volume").unwrap_or(-1.0);
+            eprintln!(
+                "[mpv] time-pos={t:.3}s aid={aid} volume={vol} tick={}",
+                self.tick
+            );
         }
         if let Ok(rgba) = self.player.render_frame() {
             let nv12 = yk_media::convert::rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
