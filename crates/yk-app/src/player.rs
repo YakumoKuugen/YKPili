@@ -229,9 +229,17 @@ impl Render for PlayerView {
             //   3. deferred(priority 10)
             //
             // 形态上不是尺寸或定位问题，是「surface 与文本渲染的合成冲突」。
-            // 正解在文档第 14 节已写明：弹幕要用**自定义 Element 的 paint**
-            // （text_system().shape_line + ShapedLine::paint），
-            // 而不是 div + text 的方式。那是下一步的工作。
+            // 之后按文档方案 ② 改用 canvas + window.text_system().shape_line()
+            // 直接 paint 文字（不经过 div+text），**结果同样是黑屏**。
+            //
+            // 综合四次实验，根因确定：**只要向 surface 之上绘制 glyph，
+            // surface 就被破坏**。同尺寸色块则完全正常。
+            // 这是 GPUI Metal renderer 的合成问题，不是用法问题。
+            //
+            // 绕过方向（下一步）：
+            //   a. 文字先渲染到离屏纹理，再当图片叠加（牺牲锐度）
+            //   b. 弹幕用系统原生覆盖层（NSView），脱离 GPUI 合成
+            //   c. 上报 GPUI，等 surface 与 glyph 的纹理槽冲突修复
             //
             // .child(deferred(self.danmaku_layer()).with_priority(10usize))
             // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
@@ -294,27 +302,63 @@ impl PlayerView {
     /// 全量遍历会直接掉帧。窗口前半段留 15 秒是因为一条弹幕最长要飞这么久。
     fn danmaku_layer(&self) -> impl IntoElement {
         let now = self.play_time;
-        let mut layer = div().absolute().inset_0();
-        let visible: Vec<_> = self
+
+        // 先在普通 Rust 里把「这一帧要画什么」算好，交给 paint 闭包。
+        // 闭包必须 'static，所以数据要 move 进去。
+        struct Drawn {
+            x: f32,
+            y: f32,
+            text: String,
+            size: f32,
+            color: gpui::Hsla,
+        }
+        let drawn: Vec<Drawn> = self
             .danmaku
             .iter()
             .filter(|(d, _)| self.lanes.visible_at(d, now))
-            .take(80) // 硬上限：极端情况下也不要一次画几百条
+            .take(80)
+            .map(|(d, lane)| Drawn {
+                x: self.lanes.x_at(d, now),
+                y: 8.0 + *lane as f32 * 30.0,
+                text: d.text.clone(),
+                size: d.font_size,
+                color: rgb(d.rgb()).into(),
+            })
             .collect();
-        for (d, lane) in visible {
-            let x = self.lanes.x_at(d, now);
-            let color = d.rgb();
-            layer = layer.child(
-                div()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(8.0 + *lane as f32 * 30.0))
-                    .text_size(px(d.font_size))
-                    .text_color(rgb(color))
-                    .child(d.text.clone()),
-            );
-        }
-        layer
+
+        // canvas：直接走底层 paint，不经过 div + text 的常规元素路径。
+        // 常规路径下文字会破坏 surface 的合成（实测画面全黑），
+        // 这条是文档第 14 节指定的方案 ②。
+        canvas(
+            |_bounds, _window, _cx| (),
+            move |_bounds, _state, window, cx| {
+                for d in &drawn {
+                    let run = TextRun {
+                        len: d.text.len(),
+                        font: gpui::Font::default(),
+                        color: d.color,
+                        ..Default::default()
+                    };
+                    // shape_line 在 WindowTextSystem 上，不是 TextSystem
+                    let line = window.text_system().shape_line(
+                        d.text.clone().into(),
+                        px(d.size),
+                        &[run],
+                        None,
+                    );
+                    let _ = line.paint(
+                        point(px(d.x), px(d.y)),
+                        px(d.size * 1.25),
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+            },
+        )
+        .absolute()
+        .inset_0()
     }
 }
 
