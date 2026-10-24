@@ -10297,6 +10297,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td class="mono">L-7</td><td>构造闭包里做副作用</td><td>线程/文件句柄等会跟着创建次数一起放大；<code>cx.new</code> 只调一次闭包，问题在创建被重复触发，不是重试</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
       <tr><td class="mono">L-9</td><td>离线态 <span class="tag ok">已修</span></td><td>断网时展示上次缓存的推荐流 + 顶部离线条；无缓存时展示占位内容并标注</td><td><code>FeedCache</code>（<code>CacheManager</code> 包）落盘最近 30 条；启动失败自动回退；<code>YK_OFFLINE=1</code> / <code>YK_CACHE_DIR</code> 可验收。<b>重试按钮未接</b></td></tr>
       <tr><td class="mono">L-10</td><td>卡片 hover <span class="tag ok">已修</span></td><td>悬停有背景、描边、阴影与 ~3px 放大，观感接近 1.03；进入/离开各 150ms</td><td>外层 <code>.hover</code>（<code>surface_content_hover</code> + <code>shadow_card_hover</code> + <code>border_popover</code>）+ 内层负 <code>inset</code> 近似放大；<code>with_animation</code> 按 0→1 / 1→0 插值，只对当前 / 刚离开的卡生效。<code>reduce_motion</code> 时自动退化为静态</td></tr>
+      <tr><td class="mono">L-11</td><td>reduce_motion 运行期跟随 <span class="tag ok">已修</span></td><td>系统开关切换后动画不会自动降级</td><td>AppRoot 每 2s 调 <code>gpui::base::apply_system_reduce_motion</code>；值变化时 <code>cx.notify()</code>，<code>AnimationExt</code> 自动渲染静态端值。Linux 由 gpui-base 跟随 portal</td></tr>
     </tbody>
   </table>
 
@@ -10464,7 +10465,10 @@ ul.clean li::marker { color: var(--theme-primary); }
         <tr><td class="mono">E-19</td><td>卡片悬停 1.03 / 封面 1.04 的「负 inset 近似」观感</td>
           <td>不是等比矩阵，x/y 会略各向异性；必要时改 <code>with_spring</code> 或自定义 Element 走 <code>TransformationMatrix</code></td></tr>
         <tr><td class="mono">E-20</td><td><code>reduce_motion</code> 运行期变更（用户在系统设置里改开关）</td>
-          <td>macOS / Windows 无订阅通知，需再调 <code>apply_system_reduce_motion(cx)</code>，实际是否生效要试</td></tr>
+          <td><span class="tag ok">已实测（2026-10）</span> AppRoot 每 2s 调一次
+            <code>gpui::base::apply_system_reduce_motion</code>，变化时 <code>cx.notify()</code>；
+            macOS 下切换系统「减弱动态效果」，2s 内日志 false→true→false，
+            <code>AnimationExt</code> 动画自动静态化/恢复。Linux 由 gpui-base 跟随 portal。</td></tr>
         <tr><td class="mono">E-21</td><td>移动端播放链路整体可行性</td>
           <td>已单列为 <b>M8 里程碑</b>（见第 16 节）。<b>实测阻塞（2026-10）</b>：
             本机只有 <code>aarch64-apple-darwin</code> 一个 target，<b>无 Xcode / iOS SDK</b>、

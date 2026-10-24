@@ -57,6 +57,9 @@ pub struct AppRoot {
     leaving_card: Option<usize>,
     /// hover 进入/离开时 +1：让 with_animation 的 id 变化、动画重新开始
     hover_generation: u64,
+    /// 系统「减少动效」轮询是否已启动（macOS/Windows 没有订阅通知）
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    motion_watchdog_started: bool,
 }
 
 impl AppRoot {
@@ -117,12 +120,41 @@ impl AppRoot {
             hovered_card: None,
             leaving_card: None,
             hover_generation: 0,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            motion_watchdog_started: false,
         }
     }
 }
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 系统「减少动效」：macOS / Windows 没有可订阅的通知，
+        // 启动时 gpui-base 已经读过一次；运行中改开关只能轮询重读。
+        // Linux 由 gpui-base 跟随 portal 信号，不需要这里再轮。
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if !self.motion_watchdog_started {
+            self.motion_watchdog_started = true;
+            cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(2))
+                        .await;
+                    let alive = this.update(cx, |_view, cx| {
+                        let before = cx.reduce_motion();
+                        gpui::base::apply_system_reduce_motion(cx);
+                        let after = cx.reduce_motion();
+                        if before != after {
+                            eprintln!("[motion] reduce_motion {before} -> {after}");
+                            cx.notify();
+                        }
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         // 验收辅助：设了 YK_VIDEO 且还没进播放器，就直接进
         // 播放器由 open_window 的 build 闭包注入（见 AppRoot::with_player），
         // 这里不再创建 —— 在 render 里 cx.new 会递归触发渲染，导致重复 load_file。
