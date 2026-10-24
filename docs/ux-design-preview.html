@@ -10298,6 +10298,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td class="mono">L-9</td><td>离线态 <span class="tag ok">已修</span></td><td>断网时展示上次缓存的推荐流 + 顶部离线条；无缓存时展示占位内容并标注</td><td><code>FeedCache</code>（<code>CacheManager</code> 包）落盘最近 30 条；启动失败自动回退；<code>YK_OFFLINE=1</code> / <code>YK_CACHE_DIR</code> 可验收。<b>重试按钮未接</b></td></tr>
       <tr><td class="mono">L-10</td><td>卡片 hover <span class="tag ok">已修</span></td><td>悬停有背景、描边、阴影与 ~3px 放大，观感接近 1.03；进入/离开各 150ms</td><td>外层 <code>.hover</code>（<code>surface_content_hover</code> + <code>shadow_card_hover</code> + <code>border_popover</code>）+ 内层负 <code>inset</code> 近似放大；<code>with_animation</code> 按 0→1 / 1→0 插值，只对当前 / 刚离开的卡生效。<code>reduce_motion</code> 时自动退化为静态</td></tr>
       <tr><td class="mono">L-11</td><td>reduce_motion 运行期跟随 <span class="tag ok">已修</span></td><td>系统开关切换后动画不会自动降级</td><td>AppRoot 每 2s 调 <code>gpui::base::apply_system_reduce_motion</code>；值变化时 <code>cx.notify()</code>，<code>AnimationExt</code> 自动渲染静态端值。Linux 由 gpui-base 跟随 portal</td></tr>
+      <tr><td class="mono">L-12</td><td>弹幕描边 / 投影 <span class="tag ok">已修</span></td><td>白字在亮画面上发糊</td><td>每条可见弹幕 shape 两次：深色描边（8 方向 1px + 右下 1,2px 投影）再画原色字身；无模糊投影。性能上每条每帧 2 次 shape，量大时可缓存</td></tr>
     </tbody>
   </table>
 
@@ -10369,7 +10370,9 @@ ul.clean li::marker { color: var(--theme-primary); }
           但「节点文本变化是否作为 live announcement 上报」源码看不出</td>
           <td>扫码三态等需要播报的场景，实测后决定是否用原生桥接</td></tr>
         <tr><td class="mono">E-14</td><td>弹幕的「1px 描边 + 投影」在文本渲染层怎么画，源码里没核实到 stroke 能力</td>
-          <td>用同一 <code>ShapedLine</code> 偏移多次绘制模拟，或去掉描边只留投影</td></tr>
+          <td><span class="tag ok">已实现（2026-10）</span> <code>ShapedLine</code> 的颜色烘在 layout 里，
+            所以每条文本 shape 两次：深色 <code>#0B0F14D9</code> 描边 + 原色字身；
+            描边按 8 方向偏移 1px，投影在右下 1,2px 再画一次。<b>投影无模糊</b>，是偏移近似。</td></tr>
         <tr><td class="mono">E-15</td><td><code>deferred</code> 承载「常驻整层」（控制栏 / 信息面板）技术上可行但非主流用法</td>
           <td>文档同时给了「<code>relative()</code> + 绝对定位子树按声明顺序」的等效写法；
             同一组层只能选一种，实现时定死。</td></tr>

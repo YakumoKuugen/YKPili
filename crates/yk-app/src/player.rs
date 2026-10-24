@@ -434,13 +434,60 @@ impl PlayerView {
             |_bounds, _window, _cx| (),
             move |_bounds, _state, window, cx| {
                 for d in &drawn {
+                    // 设计稿要求「1px 深色描边 + 投影」，而 ShapedLine 的
+                    // 颜色烘在 layout 里、paint 不能重新着色。这里把同一条文本
+                    // shape 两次：一次深色（描边/投影），一次原色（字身）。
+                    // 描边色必须是深色（#0B0F14），白字 + 白描边在白画面上会糊。
+                    let stroke = TextRun {
+                        len: d.text.len(),
+                        font: gpui::Font::default(),
+                        color: rgba(0x0B0F14D9).into(),
+                        ..Default::default()
+                    };
+                    let stroke_line = window.text_system().shape_line(
+                        d.text.clone().into(),
+                        px(d.size),
+                        &[stroke],
+                        None,
+                    );
+                    let line_height = px(d.size * 1.25);
+
+                    // 投影：右下 1,2 px 先画一层，再画 8 方向 1px 描边。
+                    let _ = stroke_line.paint(
+                        point(px(d.x + 1.0), px(d.y + 2.0)),
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                    for (dx, dy) in [
+                        (-1.0, 0.0),
+                        (1.0, 0.0),
+                        (0.0, -1.0),
+                        (0.0, 1.0),
+                        (-1.0, -1.0),
+                        (1.0, -1.0),
+                        (-1.0, 1.0),
+                        (1.0, 1.0),
+                    ] {
+                        let _ = stroke_line.paint(
+                            point(px(d.x + dx), px(d.y + dy)),
+                            line_height,
+                            TextAlign::Left,
+                            None,
+                            window,
+                            cx,
+                        );
+                    }
+
+                    // 字身
                     let run = TextRun {
                         len: d.text.len(),
                         font: gpui::Font::default(),
                         color: d.color,
                         ..Default::default()
                     };
-                    // shape_line 在 WindowTextSystem 上，不是 TextSystem
                     let line = window.text_system().shape_line(
                         d.text.clone().into(),
                         px(d.size),
@@ -449,7 +496,7 @@ impl PlayerView {
                     );
                     let _ = line.paint(
                         point(px(d.x), px(d.y)),
-                        px(d.size * 1.25),
+                        line_height,
                         TextAlign::Left,
                         None,
                         window,
