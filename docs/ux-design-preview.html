@@ -10296,7 +10296,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td class="mono">L-5</td><td>Android 接入</td><td>未开始</td><td>需 <code>gpui-pre-mobile</code>，与 0.8.0 的 <code>gpui-pre</code> 版本需对齐</td></tr>
       <tr><td class="mono">L-7</td><td>构造闭包里做副作用</td><td>线程/文件句柄等会跟着创建次数一起放大；<code>cx.new</code> 只调一次闭包，问题在创建被重复触发，不是重试</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
       <tr><td class="mono">L-9</td><td>离线态 <span class="tag ok">已修</span></td><td>断网时展示上次缓存的推荐流 + 顶部离线条；无缓存时展示占位内容并标注</td><td><code>FeedCache</code>（<code>CacheManager</code> 包）落盘最近 30 条；启动失败自动回退；<code>YK_OFFLINE=1</code> / <code>YK_CACHE_DIR</code> 可验收。<b>重试按钮未接</b></td></tr>
-      <tr><td class="mono">L-10</td><td>卡片 hover <span class="tag ok">已修</span></td><td>悬停有背景、描边、阴影与 ~3px 放大，观感接近 1.03</td><td>外层 <code>.hover</code>（<code>surface_content_hover</code> + <code>shadow_card_hover</code> + <code>border_popover</code>）+ 内层 <code>.group_hover</code> 负 <code>inset(3)</code> + 外层裁剪。<b>无 150ms 过渡</b>（GPUI 无 transition/transform，插值需 per-card entity）</td></tr>
+      <tr><td class="mono">L-10</td><td>卡片 hover <span class="tag ok">已修</span></td><td>悬停有背景、描边、阴影与 ~3px 放大，观感接近 1.03；进入/离开各 150ms</td><td>外层 <code>.hover</code>（<code>surface_content_hover</code> + <code>shadow_card_hover</code> + <code>border_popover</code>）+ 内层负 <code>inset</code> 近似放大；<code>with_animation</code> 按 0→1 / 1→0 插值，只对当前 / 刚离开的卡生效。<code>reduce_motion</code> 时自动退化为静态</td></tr>
     </tbody>
   </table>
 

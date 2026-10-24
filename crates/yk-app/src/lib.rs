@@ -51,6 +51,12 @@ pub struct AppRoot {
     offline: bool,
     /// 离线时展示的缓存时间（Unix 秒）；None = 没有可用缓存
     offline_updated_at: Option<u64>,
+    /// 当前 hover 的卡片（CoverItem::index）
+    hovered_card: Option<usize>,
+    /// 刚离开的卡片：只为它播放 1→0 的收尾动画，避免所有旧卡一起重播
+    leaving_card: Option<usize>,
+    /// hover 进入/离开时 +1：让 with_animation 的 id 变化、动画重新开始
+    hover_generation: u64,
 }
 
 impl AppRoot {
@@ -108,6 +114,9 @@ impl AppRoot {
             content_scroll: VirtualListScrollHandle::new(),
             offline: false,
             offline_updated_at: None,
+            hovered_card: None,
+            leaving_card: None,
+            hover_generation: 0,
         }
     }
 }
@@ -439,8 +448,20 @@ fn content_area(
                         .gap(px(SPACE_4))
                         .w_full()
                         .h(px(COVER_CELL_HEIGHT));
+                    let hovered_idx = this.hovered_card;
+                    let leaving_idx = this.leaving_card;
+                    let hover_gen = this.hover_generation;
                     for item in &all[start..end] {
-                        row_el = row_el.child(card(&theme, item, cx));
+                        let hovered = hovered_idx == Some(item.index);
+                        let leaving = leaving_idx == Some(item.index);
+                        row_el = row_el.child(card(
+                            &theme,
+                            item,
+                            hovered,
+                            leaving,
+                            hover_gen,
+                            cx,
+                        ));
                     }
                     row_el
                 })
@@ -458,18 +479,104 @@ fn content_area(
 /// 封面卡片：208 × 166（COVER_CELL_WIDTH / COVER_CELL_HEIGHT）。
 ///
 /// 结构对应第 04 节：封面（16:9）+ 标题（2 行）+ 信息行。
-fn card(t: &YkTheme, item: &CoverItem, cx: &mut Context<AppRoot>) -> impl IntoElement {
+fn card(
+    t: &YkTheme,
+    item: &CoverItem,
+    hovered: bool,
+    leaving: bool,
+    hover_generation: u64,
+    cx: &mut Context<AppRoot>,
+) -> impl IntoElement {
     let s = &t.surfaces;
     let title = item.title.clone();
-    // 组名按卡片区分：group_hover 只在「鼠标进入这张卡」时生效。
-    let group = format!("cover-card-{}", item.index);
+    let idx = item.index;
     let hover_shadow = t.shadows.shadow_card_hover.clone();
     let hover_border = s.border_popover;
     let hover_bg = s.surface_content_hover;
 
+    let content = div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .flex_col()
+        .child(
+            // 封面区：占位色 + 时长角标
+            div()
+                .relative()
+                .w_full()
+                .h(px(COVER_ITEM_HEIGHT))
+                // 占位色垫底：封面未加载完（或加载失败）时显示纯色块，
+                // 不会出现「白洞」。
+                .bg(parse_placeholder(&item.placeholder_color))
+                .child(
+                    // 封面图。B 站图床对 Referer 敏感，若这里显示不出来，
+                    // 说明需要带 Referer 预下载（见 yk-core 的 http 客户端）。
+                    img(ImageSource::from(item.image_url.clone()))
+                        .size_full()
+                        .object_fit(ObjectFit::Cover),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(4.))
+                        .right(px(4.))
+                        .px(px(4.))
+                        .rounded(px(RADIUS_SM))
+                        .bg(rgba(0x000000AB))
+                        .text_size(px(FONT_SIZE_DATA_OVERLAY))
+                        .text_color(rgb(0xFFFFFF))
+                        .child(item.duration_text()),
+                ),
+        )
+        .child(
+            // 文字区
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1))
+                .p(px(SPACE_3))
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CONTROL))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(s.text_primary)
+                        .line_clamp(2)
+                        .child(item.title.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(s.text_tertiary)
+                        .child(item.meta_line()),
+                ),
+        );
+
+    // GPUI 没有元素级 transform：放大仍用「内层负 inset + 外层裁剪」近似。
+    // 过渡靠 with_animation 插值 inset：进入 0→1，离开 1→0；
+    // id 带 generation，每次进/出都是一段新的 150ms 动画。
+    // 用 AnyElement 统一两个动画分支与静态分支的类型。
+    let content: AnyElement = if hovered {
+        content
+            .with_animation(
+                format!("card-hover-in-{idx}-{hover_generation}"),
+                Animation::new(DURATION_FAST).with_easing(ease_standard()),
+                |el, delta| el.inset(px(-3.0 * delta)),
+            )
+            .into_any_element()
+    } else if leaving {
+        content
+            .with_animation(
+                format!("card-hover-out-{idx}-{hover_generation}"),
+                Animation::new(DURATION_FAST).with_easing(ease_standard()),
+                |el, delta| el.inset(px(-3.0 * (1.0 - delta))),
+            )
+            .into_any_element()
+    } else {
+        content.into_any_element()
+    };
+
     div()
-        .id(("cover", item.index))
-        .group(group.clone())
+        .id(("cover", idx))
         .relative()
         .w(px(COVER_CELL_WIDTH))
         .h(px(COVER_CELL_HEIGHT))
@@ -478,75 +585,36 @@ fn card(t: &YkTheme, item: &CoverItem, cx: &mut Context<AppRoot>) -> impl IntoEl
         .bg(s.surface_content)
         .border_1()
         .border_color(s.border_subtle)
-        // GPUI 没有元素级 transform/scale：用「内层负 inset 放大 + 外层裁剪」
-        // 近似 1.03 的悬停放大；阴影与描边即时切换（暂无 150ms 过渡）。
+        // 阴影/描边/背景仍即时切换；放大做 150ms 插值。
         .hover(move |style| {
             style
                 .bg(hover_bg)
                 .shadow(hover_shadow)
                 .border_color(hover_border)
         })
-        .child(
-            // 内容整体放在内层：hover 时负 inset 把内容放大 ~3px，
-            // 外层 overflow_hidden 负责裁掉溢出，观感接近等比放大。
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .flex_col()
-                .group_hover(group, |style| style.inset(px(-3.)))
-                .child(
-                    // 封面区：占位色 + 时长角标
-                    div()
-                        .relative()
-                        .w_full()
-                        .h(px(COVER_ITEM_HEIGHT))
-                        // 占位色垫底：封面未加载完（或加载失败）时显示纯色块，
-                        // 不会出现「白洞」。
-                        .bg(parse_placeholder(&item.placeholder_color))
-                        .child(
-                            // 封面图。B 站图床对 Referer 敏感，若这里显示不出来，
-                            // 说明需要带 Referer 预下载（见 yk-core 的 http 客户端）。
-                            img(ImageSource::from(item.image_url.clone()))
-                                .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .bottom(px(4.))
-                                .right(px(4.))
-                                .px(px(4.))
-                                .rounded(px(RADIUS_SM))
-                                .bg(rgba(0x000000AB))
-                                .text_size(px(FONT_SIZE_DATA_OVERLAY))
-                                .text_color(rgb(0xFFFFFF))
-                                .child(item.duration_text()),
-                        ),
-                )
-                .child(
-                    // 文字区
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(SPACE_1))
-                        .p(px(SPACE_3))
-                        .child(
-                            div()
-                                .text_size(px(FONT_SIZE_CONTROL))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(s.text_primary)
-                                .line_clamp(2)
-                                .child(item.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(FONT_SIZE_MICRO))
-                                .text_color(s.text_tertiary)
-                                .child(item.meta_line()),
-                        ),
-                ),
-        )
+        .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
+            if *hovered {
+                if this.hovered_card != Some(idx) {
+                    // 从上一张卡移进来：让上一张播放收尾动画。
+                    if let Some(prev) = this.hovered_card {
+                        this.leaving_card = Some(prev);
+                    }
+                    // 重新进入正在收尾的自己：取消收尾，直接反向。
+                    if this.leaving_card == Some(idx) {
+                        this.leaving_card = None;
+                    }
+                    this.hovered_card = Some(idx);
+                    this.hover_generation = this.hover_generation.wrapping_add(1);
+                    cx.notify();
+                }
+            } else if this.hovered_card == Some(idx) {
+                this.hovered_card = None;
+                this.leaving_card = Some(idx);
+                this.hover_generation = this.hover_generation.wrapping_add(1);
+                cx.notify();
+            }
+        }))
+        .child(content)
         // 点击整张卡片进入播放浮窗（M3 的最小入口）。
         // 已存在就复用：重建会换掉 PlayerView 里的 InputState，弹幕输入跟着丢（附录 F L-1）。
         .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
