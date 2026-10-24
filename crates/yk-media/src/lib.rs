@@ -13,7 +13,11 @@
 //! 这是**验证级**封装：只覆盖「打开文件 → 渲染一帧 → 拿到 RGBA」，
 //! 不含音频同步、seek、事件分发 —— 那些属于后续。
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+pub mod convert;
+#[cfg(target_os = "macos")]
+pub mod pixel_buffer;
+
+use std::ffi::{c_char, c_int, c_void, CString};
 use std::ptr;
 
 use libloading::{Library, Symbol};

@@ -16,6 +16,7 @@ path = "src/lib.rs"
 gpui.workspace = true
 yk-ui = { path = "../yk-ui" }
 yk-core = { path = "../yk-core" }
+yk-media = { path = "../yk-media" }
 futures = "0.3"
 anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }

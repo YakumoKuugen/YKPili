@@ -20,6 +20,30 @@ use yk_ui::theme::*;
 
 use crate::video::TestFrame;
 
+/// 真实视频源（libmpv 解一帧）。拿到就用它，拿不到退回测试帧。
+#[cfg(target_os = "macos")]
+pub struct MpvFrameSource {
+    buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+}
+
+#[cfg(target_os = "macos")]
+impl MpvFrameSource {
+    /// 用 libmpv 解一帧并转成 CVPixelBuffer。失败时返回 None，调用方退回测试帧。
+    pub fn open(video: &str, w: u32, h: u32) -> Option<Self> {
+        let mut mpv = yk_media::MpvPlayer::new(w, h).ok()?;
+        mpv.load_file(video).ok()?;
+        // 给解码器一点时间产出首帧
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        let rgba = mpv.render_frame().ok()?;
+        let nv12 = yk_media::convert::rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
+        Some(Self { buffer: yk_media::pixel_buffer::nv12_to_pixel_buffer(&nv12) })
+    }
+
+    pub fn buffer(&self) -> objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer> {
+        self.buffer.clone()
+    }
+}
+
 /// 控制栏总高（唯一口径）。
 const CTRL_H: f32 = PLAYER_CONTROL_BAR_HEIGHT; // 88
 /// 弹幕输入条高。
@@ -30,6 +54,9 @@ const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
 pub struct PlayerView {
     theme: YkTheme,
     frame: TestFrame,
+    /// 真实视频帧（libmpv 解出）。None 时视频层显示测试帧。
+    #[cfg(target_os = "macos")]
+    mpv: Option<MpvFrameSource>,
     /// 面板是否展开（hover 唤起）。
     expanded: bool,
     /// 当前 Tab：0 评论 / 1 弹幕 / 2 选集。
@@ -43,6 +70,22 @@ impl PlayerView {
         Self {
             theme,
             frame: TestFrame::new(1280, 720),
+            #[cfg(target_os = "macos")]
+            mpv: {
+                // M8 验证：先固定解一帧，确认 libmpv → NV12 → CVPixelBuffer → surface 全链路。
+                let path = std::env::var("YK_VIDEO")
+                    .unwrap_or_else(|_| "/tmp/mpv-test.mp4".to_string());
+                match MpvFrameSource::open(&path, 1280, 720) {
+                    Some(s) => {
+                        eprintln!("[mpv] 已解码首帧：{path}");
+                        Some(s)
+                    }
+                    None => {
+                        eprintln!("[mpv] 解码失败，退回测试帧：{path}");
+                        None
+                    }
+                }
+            },
             expanded: true,
             tab: 0,
             state: {
@@ -77,7 +120,16 @@ impl Render for PlayerView {
             .inset_0()
             .bg(rgb(0x000000))
             // ① 视频层
-            .child(video_layer(&self.frame))
+            .child({
+                #[cfg(target_os = "macos")]
+                {
+                    video_layer(&self.frame, self.mpv.as_ref())
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    video_layer(&self.frame)
+                }
+            })
             // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
             .child(
                 div().absolute().left_0().right_0().bottom_0().h(px(CTRL_H + 120.)).bg(
@@ -137,11 +189,16 @@ impl Render for PlayerView {
 /// 这里先渲染占位。iOS 的真实链路（libmpv 解码 → 纹理）属于 M8 的后续工作，
 /// 解码方案已定：**libmpv**（跨桌面 + 移动端同一套）。
 #[cfg(target_os = "macos")]
-fn video_layer(frame: &TestFrame) -> impl IntoElement {
+fn video_layer(frame: &TestFrame, mpv: Option<&MpvFrameSource>) -> impl IntoElement {
+    // 有真实帧就用真实的，否则退回 spike 的测试帧
+    let buffer = match mpv {
+        Some(m) => m.buffer(),
+        None => frame.buffer(),
+    };
     div()
         .absolute()
         .inset_0()
-        .child(surface(frame.buffer()).size_full())
+        .child(surface(buffer).size_full())
 }
 
 #[cfg(not(target_os = "macos"))]

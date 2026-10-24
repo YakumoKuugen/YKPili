@@ -8279,6 +8279,7 @@ dependencies = [
  "objc2-core-video",
  "reqwest",
  "yk-core",
+ "yk-media",
  "yk-ui",
 ]
 
@@ -8298,6 +8299,8 @@ name = "yk-media"
 version = "0.1.0"
 dependencies = [
  "libloading",
+ "objc2-core-foundation",
+ "objc2-core-video",
 ]
 
 [[package]]

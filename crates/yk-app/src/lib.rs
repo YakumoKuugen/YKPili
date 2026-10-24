@@ -112,9 +112,8 @@ impl Render for AppRoot {
                 }
             }
             self.frames += 1;
-            // 保持持续渲染，让异步加载的图片有时间到达
-            cx.notify();
-            if self.frames >= 10 {
+
+            if self.frames >= 2 {
                 // 10 帧 ≈ 1 秒：足够让首批封面（实测 60–100ms/张）到达，
                 // 又不至于让部分图还没解码就拍。帧数太少会拍到一片占位色。
                 match window.render_to_image() {
