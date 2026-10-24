@@ -8294,6 +8294,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "yk-media"
+version = "0.1.0"
+dependencies = [
+ "libloading",
+]
+
+[[package]]
 name = "yk-ui"
 version = "0.1.0"
 dependencies = [

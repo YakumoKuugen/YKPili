@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/yk-app", "crates/yk-core", "crates/yk-ui"]
+members = ["crates/yk-app", "crates/yk-core", "crates/yk-ui", "crates/yk-media"]
+# 这些是独立验证工程，有自己的 Cargo.toml 与 lock，不参与主 workspace。
+exclude = ["spike-gpui-kit", "spike-gpui-surface", "spike-mpv-wgpu", "spike-avalonia-handles"]
 
 [workspace.package]
 version = "0.1.0"
