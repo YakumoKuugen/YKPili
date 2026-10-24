@@ -115,6 +115,8 @@ pub struct PlayerView {
     play_time: f64,
     /// 弹幕输入框状态（首次 render 时创建，那时才有 window）
     danmaku_input: Option<Entity<InputState>>,
+    /// 是否已尝试启动渲染线程（防重复）
+    tried_worker: bool,
     /// 输入框是否处于聚焦。聚焦时暂停渲染循环 ——
     /// 因为 pump() 在 UI 线程要做 10-25ms 的转换，会把输入事件和音频都拖卡。
     input_focused: bool,
@@ -122,16 +124,18 @@ pub struct PlayerView {
 
 impl PlayerView {
     pub fn new(theme: YkTheme) -> Self {
-        eprintln!("[player] PlayerView::new 被调用（每次都会重新 load_file）");
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        eprintln!("[player] PlayerView::new 第 {n} 次（>1 说明输入框会被换成新的空 state）");
         Self {
             theme,
             frame: TestFrame::new(1280, 720),
+            // worker 不在这里启动：cx.new 的构造闭包可能被重试多次，
+            // 启动线程属于副作用，重复执行会起多个渲染线程。
+            // 改到首次 render 时启动（见 render 里的 tried_worker）。
             #[cfg(target_os = "macos")]
-            worker: {
-                let path = std::env::var("YK_VIDEO")
-                    .unwrap_or_else(|_| "/tmp/mpv-test.mp4".to_string());
-                crate::video_worker::FrameWorker::spawn(path, 1280, 720)
-            },
+            worker: None,
+            tried_worker: false,
             #[cfg(target_os = "macos")]
             current: None,
             #[cfg(target_os = "macos")]
@@ -209,6 +213,16 @@ impl Render for PlayerView {
                 }
             })
             .detach();
+        }
+
+        // 渲染线程：首次 render 启动（cx.new 的构造闭包可能重试多次，
+        // 把线程启动放进去会起多个线程）。
+        #[cfg(target_os = "macos")]
+        if !self.tried_worker {
+            self.tried_worker = true;
+            let path = std::env::var("YK_VIDEO")
+                .unwrap_or_else(|_| "/tmp/mpv-test.mp4".to_string());
+            self.worker = crate::video_worker::FrameWorker::spawn(path, 1280, 720);
         }
 
         // 弹幕输入框：首次 render 才有 window，所以在这里创建。

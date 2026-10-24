@@ -73,6 +73,10 @@ fn main() {
                         cx,
                     );
                     yk_ui::gpui_theme::apply(cx, &yk_ui::theme::YkTheme::dark());
+                    static BUILD_N: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let n = BUILD_N.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    eprintln!("[build] 窗口 build 闭包第 {n} 次执行");
                     // 窗口创建时构造一次播放器（若指定了 YK_VIDEO）。
                     let theme = yk_ui::theme::YkTheme::dark();
                     let want_player = std::env::var("YK_VIDEO").is_ok();

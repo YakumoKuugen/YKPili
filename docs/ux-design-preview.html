@@ -10075,6 +10075,19 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>外层没有尺寸约束时 <code>size_full()</code> 会退化成 <b>0×0</b>：渲染日志照常打印，
             画面上却什么都没有，很难定位。子视图根元素应写
             <code>.absolute().inset_0()</code>（相对最近的定位祖先）。M3 / M4 各踩一次。</td></tr>
+        <tr><td class="mono">19</td><td><b><code>PlayerView</code> 被反复重建，导致输入框内容丢失</b>（遗留）</td><td>
+          <b>症状</b>：输入文字后点输入框或画面任意处，内容被清空。<br>
+          <b>根因</b>：<code>PlayerView::new</code> 在运行中持续被调用（实测一次运行内 10 次）。
+          每次重建都会得到一个全新的 <code>InputState</code>（空），所以内容看起来「被清空」。<br>
+          <b>已做的</b>：把 <code>FrameWorker::spawn</code> 从构造闭包移到首次 <code>render</code>
+          （副作用会让 <code>cx.new</code> 重试）——启动时降到 1 次，但<b>运行中仍会多次</b>。<br>
+          <b>未定位</b>：10 次的来源。代码里只有三处创建点（build 闭包、卡片点击、screenshot 分支），
+          build 已确认只跑 1 次，所以嫌疑在卡片点击闭包被反复触发、或交互时 <code>cx.new</code> 重入。<br>
+          <b>正确修法</b>：不要让 <code>InputState</code> 依附于 <code>PlayerView</code> ——
+          把它提升到 <code>AppRoot</code>；或让 <code>PlayerView</code> 只在首次创建并缓存，
+          其余路径一律 <code>self.playing.clone()</code>。修完加
+          <code>assert!(实例数 &lt;= 1)</code> 防回归。<br>
+          <b>为什么优先</b>：这个问题不解决，输入相关的一切都不稳定。</td></tr>
         <tr><td class="mono">18</td><td><b>macOS IME 报 <code>IMKCFRunLoopWakeUpReliable</code> Mach port 错误</b></td><td>
           <b>实测日志</b>：<code>error messaging the mach port for IMKCFRunLoopWakeUpReliable</code>。
           <code>IMK</code> 是 Input Method Kit —— 输入法尝试连接但<b>与系统的 Mach port 通信失败</b>，
@@ -10158,7 +10171,7 @@ ul.clean li::marker { color: var(--theme-primary); }
     </table>
     <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
       <div><b>怎么用这张表：</b>写任何一节之前，先扫一遍事实 1–4（决定了「能不能这么画」），
-        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–18 是 M2–M8 实施时新踩出来的；16 弹幕黑屏（已解），17 播放性能（已改线程模型），18 IME（待查）。</div></div>
+        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–19 是 M2–M8 实施时新踩出来的；16 弹幕黑屏（已解）、17 播放性能（已改线程模型）、18 IME（已可用）、19 PlayerView 重建（遗留，优先处理）。</div></div>
   </div>
 
   <div class="panel">
