@@ -305,6 +305,7 @@ tbody tr:hover { background: var(--fill-1); }
        border-radius: var(--badge-radius); font-size: var(--fs-overlay); font-weight: var(--fw-medium); }
 .tag.ok    { background: rgba(41, 163, 131, 0.16); color: var(--status-success); }
 .tag.warn  { background: rgba(245, 158, 11, 0.16);  color: var(--status-warning); }
+.tag.bad   { background: rgba(239, 68, 68, 0.16);   color: #ef4444; }
 .tag.err   { background: rgba(229, 72, 77, 0.16);   color: var(--status-error); }
 .tag.info  { background: rgba(58, 191, 248, 0.16);  color: var(--status-info); }
 .tag.ghost { background: var(--fill-2); color: var(--text-3); }
@@ -3039,7 +3040,8 @@ ul.clean li::marker { color: var(--theme-primary); }
               <code>NSFont.preferredFont</code> 不跟随该设置 → 只能提供应用内字号选项。
               读到倍率后<b>统一乘到字号与行高上</b>——项目 13/15/28 走 <code>text_size(px(n))</code> 不吃 rem，
               所以<b>不能只调 <code>window.set_rem_size</code></b>。各平台 API 与限制见
-              <a href="#appendix-e">附录 E · E-11</a>。</div></li>
+              <a href="#appendix-e">附录 E · E-11</a>
+      <a href="#appendix-f">附录 F · 迁移进度</a>。</div></li>
             <li><span class="box"></span><div>图标按钮必须有 <code>accessibilityLabel</code>（"稍后再看"而非"按钮"）。
               <b>GPUI 写法</b>：API 名是 <code>aria_label</code>，而不是 <code>accessibility_label</code>——
               <code>div().id("watch-later").role(Role::Button).aria_label("稍后再看")</code>。
@@ -10234,6 +10236,69 @@ ul.clean li::marker { color: var(--theme-primary); }
         ③ <b>主题切换</b>：不再重建，这个认知要改。<br>
         ④ <b>组件</b>：从「自建样式」变成「用现成的 + 覆盖」，能改的余量变少了（见附录 E）。</div></div>
   </div>
+</section>
+
+<!-- ==================== 附录 F · 迁移进度 ==================== -->
+<section id="appendix-f">
+  <div class="sec-head">
+    <h2><span class="sec-num">附录 F</span>迁移进度与遗留</h2>
+    <p>Avalonia C# → Rust + GPUI 的实际推进情况。<b>这一页是活的</b>：
+      每完成一项就改状态，新增遗留就补一行。里程碑的定义见正文路线图。</p>
+  </div>
+
+  <h3>F.1 里程碑状态</h3>
+  <table>
+    <thead><tr><th>里程碑</th><th>内容</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">M0</td><td>工程骨架、workspace 划分（yk-app / core / ui / media）、iOS 目标</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td class="mono">M1</td><td>设计令牌：31 色、32 面、字阶 12/13/15/20/24/28、10 组阴影、自写 bezier</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td class="mono">M2</td><td>外壳：标题栏、侧栏 Dock、内容区布局</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td class="mono">M3</td><td>播放器界面：视频层、88px 控制栏、400/200 面板、骑边界按钮</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td class="mono">M4</td><td>组件验收页：按钮/输入/卡片/头像/标签</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td class="mono">M5</td><td>七个页面：首页/热门/分区/排行/直播/我的/设置</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td class="mono">M6</td><td>状态三态：骨架屏 / 空态 / 错误态</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td class="mono">M7</td><td>真实数据：WBI 签名、推荐流、封面加载、HTTP 客户端注入</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td class="mono">M8</td><td>移动端与播放：iOS 编译、libmpv 解码、音频、弹幕</td><td><span class="tag warn">基本完成，见 F.2</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>F.2 M8 明细</h3>
+  <table>
+    <thead><tr><th>项</th><th>说明</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>iOS 编译</td><td>设备与模拟器 <code>cargo check</code> 均通过；<code>backtrace</code> 已 vendor 并 patch</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td>libmpv 解码</td><td><code>vo=libmpv</code> + SW 渲染，NV12 全范围 BT.709</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td>播放推进</td><td><code>time-pos</code> 实测 0.067 → 3.967s，与 16ms/tick 吻合</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td>音频输出</td><td><code>ao=avfoundation</code>（coreaudio 在本机 -50 失败）；实听确认</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td>弹幕滚动</td><td>数据、轨道分配、不重叠性质均有测试；渲染需 <code>gpui-fast</code>（已启用）</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td>弹幕输入</td><td>中文 IME 可用；发送 → 弹幕层 → 清空输入框全通</td><td><span class="tag ok">完成</span></td></tr>
+      <tr><td>PlayerView 重建</td><td>输入框内容被反复清空，见附录 D 事实 19</td><td><span class="tag bad">阻塞</span></td></tr>
+      <tr><td>回车发送</td><td><code>Input</code> 无 <code>on_enter</code>，需监听 <code>on_key_down</code></td><td><span class="tag warn">待做</span></td></tr>
+      <tr><td>无障碍</td><td>按产品要求列为未来 feature，本阶段不做</td><td><span class="tag warn">暂缓</span></td></tr>
+      <tr><td>功耗与热</td><td>需连续播放 30 分钟配合 <code>powermetrics</code> 采样</td><td><span class="tag warn">待测</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3>F.3 遗留清单（跨里程碑）</h3>
+  <table>
+    <thead><tr><th>#</th><th>问题</th><th>影响</th><th>方向</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">L-1</td><td><b>PlayerView 反复重建</b></td><td>输入框内容被清空，输入相关的一切都不稳定</td><td>见附录 D 事实 19，最高优先</td></tr>
+      <tr><td class="mono">L-2</td><td>视频等比 letterbox</td><td>当前拉伸铺满，比例失真</td><td>按视频宽高比算 <code>object_fit</code></td></tr>
+      <tr><td class="mono">L-3</td><td>首页滚动</td><td>内容超出后无法滚动</td><td>接 GPUI 的 <code>overflow_y_scroll</code></td></tr>
+      <tr><td class="mono">L-4</td><td>iOS 真实解码</td><td>目前是占位帧，未接 libmpv</td><td>复用 yk-media，注意跨平台 ABI</td></tr>
+      <tr><td class="mono">L-5</td><td>Android 接入</td><td>未开始</td><td>需 <code>gpui-pre-mobile</code>，与 0.8.0 的 <code>gpui-pre</code> 版本需对齐</td></tr>
+      <tr><td class="mono">L-6</td><td>自动截图失效</td><td><code>screenshot</code> feature 与 <code>gpui-fast</code> 互斥（cocoa 冲突）</td><td>改用系统 <code>screencapture</code> 或接受人工验收</td></tr>
+      <tr><td class="mono">L-7</td><td><code>build</code> 闭包副作用重试</td><td>构造闭包内做 I/O 会让 <code>cx.new</code> 重试多次</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
+    </tbody>
+  </table>
+
+  <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+    <div><b>改动约束（迁移期间有效）：</b><br>
+      ① 品牌蓝 <code>#00A1D6</code> 与字号阶 12/13/15/20/24/28 <b>不得改动</b>；<br>
+      ② 控制栏高度固定 <b>88px</b>，弹幕输入行 <b>38px</b>；<br>
+      ③ 面板收起态 <b>200px 半宽</b>且面板本体即 hover 热区（D-05，已定稿）；<br>
+      ④ 布局与视觉的<b>唯一事实来源是本文档正文</b>，代码与文档冲突时以文档为准。</div></div>
 </section>
 
 <!-- ==================== 附录 E · 待核实清单 ==================== -->
