@@ -14,7 +14,7 @@ publish = false
 # 0.8.0：支持移动端（gpui-pre-mobile），API 与 0.7.3 兼容（本次升级零改动）。
 # 注意：gpui-fast feature 装不上 —— gpui-fast-web 要 unicode-properties =0.1.3，
 # 而 gpui-pre-macos 的 cocoa 依赖与之冲突。详见设计文档附录 D 事实 16。
-gpui = { package = "gpui-kit", version = "0.8.0" }
+gpui = { package = "gpui-kit", version = "0.8.0", features = ["gpui-fast"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -29,3 +29,8 @@ opt-level = 3
 # 见 vendor/backtrace/src/symbolize/gimli.rs 里的注释。
 [patch.crates-io]
 backtrace = { path = "vendor/backtrace" }
+# gpui-fast-web 0.1.10 硬依赖 unicode-properties =0.1.3，但 0.1.3 已被 yank
+# （索引里只剩 0.1.4），导致 gpui-kit 0.8.0 的 gpui-fast 装不上。
+# 这里用 0.1.4 源码、版本号改成 0.1.3，满足精确约束且离线可用。
+# 补丁版本 API 兼容；上游修好后删掉此条即可。
+unicode-properties = { path = "vendor/unicode-properties" }

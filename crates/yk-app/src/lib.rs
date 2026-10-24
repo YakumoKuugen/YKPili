@@ -130,6 +130,13 @@ impl Render for AppRoot {
                 cx.quit();
             }
         }
+        // 验收辅助：设了 YK_VIDEO 且还没进播放器，就直接进（不依赖 screenshot feature）
+        #[cfg(target_os = "macos")]
+        if self.playing.is_none() && std::env::var("YK_VIDEO").is_ok() {
+            let th = self.theme.clone();
+            self.playing = Some(cx.new(|_| player::PlayerView::new(th)));
+        }
+
         let t = &self.theme;
 
         div()
