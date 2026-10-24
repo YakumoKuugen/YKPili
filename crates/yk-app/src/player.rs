@@ -255,7 +255,7 @@ impl Render for PlayerView {
             //   b. 弹幕用系统原生覆盖层（NSView），脱离 GPUI 合成
             //   c. 上报 GPUI，等 surface 与 glyph 的纹理槽冲突修复
             //
-            .child(deferred(self.danmaku_layer()).with_priority(10usize))
+            .child(self.danmaku_layer())
             // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
             .child(
                 div().absolute().left_0().right_0().bottom_0().h(px(CTRL_H + 120.)).bg(
@@ -268,19 +268,19 @@ impl Render for PlayerView {
             )
             // ③ 控制栏（deferred priority 30）
             .child(
-                deferred(control_bar(&t, &self.state, self.danmaku_input.as_ref(), cx, cx.listener(
+                // gpui-fast 下不再需要 deferred（合成问题已解决）。
+                // 而且 deferred 元素的 hit-test 有问题：输入框收不到点击。
+                control_bar(&t, &self.state, self.danmaku_input.as_ref(), cx, cx.listener(
                     |this, _: &ClickEvent, window, cx| {
                         this.state.toggle_play();
                         window.refresh();
                         cx.notify();
                     },
-                )))
-                .with_priority(30usize),
+                )),
             )
             // ④ 信息面板（deferred priority 60）
             .child(
-                deferred(info_panel(&t, self.expanded, self.tab, self.panel_width(), cx))
-                    .with_priority(60usize),
+                info_panel(&t, self.expanded, self.tab, self.panel_width(), cx),
             )
             // ⑤ 骑边界按钮（deferred priority 61）：面板收起时的常驻唤回入口
             .child(
