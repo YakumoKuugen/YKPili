@@ -51,8 +51,6 @@ pub struct AppRoot {
     offline: bool,
     /// 离线时展示的缓存时间（Unix 秒）；None = 没有可用缓存
     offline_updated_at: Option<u64>,
-    #[cfg(feature = "screenshot")]
-    frames: u32,
 }
 
 impl AppRoot {
@@ -110,68 +108,13 @@ impl AppRoot {
             content_scroll: VirtualListScrollHandle::new(),
             offline: false,
             offline_updated_at: None,
-            #[cfg(feature = "screenshot")]
-            frames: 0,
         }
     }
 }
 
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 截图验收模式：渲染到第 3 帧后读回像素并退出。
-        #[cfg(feature = "screenshot")]
-        {
-            // 截图验收：YK_SHOT 决定拍哪一屏
-            let shot = std::env::var("YK_SHOT").unwrap_or_default();
-            if self.frames == 0 {
-                match shot.as_str() {
-                    "gallery" => {
-                        let th = self.theme.clone();
-                        self.gallery = Some(cx.new(|_| components::ComponentGallery::new(th)));
-                    }
-                    "player" => {
-                        // 复用唯一实例；重复 cx.new 会让输入框换成新的空 state（L-1）
-                        self.ensure_player(cx);
-                    }
-                    "hot" => self.page = Some(pages::PageKind::Hot),
-                    "settings" => self.page = Some(pages::PageKind::Settings),
-                    "search" => self.page = Some(pages::PageKind::Search),
-                    "category" => self.page = Some(pages::PageKind::Category),
-                    "loading" => {
-                        self.page = Some(pages::PageKind::Hot);
-                        self.page_state = pages::PageState::Loading;
-                    }
-                    "empty" => {
-                        self.page = Some(pages::PageKind::Hot);
-                        self.page_state = pages::PageState::Empty;
-                    }
-                    "error" => {
-                        self.page = Some(pages::PageKind::Hot);
-                        self.page_state = pages::PageState::Error;
-                    }
-                    _ => {}
-                }
-            }
-            self.frames += 1;
-
-            if self.frames >= 2 {
-                // 10 帧 ≈ 1 秒：足够让首批封面（实测 60–100ms/张）到达，
-                // 又不至于让部分图还没解码就拍。帧数太少会拍到一片占位色。
-                match window.render_to_image() {
-                    Ok(img) => {
-                        let shot = std::env::var("YK_SHOT").unwrap_or_else(|_| "home".into());
-                let path = format!("/tmp/yk-{shot}.png");
-                        match img.save(&path) {
-                            Ok(_) => println!("[shot] OK {path} {}x{}", img.width(), img.height()),
-                            Err(e) => println!("[shot] save failed: {e}"),
-                        }
-                    }
-                    Err(e) => println!("[shot] render_to_image failed: {e}"),
-                }
-                cx.quit();
-            }
-        }
-        // 验收辅助：设了 YK_VIDEO 且还没进播放器，就直接进（不依赖 screenshot feature）
+        // 验收辅助：设了 YK_VIDEO 且还没进播放器，就直接进
         // 播放器由 open_window 的 build 闭包注入（见 AppRoot::with_player），
         // 这里不再创建 —— 在 render 里 cx.new 会递归触发渲染，导致重复 load_file。
 

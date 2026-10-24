@@ -10089,7 +10089,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           在播放器边界截断命中链，下层卡片再也收不到事件；自己的子元素（输入框/按钮/面板）
           hitbox 在更上层，交互不受影响；<br>
           ② 创建入口收敛到 <code>AppRoot::ensure_player</code>：已有实例就复用，
-          卡片点击 / screenshot 分支都不再无条件 <code>cx.new</code>；<br>
+          卡片点击入口不再无条件 <code>cx.new</code>；<br>
           ③ <code>PlayerView::new</code> 加进程内实例断言（<code>assert!(实例数 &lt;= 1)</code>，
           <code>Drop</code> 里减计数）——以后谁再写一条创建路径会立刻暴露，而不是悄悄清空输入框。<br>
           <b>验证</b>：点击卡片进入播放器后输入 <code>l1test</code>，
@@ -10164,9 +10164,9 @@ ul.clean li::marker { color: var(--theme-primary); }
             与此同时 <code>gpui-pre-web 0.3.9</code> 要 <code>^0.1.3</code>、实际解析到 0.1.4，
             两个约束对不到同一版本上。<b>这是上游的依赖问题，应用层无法绕过</b>，
             只能等 gpui-fast-web 发一版改用 0.1.4（或上游把 0.1.3 un-yank）。<br>
-            <b>另一条线索（未验证）</b>：<code>gpui-pre-macos</code> 是<b>验收依赖</b>不是产品依赖 ——
+            <b>另一条线索（已落地）</b>：<code>gpui-pre-macos</code> 是<b>验收依赖</b>不是产品依赖 ——
             它只为 <code>screenshot</code> feature 提供 <code>render_to_image</code>。
-            移除它能否解开 cocoa 冲突，本次因 yank 问题未走到那一步。<br>
+            该 feature 已删除（L-6 关闭，验收改用系统 <code>screencapture</code>），依赖也随之移除。<br>
             当前绕过：弹幕层暂不启用（文字会破坏 surface）；备选方案是文字离屏渲染成纹理、
             或原生 NSView 覆盖层。</td></tr>
         <tr><td class="mono">15</td><td><b>主题覆盖必须在窗口创建之后</b><br>
@@ -10281,7 +10281,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td>PlayerView 重建</td><td>点击穿透到下层卡片导致重建、输入被清空；<code>.occlude()</code> + 单实例复用已修，见附录 D 事实 19</td><td><span class="tag ok">已修</span></td></tr>
       <tr><td>回车发送</td><td>外层补 <code>key_context("Input")</code>，Enter 走 Input 的 Enter action 并发出 <code>PressEnter</code>；Shift+Enter 不发送。<b>IME 选词时回车需真机再验</b></td><td><span class="tag ok">完成</span></td></tr>
       <tr><td>无障碍</td><td>按产品要求列为未来 feature，本阶段不做</td><td><span class="tag warn">暂缓</span></td></tr>
-      <tr><td>功耗与热</td><td>需连续播放 30 分钟配合 <code>powermetrics</code> 采样</td><td><span class="tag warn">待测</span></td></tr>
+      <tr><td>功耗与热</td><td>整体项目完成后再测：连续播放 30 分钟 + <code>powermetrics</code> 采样</td><td><span class="tag warn">整体完成后</span></td></tr>
     </tbody>
   </table>
 
@@ -10294,7 +10294,6 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td class="mono">L-3</td><td>首页滚动 <span class="tag ok">已修</span></td><td>已消除：内容超出后可滚，顶栏/分类/Dock 固定；大数据量下只构建可视行</td><td>首页接 <code>v_virtual_list</code>（按视口宽把卡片分组为行，item 高度 = 166 + 16）；页面容器用 <code>ScrollHandle</code> + <code>overflow_y_scroll</code>；切页回顶</td></tr>
       <tr><td class="mono">L-4</td><td>iOS 真实解码</td><td>目前是占位帧，未接 libmpv</td><td>复用 yk-media，注意跨平台 ABI</td></tr>
       <tr><td class="mono">L-5</td><td>Android 接入</td><td>未开始</td><td>需 <code>gpui-pre-mobile</code>，与 0.8.0 的 <code>gpui-pre</code> 版本需对齐</td></tr>
-      <tr><td class="mono">L-6</td><td>自动截图失效</td><td><code>screenshot</code> feature 与 <code>gpui-fast</code> 互斥（cocoa 冲突）</td><td>改用系统 <code>screencapture</code> 或接受人工验收</td></tr>
       <tr><td class="mono">L-7</td><td>构造闭包里做副作用</td><td>线程/文件句柄等会跟着创建次数一起放大；<code>cx.new</code> 只调一次闭包，问题在创建被重复触发，不是重试</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
       <tr><td class="mono">L-9</td><td>离线态 <span class="tag ok">已修</span></td><td>断网时展示上次缓存的推荐流 + 顶部离线条；无缓存时展示占位内容并标注</td><td><code>FeedCache</code>（<code>CacheManager</code> 包）落盘最近 30 条；启动失败自动回退；<code>YK_OFFLINE=1</code> / <code>YK_CACHE_DIR</code> 可验收。<b>重试按钮未接</b></td></tr>
       <tr><td class="mono">L-10</td><td>卡片 hover <span class="tag ok">已修</span></td><td>悬停有背景、描边、阴影与 ~3px 放大，观感接近 1.03</td><td>外层 <code>.hover</code>（<code>surface_content_hover</code> + <code>shadow_card_hover</code> + <code>border_popover</code>）+ 内层 <code>.group_hover</code> 负 <code>inset(3)</code> + 外层裁剪。<b>无 150ms 过渡</b>（GPUI 无 transition/transform，插值需 per-card entity）</td></tr>
