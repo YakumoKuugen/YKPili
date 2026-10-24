@@ -55,6 +55,10 @@ pub struct AppRoot {
     hovered_card: Option<usize>,
     /// 刚离开的卡片：只为它播放 1→0 的收尾动画，避免所有旧卡一起重播
     leaving_card: Option<usize>,
+    /// 离线条上的「重试」是否正在进行
+    offline_retrying: bool,
+    /// 最近一次重试失败的原因（只用于日志/提示）
+    offline_error: Option<String>,
     /// hover 进入/离开时 +1：让 with_animation 的 id 变化、动画重新开始
     hover_generation: u64,
     /// 系统「减少动效」轮询是否已启动（macOS/Windows 没有订阅通知）
@@ -99,6 +103,57 @@ impl AppRoot {
         self
     }
 
+    /// 离线时点「重试」：后台重新拉一页推荐，成功则清掉离线条并更新缓存。
+    fn retry_online(&mut self, cx: &mut Context<Self>) {
+        if self.offline_retrying {
+            return;
+        }
+        self.offline_retrying = true;
+        self.offline_error = None;
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|e| e.to_string())?;
+                    yk_core::api::client::fetch_recommend(
+                        &client,
+                        "",
+                        30,
+                        yk_core::api::client::now_wts(),
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                view.offline_retrying = false;
+                match result {
+                    Ok(items) => {
+                        eprintln!("[offline] 重试成功：{} 条", items.len());
+                        view.feed.load(&items);
+                        view.using_mock = false;
+                        view.offline = false;
+                        view.offline_updated_at = None;
+                        view.offline_error = None;
+                        if let Err(e) = yk_core::feed_cache::FeedCache::new().save(&items) {
+                            eprintln!("[cache] 重试后写入失败：{e}");
+                        }
+                        view.content_scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    }
+                    Err(e) => {
+                        eprintln!("[offline] 重试失败：{e}");
+                        view.offline_error = Some(e);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     pub fn new() -> Self {
         eprintln!("[app] AppRoot::new 被调用");
         Self {
@@ -119,6 +174,8 @@ impl AppRoot {
             offline_updated_at: None,
             hovered_card: None,
             leaving_card: None,
+            offline_retrying: false,
+            offline_error: None,
             hover_generation: 0,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             motion_watchdog_started: false,
@@ -190,6 +247,9 @@ impl Render for AppRoot {
                             t,
                             self.offline_updated_at,
                             self.feed.items().len(),
+                            self.offline_retrying,
+                            self.offline_error.is_some(),
+                            cx,
                         ))
                     } else {
                         None
@@ -375,11 +435,18 @@ fn category_bar(t: &YkTheme, active: usize) -> impl IntoElement {
 
 // ================= 离线条 =================
 
-/// 顶部离线条：不遮挡内容，只说明「现在是离线 + 缓存时间」。
-fn offline_banner(t: &YkTheme, updated_at: Option<u64>, count: usize) -> impl IntoElement {
+/// 顶部离线条：不遮挡内容，只说明「现在是离线 + 缓存时间」，并给一个重试入口。
+fn offline_banner(
+    t: &YkTheme,
+    updated_at: Option<u64>,
+    count: usize,
+    retrying: bool,
+    retry_failed: bool,
+    cx: &mut Context<AppRoot>,
+) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
-    let text = match updated_at {
+    let mut text = match updated_at {
         Some(ts) => format!(
             "离线 · 缓存时间：{} · {} 条",
             yk_core::feed_cache::age_text(ts),
@@ -387,6 +454,12 @@ fn offline_banner(t: &YkTheme, updated_at: Option<u64>, count: usize) -> impl In
         ),
         None => "离线 · 暂无可用缓存，正在展示占位内容".to_string(),
     };
+    if retrying {
+        text = "正在重新连接…".to_string();
+    } else if retry_failed {
+        text.push_str(" · 重试失败");
+    }
+
     div()
         .w_full()
         .h(px(36.))
@@ -406,9 +479,28 @@ fn offline_banner(t: &YkTheme, updated_at: Option<u64>, count: usize) -> impl In
         )
         .child(
             div()
+                .flex_1()
                 .text_size(px(FONT_SIZE_CAPTION))
                 .text_color(s.text_secondary)
                 .child(text),
+        )
+        .child(
+            div()
+                .id("offline-retry")
+                .h(px(24.))
+                .px(px(SPACE_3))
+                .flex()
+                .items_center()
+                .rounded(px(RADIUS_SM))
+                .bg(if retrying { s.fill_2 } else { p.theme_primary })
+                .text_size(px(FONT_SIZE_MICRO))
+                .text_color(if retrying { s.text_tertiary } else { rgb(0xFFFFFF).into() })
+                .cursor_pointer()
+                .child(if retrying { "重试中…" } else { "重试" })
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    this.retry_online(cx);
+                    window.refresh();
+                })),
         )
 }
 
