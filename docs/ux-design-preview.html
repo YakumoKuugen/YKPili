@@ -10103,12 +10103,17 @@ ul.clean li::marker { color: var(--theme-primary); }
             <code>gpui-pre-macos 0.3.9</code> 依赖的 <code>cocoa</code> 与之冲突，
             降到 0.1.3 又撞出 cocoa 的新冲突 —— <b>与 spike 当时记录的
             「gpui-fast 造成 cocoa 版本冲突」完全一致</b>。<br>
-            结论：在 <code>gpui-kit 0.8.0 + gpui-pre 0.3.9</code> 这套组合下，
-            <code>gpui-fast</code> 的依赖树解不开，官方解法暂时用不上。<br>
-            <b>注意 <code>gpui-pre-macos</code> 是验收依赖不是产品依赖</b> ——
-            它只为 <code>screenshot</code> feature 提供 <code>render_to_image</code>（离屏截图）。
-            若放弃自动截图、只靠人眼验收，可以移除它后再试一次 <code>gpui-fast</code>；
-            本次尝试时网络连续 SSL reset，未能验证到那一步。<br>
+            <b>根因（最终定位）：上游依赖了已被 yank 的版本。</b>
+            <code>gpui-kit 0.8.0</code> 硬依赖 <code>gpui-fast-web ^0.1.10</code>，而
+            <code>gpui-fast-web 0.1.10</code> 要求 <code>unicode-properties =0.1.3</code>
+            （<b>精确版本</b>），但 0.1.3 在索引里已不可用（只剩 0.1.4）——
+            Cargo 原话：<i>versions that meet the requirements ^0.1.3 (locked to 0.1.4) are: 0.1.4</i>。<br>
+            与此同时 <code>gpui-pre-web 0.3.9</code> 要 <code>^0.1.3</code>、实际解析到 0.1.4，
+            两个约束对不到同一版本上。<b>这是上游的依赖问题，应用层无法绕过</b>，
+            只能等 gpui-fast-web 发一版改用 0.1.4（或上游把 0.1.3 un-yank）。<br>
+            <b>另一条线索（未验证）</b>：<code>gpui-pre-macos</code> 是<b>验收依赖</b>不是产品依赖 ——
+            它只为 <code>screenshot</code> feature 提供 <code>render_to_image</code>。
+            移除它能否解开 cocoa 冲突，本次因 yank 问题未走到那一步。<br>
             当前绕过：弹幕层暂不启用（文字会破坏 surface）；备选方案是文字离屏渲染成纹理、
             或原生 NSView 覆盖层。</td></tr>
         <tr><td class="mono">15</td><td><b>主题覆盖必须在窗口创建之后</b><br>
