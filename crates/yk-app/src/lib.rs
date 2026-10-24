@@ -57,7 +57,16 @@ impl AppRoot {
         app
     }
 
+    /// 由外部（open_window 的 build 闭包）注入已创建好的播放器。
+    /// 这样 PlayerView 只在窗口创建时构造一次，不会因为 render 重入而重复 load_file。
+    pub fn with_player(mut self, player: gpui::Entity<player::PlayerView>) -> Self {
+        self.playing = Some(player);
+        self.tried_player = true;
+        self
+    }
+
     pub fn new() -> Self {
+        eprintln!("[app] AppRoot::new 被调用");
         Self {
             theme: YkTheme::dark(),
             feed: {
@@ -134,14 +143,8 @@ impl Render for AppRoot {
             }
         }
         // 验收辅助：设了 YK_VIDEO 且还没进播放器，就直接进（不依赖 screenshot feature）
-        // 只创建一次：cx.new 会触发一次渲染，若条件一直为真就会递归创建，
-        // 表现成 PlayerView::new 被调用多次、每次都重新 load_file（播放重头开始）。
-        #[cfg(target_os = "macos")]
-        if !self.tried_player && self.playing.is_none() && std::env::var("YK_VIDEO").is_ok() {
-            self.tried_player = true;
-            let th = self.theme.clone();
-            self.playing = Some(cx.new(|_| player::PlayerView::new(th)));
-        }
+        // 播放器由 open_window 的 build 闭包注入（见 AppRoot::with_player），
+        // 这里不再创建 —— 在 render 里 cx.new 会递归触发渲染，导致重复 load_file。
 
         let t = &self.theme;
 

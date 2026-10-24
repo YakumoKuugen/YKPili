@@ -73,9 +73,19 @@ fn main() {
                         cx,
                     );
                     yk_ui::gpui_theme::apply(cx, &yk_ui::theme::YkTheme::dark());
-                    match real_items {
-                        Some(items) => cx.new(|_| AppRoot::with_real_data(&items)),
-                        None => cx.new(|_| AppRoot::new()),
+                    // 窗口创建时构造一次播放器（若指定了 YK_VIDEO）。
+                    let theme = yk_ui::theme::YkTheme::dark();
+                    let want_player = std::env::var("YK_VIDEO").is_ok();
+                    let player = if want_player {
+                        Some(cx.new(|_| yk_app::player::PlayerView::new(theme)))
+                    } else {
+                        None
+                    };
+                    match (real_items, player) {
+                        (Some(items), Some(p)) => cx.new(|_| AppRoot::with_real_data(&items).with_player(p)),
+                        (Some(items), None) => cx.new(|_| AppRoot::with_real_data(&items)),
+                        (None, Some(p)) => cx.new(|_| AppRoot::new().with_player(p)),
+                        (None, None) => cx.new(|_| AppRoot::new()),
                     }
                 },
             )
