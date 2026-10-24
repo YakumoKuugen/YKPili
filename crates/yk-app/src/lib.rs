@@ -26,6 +26,7 @@ pub mod http;
 pub mod pages;
 pub mod player;
 pub mod video;
+pub mod video_worker;
 use yk_ui::theme::*;
 
 /// 应用根视图。

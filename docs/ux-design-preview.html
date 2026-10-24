@@ -10075,6 +10075,15 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>外层没有尺寸约束时 <code>size_full()</code> 会退化成 <b>0×0</b>：渲染日志照常打印，
             画面上却什么都没有，很难定位。子视图根元素应写
             <code>.absolute().inset_0()</code>（相对最近的定位祖先）。M3 / M4 各踩一次。</td></tr>
+        <tr><td class="mono">18</td><td><b>macOS IME 报 <code>IMKCFRunLoopWakeUpReliable</code> Mach port 错误</b></td><td>
+          <b>实测日志</b>：<code>error messaging the mach port for IMKCFRunLoopWakeUpReliable</code>。
+          <code>IMK</code> 是 Input Method Kit —— 输入法尝试连接但<b>与系统的 Mach port 通信失败</b>，
+          这很可能是「输入框没光标、英文也打不进」的真正原因，而不是焦点或 hit-test 问题。<br>
+          常见诱因：窗口不是 key window / 应用未激活 / 主 runloop 被占满。
+          <b>下一步</b>：① 确认 <code>window.activate_window()</code> 是否被调用；
+          ② 检查渲染循环是否仍占用主 runloop（已把 pump 移出 UI 线程，需复测）；
+          ③ 若仍失败，用一个最小的 GPUI 输入框 demo（不带视频 surface）验证 IME 是否本来就可用，
+          以区分「GPUI 的 IME 有问题」还是「本项目某个东西干扰了它」。</td></tr>
         <tr><td class="mono">17</td><td><b>每帧 <code>pump()</code> 在 UI 线程上做全量转换，会吃掉输入</b></td><td>
           <b>实测</b>：首帧 <b>721ms</b>，后续每帧 <b>10–25ms</b>。链路是
           <code>mpv render_frame</code> → <code>rgba_to_nv12</code>（92 万像素 CPU 转换）
@@ -10149,7 +10158,7 @@ ul.clean li::marker { color: var(--theme-primary); }
     </table>
     <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
       <div><b>怎么用这张表：</b>写任何一节之前，先扫一遍事实 1–4（决定了「能不能这么画」），
-        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–17 是 M2–M8 实施时新踩出来的；16 是弹幕黑屏（已解），17 是播放性能（待修）。</div></div>
+        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–18 是 M2–M8 实施时新踩出来的；16 弹幕黑屏（已解），17 播放性能（已改线程模型），18 IME（待查）。</div></div>
   </div>
 
   <div class="panel">

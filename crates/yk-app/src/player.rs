@@ -93,9 +93,12 @@ const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
 pub struct PlayerView {
     theme: YkTheme,
     frame: TestFrame,
-    /// 真实视频帧（libmpv 解出）。None 时视频层显示测试帧。
+    /// 视频渲染线程（解码与转换都在它上面，UI 线程只收帧）
     #[cfg(target_os = "macos")]
-    mpv: Option<MpvFrameSource>,
+    worker: Option<crate::video_worker::FrameWorker>,
+    /// 最近一帧（由 worker 产出）
+    #[cfg(target_os = "macos")]
+    current: Option<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>>,
     /// 播放循环是否已启动（render 首帧时启动一次）
     #[cfg(target_os = "macos")]
     loop_started: bool,
@@ -124,21 +127,13 @@ impl PlayerView {
             theme,
             frame: TestFrame::new(1280, 720),
             #[cfg(target_os = "macos")]
-            mpv: {
-                // M8 验证：先固定解一帧，确认 libmpv → NV12 → CVPixelBuffer → surface 全链路。
+            worker: {
                 let path = std::env::var("YK_VIDEO")
                     .unwrap_or_else(|_| "/tmp/mpv-test.mp4".to_string());
-                match MpvFrameSource::open(&path, 1280, 720) {
-                    Some(s) => {
-                        eprintln!("[mpv] 已解码首帧：{path}");
-                        Some(s)
-                    }
-                    None => {
-                        eprintln!("[mpv] 解码失败，退回测试帧：{path}");
-                        None
-                    }
-                }
+                crate::video_worker::FrameWorker::spawn(path, 1280, 720)
             },
+            #[cfg(target_os = "macos")]
+            current: None,
             #[cfg(target_os = "macos")]
             loop_started: false,
             expanded: true,
@@ -170,14 +165,6 @@ impl PlayerView {
         }
     }
 
-    /// 外部强制取一帧（截图验证用）。
-    #[cfg(target_os = "macos")]
-    pub fn pump_now(&mut self) {
-        if let Some(m) = self.mpv.as_mut() {
-            self.play_time = m.pump();
-        }
-    }
-
     fn panel_width(&self) -> f32 {
         if self.expanded {
             INFO_PANEL_EXPANDED
@@ -193,25 +180,28 @@ impl Render for PlayerView {
         // 播放循环：每 16ms 取一帧最新画面并重绘（≈60fps）。
         // libmpv 已在自动播放，这里只负责「把当前帧搬到 surface 上」。
         #[cfg(target_os = "macos")]
-        if !self.loop_started && self.mpv.is_some() {
+        if !self.loop_started && self.worker.is_some() {
             self.loop_started = true;
             cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(16))
                         .await;
+                    // UI 线程只做「取一帧 + 通知重绘」，不碰任何解码/转换。
+                    // 这就是输入与播放互不耦合的关键：即使正在打字，
+                    // 渲染线程照常出帧，UI 也只是轻量地更新一下。
                     let alive = this.update(cx, |view, cx| {
-                        // 输入聚焦时完全不碰 UI 线程的重活：
-                        // pump() 要做 mpv 渲染 + 色彩转换 + 新建 buffer（10-25ms），
-                        // 和输入事件抢同一个线程，表现就是「一输入就卡、音频也卡」。
-                        // 这里直接跳过，代价是输入期间画面暂停（可接受，且符合直觉）。
-                        if view.input_focused {
-                            return;
+                        let mut got = false;
+                        if let Some(w) = view.worker.as_ref() {
+                            if let Some((buf, t)) = w.latest() {
+                                view.current = Some(buf);
+                                view.play_time = t;
+                                got = true;
+                            }
                         }
-                        if let Some(m) = view.mpv.as_mut() {
-                            view.play_time = m.pump();
+                        if got {
+                            cx.notify();
                         }
-                        cx.notify();
                     });
                     if alive.is_err() {
                         break;
@@ -245,7 +235,7 @@ impl Render for PlayerView {
             .child({
                 #[cfg(target_os = "macos")]
                 {
-                    video_layer(&self.frame, self.mpv.as_ref())
+                    video_layer(&self.frame, self.current.as_ref())
                 }
                 #[cfg(not(target_os = "macos"))]
                 {
@@ -421,10 +411,13 @@ fn mock_danmaku() -> DanmakuSet {
 /// 这里先渲染占位。iOS 的真实链路（libmpv 解码 → 纹理）属于 M8 的后续工作，
 /// 解码方案已定：**libmpv**（跨桌面 + 移动端同一套）。
 #[cfg(target_os = "macos")]
-fn video_layer(frame: &TestFrame, mpv: Option<&MpvFrameSource>) -> impl IntoElement {
+fn video_layer(
+    frame: &TestFrame,
+    current: Option<&objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>>,
+) -> impl IntoElement {
     // 有真实帧就用真实的，否则退回 spike 的测试帧
-    let buffer = match mpv {
-        Some(m) => m.buffer(),
+    let buffer = match current {
+        Some(b) => b.clone(),
         None => frame.buffer(),
     };
     div()
