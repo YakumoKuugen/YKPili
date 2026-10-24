@@ -13,6 +13,7 @@
 //! **D-05 规格（用户已调好，不要改）**：
 //! 收起态是 **200px 半宽仍可见**，不是消失；且**面板本体即 hover 热区**。
 
+use gpui::component::input::{Input, InputState};
 use gpui::prelude::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement, *};
 use yk_core::danmaku::{Danmaku, DanmakuSet, LaneAllocator};
@@ -104,6 +105,8 @@ pub struct PlayerView {
     lanes: LaneAllocator,
     /// 最近一次从 mpv 读到的播放位置（秒），弹幕位置靠它算
     play_time: f64,
+    /// 弹幕输入框状态（首次 render 时创建，那时才有 window）
+    danmaku_input: Option<Entity<InputState>>,
 }
 
 impl PlayerView {
@@ -146,6 +149,7 @@ impl PlayerView {
             },
             lanes: LaneAllocator::new(1280.0, 220.0),
             play_time: 0.0,
+            danmaku_input: None,
             state: {
                 let mut st = PlayerState::new();
                 st.duration_secs = 754.0;
@@ -174,7 +178,7 @@ impl PlayerView {
 }
 
 impl Render for PlayerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         eprintln!("[M3] PlayerView::render 被调用");
         // 播放循环：每 16ms 取一帧最新画面并重绘（≈60fps）。
         // libmpv 已在自动播放，这里只负责「把当前帧搬到 surface 上」。
@@ -198,6 +202,16 @@ impl Render for PlayerView {
                 }
             })
             .detach();
+        }
+
+        // 弹幕输入框：首次 render 才有 window，所以在这里创建。
+        // 用 gpui-component 的 Input —— 它内部走 InputHandler，
+        // 支持 IME 组合（marked text），中文输入必需。
+        if self.danmaku_input.is_none() {
+            let state = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("发一条友善的弹幕吧")
+            });
+            self.danmaku_input = Some(state);
         }
 
         let t = self.theme.clone();
@@ -254,7 +268,7 @@ impl Render for PlayerView {
             )
             // ③ 控制栏（deferred priority 30）
             .child(
-                deferred(control_bar(&t, &self.state, cx.listener(
+                deferred(control_bar(&t, &self.state, self.danmaku_input.as_ref(), cx.listener(
                     |this, _: &ClickEvent, window, cx| {
                         this.state.toggle_play();
                         window.refresh();
@@ -421,6 +435,7 @@ fn video_layer(_frame: &TestFrame) -> impl IntoElement {
 fn control_bar(
     t: &YkTheme,
     state: &PlayerState,
+    danmaku_input: Option<&Entity<InputState>>,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let (time_now, time_total) = state.time_texts();
@@ -443,8 +458,13 @@ fn control_bar(
                 .flex()
                 .items_center()
                 .gap(px(SPACE_2))
-                .child(
-                    div()
+                .child(match danmaku_input {
+                    Some(st) => div()
+                        .flex_1()
+                        .h(px(26.))
+                        .child(Input::new(st).appearance(false).bordered(false))
+                        .into_any_element(),
+                    None => div()
                         .flex_1()
                         .h(px(26.))
                         .px(px(SPACE_2))
@@ -454,8 +474,9 @@ fn control_bar(
                         .bg(rgba(0xFFFFFF1A))
                         .text_size(px(FONT_SIZE_MICRO))
                         .text_color(hsla(1.0, 0.0, 1.0, 0.55))
-                        .child("发一条友善的弹幕吧"),
-                )
+                        .child("发一条友善的弹幕吧")
+                        .into_any_element(),
+                })
                 .child(
                     div()
                         .px(px(SPACE_2))
