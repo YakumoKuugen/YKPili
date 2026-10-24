@@ -324,6 +324,35 @@ impl PlayerView {
     ///
     /// 每帧只为「可见窗口」内的弹幕生成元素，不是全量 —— 一场直播可能有上万条，
     /// 全量遍历会直接掉帧。窗口前半段留 15 秒是因为一条弹幕最长要飞这么久。
+    /// 把输入框里的文本作为一条弹幕发出去（本地回显，不接服务端）。
+    fn send_danmaku(&mut self, cx: &mut Context<Self>) {
+        let Some(st) = self.danmaku_input.as_ref() else {
+            return;
+        };
+        let text = st.read(cx).value().to_string();
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+
+        // 时间取当前播放位置（稍加提前量，让它马上进入视野而不是刚好在右边缘外）
+        let time = self.play_time + 0.05;
+        let d = Danmaku {
+            time,
+            mode: yk_core::danmaku::DanmakuMode::Scroll,
+            font_size: 25.0,
+            color: (0xFF, 0xFF, 0xFF),
+            width: Danmaku::estimate_width(&text, 25.0),
+            text,
+        };
+        // 分配轨道后再入列；新弹幕的时间一定比已有的大（当前时刻），
+        // 所以追加到末尾不会破坏「从早到晚」的顺序。
+        let lane = self.lanes.assign(&d);
+        self.danmaku.push((d, lane));
+        eprintln!("[danmaku] 已发送，轨道 {lane}，共 {} 条", self.danmaku.len());
+        cx.notify();
+    }
+
     fn danmaku_layer(&self) -> impl IntoElement {
         let now = self.play_time;
 
@@ -514,6 +543,7 @@ fn control_bar(
                 })
                 .child(
                     div()
+                        .id("danmaku-send")
                         .px(px(SPACE_2))
                         .h(px(26.))
                         .flex()
@@ -522,6 +552,12 @@ fn control_bar(
                         .bg(palette().theme_primary)
                         .text_size(px(FONT_SIZE_MICRO))
                         .text_color(rgb(0xFFFFFF))
+                        .cursor_pointer()
+                        .on_click(cx.listener(
+                            |view, _: &ClickEvent, _window, cx| {
+                                view.send_danmaku(cx);
+                            },
+                        ))
                         .child("发送"),
                 ),
         )
