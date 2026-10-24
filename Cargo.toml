@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/yk-app", "crates/yk-core", "crates/yk-ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+# 底座：GPUI Kit（含 gpui-pre + gpui-fast + gpui-component）
+# 与 spike-gpui-kit 保持一致先用 0.7.3（已验证可编译、可叠层）；
+# 0.8.0 起支持移动端，升级时需复核 theme/motion 等 API。
+gpui = { package = "gpui-kit", version = "0.7.3" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

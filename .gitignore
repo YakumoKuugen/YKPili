@@ -466,3 +466,7 @@ __pycache__/
 
 
 /.vscode/
+
+# Rust
+/target/
+**/*.rs.bk

@@ -1,0 +1,36 @@
+[package]
+name = "yk-app"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "ykpili"
+path = "src/main.rs"
+
+[lib]
+name = "yk_app"
+path = "src/lib.rs"
+
+[dependencies]
+gpui.workspace = true
+yk-ui = { path = "../yk-ui" }
+yk-core = { path = "../yk-core" }
+
+[features]
+# 离屏截图验收：需要 gpui-pre-macos 的 test-support（能拿到 Window::render_to_image）
+screenshot = ["dep:gpui-pre-macos", "dep:image"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-core-video = { version = "0.3.2", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVBase", "CVReturn"] }
+
+[dependencies.gpui-pre-macos]
+version = "0.3.9"
+features = ["test-support"]
+optional = true
+
+[dependencies.image]
+version = "0.25"
+features = ["png"]
+optional = true

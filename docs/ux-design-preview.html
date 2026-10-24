@@ -1944,9 +1944,10 @@ ul.clean li::marker { color: var(--theme-primary); }
     <a href="#mobile">15 · 移动端</a>
     <a href="#landing">16 · 落地清单与里程碑</a>
     <a href="#appendix-a">附录 A · 待定决策</a>
-    <a href="#appendix-a-archive">附录 A 附 · 已结案决策留痕</a>
     <a href="#appendix-b">附录 B · 令牌增补清单</a>
     <a href="#appendix-c">附录 C · 文案与数据格式</a>
+    <a href="#appendix-d">附录 D · GPUI 技术底账</a>
+    <a href="#appendix-e">附录 E · 待核实清单</a>
   </nav>
 
   <main>
@@ -2363,7 +2364,7 @@ ul.clean li::marker { color: var(--theme-primary); }
               <b>不需要</b>再手写「(可见行 + 2) × 列数」的容器池</dd>
           </dl>
           <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
-            <div><b>已裁决（D-02）：署名行需要 18px 预算，<code>COVER_CELL_HEIGHT</code> 目标值定为 184。</b>
+            <div><b>已裁决：署名行需要 18px 预算，<code>COVER_CELL_HEIGHT</code> 目标值定为 184。</b>
               现状 166 已被「108 封面 + 6 间距 + 36 两行标题 + 16 内边距」占满，
               塞不进「UP 主头像 + 昵称 + 时间」这一行。
               实施时有两处<b>必须同步改</b>：<code>crates/yk-ui/src/theme/dimensions.rs</code> 的
@@ -3029,10 +3030,16 @@ ul.clean li::marker { color: var(--theme-primary); }
               但 macOS/Windows 没有可订阅的变更通知，运行期用户改开关后需再调一次
               <code>gpui_base::apply_system_reduce_motion(cx)</code></div></li>
             <li><span class="box"></span><div>尊重系统动态字体，卡片标题放大后仍保持 2 行截断不溢出。
-              <b>GPUI 侧待核实</b>：GPUI <b>没有</b>读取系统字号缩放的 API，只有
-              <code>window.set_rem_size(px(…))</code> 能整体缩放 rem 派生尺寸；而项目 13/15/28 走
-              <code>text_size(px(n))</code>（契约 §1.8）不吃 rem → 动态字体目前只覆盖一部分路径，
-              需自建「字号倍率」开关并对显式像素字号统一乘倍率</div></li>
+              <b>GPUI 不提供读取入口，但平台层有</b>——需要自己接一层「字号倍率」：
+              iOS 读 <code>UIApplication.shared.preferredContentSizeCategory</code>、Android 读
+              <code>configuration.fontScale</code>、Windows 读 <code>UISettings.TextScaleFactor</code>（1.0–2.25）、
+              Linux 读 GSettings 的 <code>text-scaling-factor</code>；
+              <b>macOS 读不到</b>——Dynamic Type 不是 macOS 的特性，macOS 26 的「Preferred Text Size」
+              也不对第三方开放（Apple DTS 明确「That feature can't be used by 3rd party apps」），
+              <code>NSFont.preferredFont</code> 不跟随该设置 → 只能提供应用内字号选项。
+              读到倍率后<b>统一乘到字号与行高上</b>——项目 13/15/28 走 <code>text_size(px(n))</code> 不吃 rem，
+              所以<b>不能只调 <code>window.set_rem_size</code></b>。各平台 API 与限制见
+              <a href="#appendix-e">附录 E · E-11</a>。</div></li>
             <li><span class="box"></span><div>图标按钮必须有 <code>accessibilityLabel</code>（"稍后再看"而非"按钮"）。
               <b>GPUI 写法</b>：API 名是 <code>aria_label</code>，而不是 <code>accessibility_label</code>——
               <code>div().id("watch-later").role(Role::Button).aria_label("稍后再看")</code>。
@@ -3186,7 +3193,6 @@ ul.clean li::marker { color: var(--theme-primary); }
       </div>
     </section>
 
-    
 <!-- ===== 第 12 节 · 施工队产出 ===== -->
 
 <section id="pages">
@@ -3598,7 +3604,7 @@ ul.clean li::marker { color: var(--theme-primary); }
             做周榜只能靠客户端<b>每日落盘快照 + 7 天窗口聚合</b>，
             而首次安装当天必然是<b>空榜</b>——空榜比没有榜更糟（用户会以为功能坏了）。
             因此本期排行榜<b>只有全站榜 / 分区榜两个 tab</b>，
-            <b>周榜列为二期项，见附录 A</b>（二期还需配套「每日快照落盘」开关与首次使用的空态文案）。</div>
+            <b>周榜列为二期项</b>（二期，不在本轮范围）（二期还需配套「每日快照落盘」开关与首次使用的空态文案）。</div>
         </div>
       </div>
 
@@ -3808,7 +3814,7 @@ ul.clean li::marker { color: var(--theme-primary); }
             <code>sort_type</code>（排序，<code>online</code> = 在线人气）· <code>page</code>（页码，每页 20 个直播间）</td>
           <td>接口路径与上述参数名<b>已实测确认</b>；但官方文档中<b>未见该接口的完整返回字段表</b>，
             落地时按实际响应校对后再固化模型</td>
-          <td><span class="tag warn">部分核实</span><br />返回字段待补，列入附录 A 待核项</td>
+          <td><span class="tag warn">部分核实</span><br />返回字段待补，列入附录 E 待核项</td>
         </tr>
         <tr>
           <td><b>在线 / 看过人数</b><br /><span class="tag ghost">卡片角标</span></td>
@@ -4211,7 +4217,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       </tbody>
     </table>
     <p class="note"><b>「周榜快照落盘」不在本期。</b>12.3 已裁决本期只做全站榜 / 分区榜，
-      周榜连同它的每日快照开关一起进二期（附录 A），因此本期设置页不出现该项——
+      周榜连同它的每日快照开关一起进二期（二期，不在本轮范围），因此本期设置页不出现该项——
       避免留一个没有对应功能的开关。</p>
 
     <h3 style="font-size:var(--fs-control);margin-top:var(--space-4)">快捷键</h3>
@@ -4696,8 +4702,8 @@ ul.clean li::marker { color: var(--theme-primary); }
 
   ⑤ 存疑点 / 需要 Lead 拍板 —— 【S1–S7 已全部裁决，本节已按裁决修订完毕】
     [S1] 周榜 → 【已裁决：砍掉】本期排行榜只保留全站榜 / 分区榜两个 tab；周榜（含每日快照落盘开关）
-         作为二期项移入附录 A。正文已删周榜行与周榜 tab 按钮；12.7 也删掉了「周榜快照落盘」设置项，
-         避免留一个没有对应功能的开关。12.3 保留一句「周榜列为二期项，见附录 A」。
+         作为二期项列为二期项。正文已删周榜行与周榜 tab 按钮；12.7 也删掉了「周榜快照落盘」设置项，
+         避免留一个没有对应功能的开关。12.3 保留一句「周榜列为二期项（不在本轮范围）」。
     [S2] 分区内容列表接口 → 【已裁决：接口已查明并写入 12.2.1】
          默认档用 dynamic/region（rid / ps / pn），排序档纳入 newlist_rank
          （order=click|scores|stow|coin|dm、cate_id、pagesize、time_from/time_to 默认近 7 天）。
@@ -4715,14 +4721,14 @@ ul.clean li::marker { color: var(--theme-primary); }
          推荐直播用 webMain/getMoreRecList（参数与返回字段已完整核实，含 online / watched_show /
          area_v2_* / is_ad）；分区直播列表用 second/getList（接口路径与参数名 parent_area_id /
          area_id / sort_type / page 已实测确认，**返回字段表官方文档缺失**，已在正文标注
-         「部分核实」并列入附录 A 待核项，未编造字段名）。
+         「部分核实」并列入附录 E 待核项，未编造字段名）。
          另据实修正了「在线人数」的语义：online 是**在线人气**不是在线人数，
          角标文案统一改为「{n} 看过」（取自 watched_show.text_small）。
     [S7] 设置页四态 → 【已裁决：采纳】12.8「设置页」行改为明确表述：
          **无加载态**（设置项来自本地文件，启动时同步读取）/ **无空态**（固定清单，不存在合法空态）/
          错误态 = 配置文件损坏回退默认并提示 / **无离线态**（不依赖网络）。
     —— 以下为修订后仍存的开放项，需 Lead 在整合时跟进（不影响本节现有内容）：
-    [O1] 附录 A 需收录的条目：① 周榜（依赖客户端每日快照 + 7 天窗口聚合）；
+    [O1] 二期项登记：① 周榜（依赖客户端每日快照 + 7 天窗口聚合）；
          ② second/getList 的完整返回字段表；③ dynamic/tag（分区标签互动列表，需标签 ID 数据源）；
          ④ newlist_rank 排序档的「近 7 天」时间窗是否开放给用户自定义。
     [O2] 12.7 新增的「Bewly 页面 · 收藏」分组依赖 M1-0 补齐 <code>OwnerMid</code> 与 <code>Tid</code>；
@@ -4743,7 +4749,7 @@ ul.clean li::marker { color: var(--theme-primary); }
     · 新增 CSS 类：41 个；新增图标 id：14 个；新增尺寸令牌：29 个（无新增层号）。
     · 新增层号：0 个（GPUI 无 z-index，层号不是令牌；场景先后由挂载位置 + deferred() 决定）。
     · 2026-10 修订（按 Lead 对 S1–S7 的裁决）：
-      ① 12.3 删除周榜 tab 与相关描述，周榜移入附录 A（二期）；
+      ① 12.3 删除周榜 tab 与相关描述，周榜列为二期项（二期）；
       ② 12.2 新增 12.2.1「内容流与排序」，写入 dynamic/region 与 newlist_rank 的参数与返回字段，
          并写明两接口结构差异与三处降级；
       ③ 12.5.2 删除收藏夹整理规则表并改为「规则配置在设置页，收藏夹页只执行」，
@@ -6643,11 +6649,6 @@ ul.clean li::marker { color: var(--theme-primary); }
           作为第二层扩展字段补；组件内是否已有对应项<b>待核实</b>。
        （补充记录：StatusError70/80Brush 由主题计算；FillDisabledBrush 与 TextOnAccentDisabledBrush 若需独立取值，归第二层扩展字段。）
 
-                              
-
-                                
-
-
 【五、存疑点 / 需要 Lead 拍板】
     1. 【图标 id 跨节去重】本节的 15 个 id 中，<b>i-plus / i-chevron-down / i-trash / i-user /
        i-sort / i-filter / i-info 共 7 个与第 12 节重复</b>（图形还不一样）。
@@ -7573,7 +7574,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <div><b>无障碍</b>：状态变化用 <code>aria-live="polite"</code> 播报一次（不是持续）；
         失败卡片获得焦点（<code>role="alertdialog"</code>），Esc 关闭并把焦点还给播放按钮；
         转圈图标对读屏隐藏，状态由 live region 承担。
-        <br><b>与附录 A · D-09 对齐</b>：状态卡片（缓冲 / 失败 / 结束）<b>不是</b>危险确认对话框，
+        <br><b>与第 13 节「危险确认」规范对齐</b>：状态卡片（缓冲 / 失败 / 结束）<b>不是</b>危险确认对话框，
         Esc 走 14.6 的 7 级回退；但其中任何<b>不可撤销</b>的动作（如「退出并清空本视频的观看记录」）
         必须走<b>统一的危险确认对话框</b>，<b>Esc 一律取消</b>、焦点归还触发按钮，
         绝不把 Esc 绑成「确认」。</div></div>
@@ -7930,7 +7931,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       </tbody>
     </table>
     <div class="callout err" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
-      <div><b>需要 Lead 拍板 / 与附录 A 对齐的两条：</b>
+      <div><b>需要 Lead 拍板 / 两条待确认项：</b>
         <br>① <b>渲染管线已就绪，不存在前置条件</b>：视频帧走 <code>surface(cv_pixel_buffer)</code>，
         与控件同管线同帧合成（<code>spike-gpui-kit</code> 已跑通），因此
         <b>弹幕层、悬浮控制栏 88、进度缩略图预览全部可以直接施工</b>，本节不再分「一批 / 二批」。
@@ -8150,15 +8151,15 @@ ul.clean li::marker { color: var(--theme-primary); }
    11)【低】Extension for Bilibili Player 的「长快进秒数」可配（默认 30s 之外可改），
       本节固定 30s，若 Lead 希望做成可配，需在偏好文件里再开一个节点。
 
-⑤ 与附录 A 决策的一致性说明：
-   · **D-01（全程 GPUI，已裁决）**：本节所有「悬浮 / 叠层」结论都在 GPUI 下直接成立，
+⑤ 与已定决策的一致性说明：
+   · **底座（全程 GPUI，已裁决）**：本节所有「悬浮 / 叠层」结论都在 GPUI 下直接成立，
      **不再标注一期 / 二期**；14.10 差距表的优先级列只表示落地先后，不表示底座分期。
-   · **D-08（图标管线）**：**直接用 <code>svg()</code> + <code>Icon</code> 引用 SVG 资源**，
+   · **图标管线**：**直接用 <code>svg()</code> + <code>Icon</code> 引用 SVG 资源**，
      <code>PathIcon</code> / <code>Svg.Skia</code> 的讨论作废，图标字体不采用。
      本节在<b>设计稿层面</b>用内联 SVG sprite，在<b>实现层面</b>用同一套 SVG 文件，
      两者是同一套路径与描边规格的两种载体。
      旧实现里的 emoji（❚❚ ▶ 🔊 🔉 🔇 ⛶ ✕ ⏸）替换后即不再有字形依赖。
-   · **D-09（危险确认对话框 Esc）**：本节所有「二次确认」场景（结束态的「退出并清空历史」、
+   · **危险确认对话框 Esc**：本节所有「二次确认」场景（结束态的「退出并清空历史」、
      弹幕设置的「重置全部」）走统一危险确认对话框，<b>Esc 一律取消</b>、不触发危险动作，
      焦点归还触发按钮。播放器内的普通状态卡片（缓冲 / 失败 / 结束）不是危险对话框，Esc 走 14.6 的 7 级回退。
    · **焦点环**：全节统一 <code>0 0 0 3px var(--theme-30)</code> + <code>inset 0 0 0 1px var(--theme-60)</code>
@@ -9005,7 +9006,7 @@ ul.clean li::marker { color: var(--theme-primary); }
    i-split       —— 双栏 / 折叠屏分栏指示
    其余全部复用契约 §1.5 的既有 sprite id（i-home / i-trend / i-grid / i-trophy / i-live /
    i-chevron-left / i-more / i-search / i-play / i-pause / i-vol / i-danmaku / i-expand / i-wifi-off）。
-   注意：附录 A/B/C 文件**不再重复声明**这三个 symbol，避免整页出现重复 id。
+   注意：附录各节**不再重复声明**这三个 symbol，避免整页出现重复 id。
    （注：底部 Tab 栏的 5 个图标经裁决统一为桌面 Dock 的同一组，
      故本节不再使用 i-layers / i-chat；头像圆 .s15-tabav 随之从实景中移除，
      但类保留在样式表里以备「我的账号」入口复用。）
@@ -9043,49 +9044,6 @@ ul.clean li::marker { color: var(--theme-primary); }
    - 触屏手势补充参考（浏览器侧手势控制对照）：
      https://addons.mozilla.org/zh-CN/firefox/addon/gestify/
 
-④ 存疑点 / 需要 Lead 拍板（**2026-10 修订：D-01 / D-02 / D-03 / D-04 / D-05 / D-06 已全部裁决，
-   本节已按裁决改写；下列为剩余项**）：
-   1) 【已裁决 · 范围】移动端**本轮只出设计口径、不动代码**，实现排 <b>M7（末位）</b>——
-      移动端播放链路在 iOS 侧走 <code>surface(cv_pixel_buffer)</code> + <code>gpui-pre-apple</code>；
-      <b>Android 走 <code>gpui-pre-mobile</code>（Vulkan / GL ES，实验性，见 15.1）</b>。桌面端真实现仍在
-      <code>YKPili.Desktop/Platforms/Mac/</code>）。本节 15.7 的令牌差异表即下一轮的施工依据。
-      → 见附录 A 的 D-04（已裁决）。
-   2) 【已裁决 · 底座】<b>全程 GPUI</b>（契约 §0）：令牌层、卡片信息层、
-      状态四态、导航骨架、移动端 Tab 与安全区）；<b>没有「一期 / 二期」之分</b>。
-      <b>第 06 节的叠层结论（悬浮控制栏 88）直接成立</b>。
-      对本节的影响：15.5 的手势与 15.6 的横屏控制栏<b>直接按悬浮控制栏（88）口径</b>
-      **不需要「让位」的中间态**。
-      → 见附录 A 的 D-01（已裁决）。
-   3) 【已裁决 · 单元格高】文档按「<b>现状 166 / 目标 184</b>」两栏写；
-      <b>本轮不改代码</b>（<code>CoverCellHeight</code> 与
-      <code>crates/yk-ui/src/theme/dimensions.rs</code> 的 <code>CoverCellHeight</code> 都保持 166），
-      M1 实施时<b>两处必须同步改</b>。→ 见附录 A 的 D-02（已裁决）。
-   4) 【已裁决 · 面板收起态】<b>桌面端保留 200px 半宽</b>（面板本体即 hover 热区，
-      鼠标进入展开到 400px、移出延迟 220ms 收回）——<b>该定稿保持不变</b>。
-      本节 15.1 只改<b>移动端那一列</b>：移动端<b>不依赖 hover 唤出</b>，
-      由<b>常驻按钮与手势</b>承担，播放页内用「信息」Tab。
-      <b>这是移动端自己的规则，不是桌面端规则的例外。</b>
-      → 见附录 A 的 D-05（已裁决）。
-   5) 【已裁决 · 一级导航】两端统一为「<b>首页 / 热门 / 分区 / 排行 / 直播</b>」，
-      <b>认知一致性优先于平台习惯</b>。本节 15.2 的两个实景与说明表已按此改写。
-   6) 【已裁决 · 令牌落地】<b>不新建 <code>mobile.rs</code></b>——
-      移动端令牌全部进 <code>crates/yk-ui/src/theme/dimensions.rs</code>，用 <code>MOBILE_*</code> 前缀区分，
-      保持单一令牌源。15.7 末尾的实现方式已按此改写。
-   7) 【已裁决 · 折叠屏】展开态走「<b>左列表 + 右详情</b>」的列表-详情模式，
-      <b>不复用</b>桌面 400px 信息面板（会吃掉整个右半）。15.6 已按此写明理由。
-   8) 【已裁决 · 缩略图预览】上下滑进度<b>本轮只给 HUD 数字</b>；
-      缩略图预览依赖 <code>player/videoshot</code>（项目无此 API），<b>已登记为二期项</b>。
-   9) 【剩余 · 播放器容器】移动端播放页是「竖屏播放页 + 横屏全屏」<b>两态</b>，
-      还是「直接全屏 + 提示旋转」一种形态？本节按两态写；若只做一种，
-      15.6 的横屏实景可复用为唯一形态。
-   10) 【剩余 · 安全区落地形式】SafeArea 四值是运行期量，无法作为编译期常量。
-      附录 B 按「<b>默认值 0 + 运行期覆盖</b>」两层给出。GPUI 侧的取值来源已核实：
-      <code>WindowInsets { safe_area, ime }.effective()</code>（<code>platform.rs:1155 / 1167</code>）
-      与窗口级入口 <code>window.fully_visible_bounds()</code>（<code>window.rs:2941</code>）。
-      落地形式仍待 Lead 确认（建议：<code>theme/dimensions.rs</code> 放默认 0/0/0/0 与
-      <code>SAFE_CORNER_RADIUS 44</code>，运行期值由壳层从上述入口取值后传给视图）。
-      <b>待核实</b>：<code>PlatformWindow::insets()</code> 目前是 <code>pub(crate)</code>，
-      应用层若要订阅 <code>on_insets_changed</code> 需要一层封装。→ 见附录 A 的 D-07（可延后）。
 -->
 
 <!-- ==================== 16 落地清单 ==================== -->
@@ -9153,6 +9111,18 @@ ul.clean li::marker { color: var(--theme-primary); }
                 卡住就退回「移动端不支持发弹幕」并记入二期；<br>
                 ⑤ <b>无障碍</b>：VoiceOver / TalkBack 能读到播放器控件——同样属官方未完成项，需实测；<br>
                 ⑥ <b>功耗与热</b>：连续播放 30 分钟，设备温度与掉电速率可接受（Vulkan 路径需重点看）
+              </td>
+            </tr>
+            <tr><td class="mono">M8 前置条件</td>
+              <td><b>环境不满足就无法开工</b>（2026-10 实测）</td>
+              <td>—</td>
+              <td>
+                · <b>iOS</b>：macOS + Xcode 15+ + iOS SDK，<code>rustup target add aarch64-apple-ios</code>；<br>
+                · <b>Android</b>：Android SDK + NDK r25+ + <code>cargo-ndk</code>，<code>rustup target add aarch64-linux-android</code>；<br>
+                · <b>依赖对齐</b>：<code>gpui-pre-mobile</code> 钉 <code>gpui-pre =0.3.4</code>，
+                Kit 0.8.0 是 0.3.9 —— 三者必须同时对齐，否则 <code>App</code> / <code>Window</code> 类型不兼容。<br>
+                <b>当前状态</b>：一个都不满足（只有 darwin target，无 Xcode / Android 工具链，
+                iOS target 也因组件下载失败装不上）。
               </td></tr>
           </tbody>
         </table>
@@ -9227,588 +9197,20 @@ ul.clean li::marker { color: var(--theme-primary); }
       </div>
     </section>
 
-    
 <!-- ===== 附录 · 施工队产出 ===== -->
 
 <section id="appendix-a">
   <div class="sec-head">
     <h2><span class="sec-num">附录 A</span>待定决策表</h2>
-    <p>本表<b>只收录尚未拍板的决策</b>——已经拍板的不再留在本章，它们的结论已落进正文对应章节，
-      详细依据移到文末 <a href="#appendix-a-archive">附录 A 附 · 已结案决策留痕</a>（仅供追溯）。<br>
+    <p>本表<b>只收录尚未拍板的决策</b>。已经拍板的决策已按结论落进正文对应章节，
+      不再在文档里重复——文档只保留「现状」与「要做什么」，不保留决策过程。<br>
       标签约定：<span class="tag err">阻塞</span> = 尚未拍板且会卡住具体章节的定稿；
       <span class="tag warn">可延后</span> = 不阻塞其它工作，可放到下一轮。</p>
   </div>
 
   <div class="callout ok" style="margin-top:16px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-    <div><b>当前没有未决项。</b>所有会改变实现路径的决策都已拍板，结论已落进正文对应章节；
-      依据见 <a href="#appendix-a-archive">附录 A 附 · 已结案决策留痕</a>。<br>
-      最近一条结案的是 <b>D-10（Android 端怎么办）</b>：早先依据本地 <code>gpui-kit 0.7.3</code>
-      的依赖树判断「GPUI 没有 Android 平台层」，<b>该判断已作废</b>——GPUI Kit 0.8.0 起
-      通过 <code>gpui-mobile</code> 的兼容包 <code>gpui-pre-mobile</code> 支持移动端，
-      Android arm64 / API 26+ / Vulkan 可用（实验性）。详见附录 A 附。</div></div>
-</section>
-
-<!-- ==================== 附录 A 附 · 已结案决策留痕 ==================== -->
-<section id="appendix-a-archive">
-  <div class="sec-head">
-    <h2><span class="sec-num">附录 A 附</span>已结案决策留痕</h2>
-    <p><b>这里不是待定项</b>，是已经拍板的决策及其详细依据，供追溯「当初为什么不选另一条路」。
-      结论请直接看正文对应章节；下面的详细论证只在需要考古时读。</p>
-  </div>
-
-  <div class="panel">
-    <h3>结案索引</h3>
-    <table>
-      <thead><tr><th>编号</th><th>决策</th><th>结论</th><th>落地的正文</th></tr></thead>
-      <tbody>
-        <tr><td class="mono">D-01</td><td>底座选型</td><td><b>全程 GPUI</b>，不做分期</td><td>第 01 / 02 节 + 全篇</td></tr>
-        <tr><td class="mono">D-02</td><td>卡片 CellHeight</td><td>目标 <b>184</b>（现状 166 不动），归 M1 实施</td><td>第 04 节</td></tr>
-        <tr><td class="mono">D-03</td><td>信息面板 Tab</td><td><b>评论 / 弹幕 / 选集</b>；「推荐」本轮不做</td><td>第 06 / 14 节</td></tr>
-        <tr><td class="mono">D-04</td><td>移动端范围</td><td>本轮只出设计口径、不动代码；M7 排末位</td><td>第 15 节</td></tr>
-        <tr><td class="mono">D-05</td><td>面板收起态</td><td><b>保留 200px 半宽 + 面板本体即 hover 热区</b></td><td>第 06 / 08 / 09 / 14 节</td></tr>
-        <tr><td class="mono">D-06</td><td>令牌缺口</td><td>全部补齐，M0 硬前置</td><td>第 02 节 + 附录 B</td></tr>
-        <tr><td class="mono">D-07</td><td>安全区令牌形式</td><td>不新建字典，进同一 <code>dimensions.rs</code> 用 <code>MOBILE_*</code> 前缀；可延后到 M7</td><td>第 15 节 + 附录 B</td></tr>
-        <tr><td class="mono">D-08</td><td>图标管线</td><td><b>GPUI 原生 <code>svg()</code></b>；PathIcon / Svg.Skia / 图标字体三条路<b>整体作废</b></td><td>第 13 节</td></tr>
-        <tr><td class="mono">D-09</td><td>危险确认 Esc</td><td>允许 Esc 关闭（= 取消）；初始焦点落「取消」+ 主按钮文案自解释</td><td>第 13 节</td></tr>
-        <tr><td class="mono">D-10</td><td>Android 端</td><td><b>Android 可用</b>：<code>gpui-pre-mobile</code>（<code>gpui-mobile</code> 兼容 fork），arm64 / API 26+ / Vulkan，<b>实验性</b>。早先「无平台层」的判断依据是 0.7.3 旧依赖，已作废</td><td>第 15 节 + 附录 A 附后文</td></tr>
-      </tbody>
-    </table>
-    <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
-      <div><b>D-10 的结论改过一次，原因是版本信息过时。</b>
-        早先依据本地 <code>spike-gpui-kit</code> 的依赖树（<code>gpui-kit 0.7.3</code> / <code>gpui-pre 0.3.9</code>）
-        判断「GPUI 没有 Android 平台层」，因而把它列为阻塞项。
-        用户指出 GPUI Kit 最新版已支持移动端后核实：
-        官方文档（<a href="https://gpui-kit.com/zh-CN/docs/mobile/">gpui-kit.com 移动端指南</a>，当前 v0.8.0）
-        与 <a href="https://github.com/longbridge/gpui-mobile">gpui-mobile 仓库</a>均确认
-        Android arm64 / API 26+ / Vulkan 可用。<br>
-        <b>但三条限制仍然成立</b>：① 实验性（IME 组合、无障碍、移动生命周期钩子未完成）；
-        ② GPUI Kit 侧只验证过一个 Chat 场景，<b>其他组件与完整布局未在移动端验证</b>——
-        我们文档里的播放浮窗、弹幕层、四态、虚拟列表都不在那批验证里；
-        ③ 移动端定位是「在原生界面里嵌入 GPUI 视图」，不是整屏接管。
-        另有一条工程约束：<code>gpui-pre-mobile</code> 钉在 <code>gpui-pre =0.3.4</code>，
-        与 Kit 0.8.0 的 0.3.9 不一致，接入前必须版本对齐。</div></div>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>D-08 的结论在 GPUI 裁决后变过一次。</b>原结论是「转 PathIcon、不引 Svg.Skia」——
-        那是 Avalonia 时代的选择。切到 GPUI 后原生支持 <code>svg()</code>，
-        直接引用 SVG 资源即可，PathIcon / Svg.Skia / 图标字体三条路<b>全部作废</b>。
-        下面保留的 D-08 详细论证用的是旧口径，<b>只作历史记录，不要照做</b>。</div></div>
-  </div>
-
-  <!-- ==================== 以下为已结案决策的详细依据 ==================== -->
-  <div class="panel">
-    <h3>读之前请注意：部分论证已随裁决作废</h3>
-    <ul class="clean">
-      <li><b>D-01</b> 的「推荐」行写的是<b>「一期 Avalonia / 二期只迁播放浮窗」</b>，
-        那是被用户否决的旧方案；最终裁决是<b>全程 GPUI</b>（见上方结案索引）。</li>
-      <li><b>D-08</b> 的结论是「转 PathIcon、不引 Svg.Skia」，那是 Avalonia 时代的选择；
-        GPUI 原生支持 <code>svg()</code>，该结论<b>已作废</b>。</li>
-      <li>其余条目（D-02 / D-03 / D-04 / D-05 / D-06 / D-07 / D-09）的结论仍然有效，
-        只是不再需要在附录里重复一遍。</li>
-    </ul>
-    <p class="note">换句话说：<b>查结论看正文，查「为什么不选别的」才看下面。</b>
-      下面的文字保留原貌，没有按新裁决重写——那样会抹掉决策过程。</p>
-  </div>
-
-  <!-- ==================== D-01 ==================== -->
-  <div class="panel">
-    <h3>D-01 · 底座：Avalonia 12 还是 GPUI <span class="tag ok">已裁决</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td>项目底座继续 Avalonia 12，还是切换到 GPUI（Metal renderer）？
-          第 01 节的 callout 已写「2026-10 技术选型变更：GPUI Metal renderer 把视频帧（CVPixelBuffer）
-          与控件合成在同一条渲染管线，控件可以压在画面上、也可以做位移与透明过渡」，
-          <b>但仓库现状仍然是 Avalonia</b>：<code>YKPili/Styles/**</code> 全是 Avalonia XAML
-          （6 个令牌字典 + 4 个样式字典 + <code>GlassSurface.axaml</code>），
-          <code>YKPili.Desktop/</code> 跑 libVLC + <code>MacNativeControlHost</code>。</td></tr>
-        <tr><td><b>候选 A</b></td><td><b>维持 Avalonia 12</b>——令牌、样式、视图、虚拟列表全部保留；
-          代价是原生视频视图无法被 Avalonia 控件覆盖，<b>控制栏必须让出独立高度</b>
-          （现有 <code>PlayerControlBarHeight 50</code> 就是这个口径的产物）。</td></tr>
-        <tr><td><b>候选 B</b></td><td><b>切换 GPUI</b>——控件可压在画面上、可做位移与透明过渡，
-          第 06 节的「浮层面板 400px + 控制栏悬浮 + 面板宽度动画」才成立；
-          代价是<b>整个样式层与视图层重写</b>（Avalonia 的 <code>DynamicResource</code>、
-          <code>TryFindResource(key, ActualThemeVariant, …)</code>、样式选择器语法全部要换）。</td></tr>
-        <tr><td><b>候选 C</b></td><td><b>混合</b>——桌面留 Avalonia、移动端用 GPUI。
-          双底座双维护，<code>IPlatformMediaPlayer</code> 要有两套宿主实现，
-          第 15 节的手势与叠层规范要写两遍。<b>不推荐</b>。</td></tr>
-        <tr><td><b>推荐</b></td><td><b>B（GPUI），但分两期</b>——<b>已裁决</b>：<br>
-          <b>一期</b>：维持 Avalonia 12，做<b>与底座无关</b>的部分——令牌层、卡片信息层、
-          状态四态、导航骨架（顶栏 / 分类 / Dock）、移动端 Tab 栏与安全区；<br>
-          <b>二期</b>：只迁 GPUI，且<b>只重写「播放浮窗」这一个场景</b>。<br>
-          理由：播放浮窗是唯一依赖叠层合成的能力，把迁移面收敛到一处，
-          风险与工作量都可控；其余部分推迟迁移不会返工。<br>
-          <b>口径声明（写死）</b>：<b>仓库现状 = Avalonia 12</b>；
-          <b>第 06 节的「面板可压在画面上 / 控制栏悬浮」是二期目标态，不是现状</b>。
-          一期实现时，凡依赖叠层合成的效果一律按 Avalonia 12 的「让位」口径落地
-          （控制栏占独立高度 <code>PlayerControlBarHeight 50</code>），
-          并在代码注释里标出二期可切换点，避免二期改回时找不到地方。</td></tr>
-        <tr><td><b>影响面</b></td><td><b>一期不动</b>：<code>YKPili/Styles/Tokens/**</code>、
-          <code>YKPili/Views/HomeView.axaml</code>、卡片信息层、四态、导航骨架、移动端壳层。<br>
-          <b>二期才动</b>：<code>YKPili/Styles/**</code> 的样式字典（10 个 axaml）、
-          <code>YKPili/Views/VideoPlayerView.axaml</code>、<code>YKPili/Platforms/**</code>、
-          <code>YKPili.Android/</code>、<code>YKPili.iOS/</code>、
-          第 06 节全部、第 15 节 15.5 / 15.6、附录 B 的控制栏高令牌。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag ok">已裁决，不再阻塞</span>
-          裁决把原来的阻塞项拆成两段：<br>
-          ① <b>一期照常做</b>——令牌层、卡片信息层、状态四态、导航骨架、移动端 Tab 栏与安全区，
-          这些<b>与底座无关</b>，不必等 GPUI；<br>
-          ② <b>二期待做</b>——第 06 节「浮层面板 + 控制栏悬浮」的可施工实现，
-          第 15 节 15.5「手势压在画面上」与 15.6「横屏全屏控制栏重排」的叠层版本。<br>
-          <span class="tag ok">不阻塞</span> 附录 B 的令牌补齐（M0 硬前置，见 D-06）。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>裁决的可观测症状（已消解）</b>：控制栏高度在文档里出现两个值——
-        <code>dimensions.rs</code> 写 <code>PlayerControlBarHeight 50</code>（让位口径），
-        第 08 节写「单条 88px」（悬浮口径）。
-        <b>裁决的处理不是合并成一个数，而是拆成两个具名令牌</b>
-        （<code>PlayerControlBarHeight 50</code> / <code>PlayerControlBarHeightOverlay 88</code>，
-        见附录 B.2 与 D-06）：<b>两个底座各自成立的口径，拆名后不再是冲突。</b>
-        一期写 50，二期切 88，切换点就是换资源键。</div></div>
-  </div>
-
-  <!-- ==================== D-02 ==================== -->
-  <div class="panel">
-    <h3>D-02 · 卡片 CellHeight 是否从 166 加到 184（署名行预算） <span class="tag ok">已裁决</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td>第 04 节「封面卡片解剖」列了六层结构，第 6 层是
-          <b>「署名行：UP 头像 18 + 昵称 + 时间（Caption 12 / TextQuaternary）」</b>，
-          但现有几何<b>没有给它留预算</b>：<code>CellHeight 166 = 108(封面) + 6(间距)
-          + 36(两行标题 13/18) + 16(内边距)</code>，署名行无处安放。
-          候选是加到 <b>184</b>（+18，正好一行署名行）。</td></tr>
-        <tr><td><b>候选 A</b></td><td><b>166 → 184（+18）</b>——署名行 18 = Caption 12 的行高 16 + 2 呼吸位。</td></tr>
-        <tr><td><b>候选 B</b></td><td><b>166 → 190（+24）</b>——署名行 18 + 行间距 6，与第 04 节
-          「标题区 6」的间距口径一致。</td></tr>
-        <tr><td><b>候选 C</b></td><td><b>不加行</b>——把 UP 主挤进标题区，但标题已占满 2 行
-          （<code>MaxLines=2</code>），会与第 04 节「2 行截断」冲突。</td></tr>
-        <tr><td><b>候选 D</b></td><td><b>只在移动端加</b>（桌面保持 166）——会让两端卡片信息层不一致，
-          且第 11 节「落地顺序」第 2 步是<b>桌面端</b>的卡片信息层。</td></tr>
-        <tr><td><b>推荐</b></td><td><b>A（184）——已裁决采纳</b>。理由：<br>
-          ① <code>HomeViewModel.CellHeight</code> 是 <code>const double 166</code>，
-          改它<b>只改一处</b>——<code>HomeView.axaml.cs</code> 的 <code>RepositionAll</code>、
-          <code>RecalculateOnResize</code>、<code>ContainerCanvas.Height</code>
-          全部从 <code>HomeViewModel.CellHeight</code> 取值，<b>不会漏改</b>；<br>
-          ② 容器池推导 <code>(可见行 + 2) × 列数</code> 随之自动变化，<b>逻辑不用动</b>；<br>
-          ③ 184 保持与 166 同一「4px 网格 + 2px 微调」的既有惯例。<br>
-          <b>本轮不改代码</b>：<code>HomeViewModel.CellHeight</code> 与
-          <code>dimensions.rs</code> 的 <code>CoverCellHeight</code> <b>都保持 166 不动</b>；
-          文档一律按「<b>现状 166 / 目标 184</b>」两栏写，实施留到 M1。</td></tr>
-        <tr><td><b>影响面</b></td><td><code>HomeViewModel.CellHeight</code>、
-          <code>dimensions.rs</code> 的 <code>CoverCellHeight</code>、
-          <code>HomeView.axaml.cs</code> 的 <code>CreateCoverControl</code>（要新增署名行控件与
-          <code>CoverItem.UpName / UpAvatar</code> 绑定）、
-          第 04 节「单元格几何约束」表、第 11 节落地顺序第 2 步、第 15 节 15.7 令牌差异表。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag ok">已裁决；实施归 M1</span>
-          <b>M1 实施时的验收条件（两处必须同步改）</b>：<br>
-          ① <code>HomeViewModel.CellHeight</code>：<code>const double 166</code> → <code>184</code>；<br>
-          ② <code>dimensions.rs</code> 的 <code>CoverCellHeight</code>：<code>166</code> → <code>184</code>；<br>
-          <b>只改一处 = 返工</b>——该文件的注释已写明「与 HomeViewModel 的布局常量保持同一来源，
-          避免样式与布局各改一半」。<br>
-          <br>该决策本身不阻塞任何章节的定稿；第 04 节与第 15 节都按
-          「<b>现状 166 / 目标 184</b>」写。<br>
-          <span class="tag ok">不阻塞</span> 单元格宽度 208 与列数推导
-          （<code>floor(视口宽 / 208)</code> 只吃宽度）。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>M1 实施清单（Lead 裁决，本轮只记不改）</b>：<br>
-        ① <code>HomeViewModel.CellHeight</code> 166 → 184；<br>
-        ② <code>dimensions.rs</code> 的 <code>CoverCellHeight</code> 166 → 184；<br>
-        ③ <code>HomeView.axaml.cs</code> 的 <code>CreateCoverControl</code> 增加署名行控件，
-        绑定 <code>CoverItem.UpName / UpAvatar / PubDate</code>；<br>
-        ④ 验证 <code>RecalculateOnResize</code> 在新行高下仍能正确推导可见行数。<br>
-        <b>顺带解决的隐藏依赖</b>：署名行要显示 UP 主，得先有
-        <code>CoverItem.UpName / UpAvatar</code>。
-        而 <code>RecommendVideoItem</code> 已经拿到了 <code>Owner.Name</code> 与
-        <code>Owner.Face</code>，<b>只是没搬到 <code>CoverItem</code></b>——
-        这是纯搬运，不需要新接口。</div></div>
-  </div>
-
-  <!-- ==================== D-03 ==================== -->
-  <div class="panel">
-    <h3>D-03 · 第 06 节信息面板 Tab 第三项：「选集」还是「推荐」 <span class="tag ok">已裁决</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td><b>同一份文档里两处不一致</b>：第 06 节播放器实景的 Tab 写的是
-          <b>「评论 / 弹幕 / 推荐」</b>，而同一节的代码注释写着
-          「参考图 2 的 Tab 为『评论 / 弹幕 / <b>选集</b>』，『推荐』保留为第四项（<b>待定</b>）」。
-          参考图与正文不一致，必须二选一。</td></tr>
-        <tr><td><b>候选 A</b></td><td>第三项改成 <b>「选集」</b>——严格对齐参考图，三项制。</td></tr>
-        <tr><td><b>候选 B</b></td><td>保持 <b>「推荐」</b>，「选集」降为第四项。</td></tr>
-        <tr><td><b>候选 C</b></td><td>第三项 <b>「选集」</b>、第四项 <b>「推荐」</b>，四项并列。</td></tr>
-        <tr><td><b>候选 D</b></td><td>第三项做成<b>动态标签</b>：有合集显示「选集 P3」，无合集显示「推荐」。</td></tr>
-        <tr><td><b>裁决</b></td><td><b>定案：三项「评论 / 弹幕 / 选集」，「推荐」本轮不做</b>。<br>
-          理由：<br>
-          ① <b>「选集」本轮就能做</b>——<code>VideoInfoData</code> 已有 <code>pages</code>
-          （分 P 列表，含 <code>cid / page / part</code>），多 P 切换只需调 <code>GetPlayUrlAsync</code>；
-          ② <b>「推荐」本轮做不了</b>——相关推荐需要另一个接口，本轮接口清单里没有，
-          硬做只会得到一个点了没反应的 Tab；
-          ③ 所以第三项必须是「选集」，且<b>按数据条件显隐</b>：
-          <code>VideoInfoData.Pages.Count &gt; 1</code> 时才出现「选集」，
-          单 P 视频隐藏该 Tab（否则「选集」只有一个 P，点进去等于没东西）。</td></tr>
-        <tr><td><b>影响面</b></td><td>第 06 节播放器实景与正文、第 06 节面板内部结构、
-          <code>VideoInfoResponse</code>（若要显示合集标题需补 <code>ugc_season</code>）、
-          第 15 节 15.1「信息面板结构分叉」的落地形态（播放页内 Tab 的项数随之定为 3）。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag ok">已裁决，不再阻塞</span>
-          第 06 节的定稿（三项制已定）与右侧面板实现。<br>
-          「推荐」<b>降级为二期项</b>，已登记进本附录末尾的「二期项登记表」，
-          与「周榜」同批排期。<br>
-          <span class="tag ok">不阻塞</span> 评论区与弹幕区、面板上方的信息 / UP 主 / 互动区。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>裁决落地清单</b>（Lead 改主文档第 06 节）：<br>
-        ① 第 06 节播放器实景的第三个 Tab 由「推荐」改为「<b>选集</b>」，
-        并删除「推荐」Tab —— <b>不要留一个空 Tab</b>；<br>
-        ② 第 06 节代码注释里那句「『推荐』保留为第四项（待定）」改写为
-        「<b>三项制：评论 / 弹幕 / 选集；选集按 <code>pages.Count &gt; 1</code> 显隐；推荐为二期项</b>」；<br>
-        ③ 「推荐」登记进本附录末尾的二期项登记表（与周榜同批）。<br>
-        ④ 移动端播放页的信息 Tab 同步为 3 项（见第 15 节 15.1）。</div></div>
-  </div>
-
-  <!-- ==================== D-04 ==================== -->
-  <div class="panel">
-    <h3>D-04 · 移动端是否纳入本轮范围 <span class="tag ok">已裁决</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td><code>YKPili.slnx</code> 已经挂着
-          <code>YKPili.Android</code> 与 <code>YKPili.iOS</code> 两个可部署工程
-          （Android 侧 <code>MainActivity</code> 已处理
-          <code>ConfigurationChanges.Orientation | ScreenSize | UiMode</code>，
-          iOS 侧 <code>Info.plist</code> 已声明 iPhone + iPad、MinimumOSVersion 13.0、四方向）。
-          <b>工程骨架在，界面骨架不在</b>：共享层 <code>MainView.axaml</code> 只有
-          登录页 / 首页 / 播放器三者，没有导航容器、没有二级页栈。
-          移动端是本轮做，还是只出设计口径？</td></tr>
-        <tr><td><b>候选 A</b></td><td><b>全量纳入</b>——含 Android/iOS 原生播放器实现、
-          移动端壳层、Tab 栏、二级页、播放器页、手势、安全区。</td></tr>
-        <tr><td><b>候选 B</b></td><td><b>只做壳 + 导航 + 列表</b>，播放器在移动端先留占位
-          （沿用 <code>NullMediaPlayer</code>）。</td></tr>
-        <tr><td><b>候选 C</b></td><td><b>本轮只出设计口径</b>——第 15 节作为预留规范落文档，
-          不动任何移动端代码。</td></tr>
-        <tr><td><b>推荐</b></td><td><b>C</b>。理由：<br>
-          ① <b>移动端播放链路目前跑不起来</b>——<code>YKPili/Platforms/</code> 只有
-          <code>IPlatformMediaPlayer</code> 接口与全 no-op 的 <code>NullMediaPlayer</code>；
-          真正的实现 <code>MacMediaPlayer</code> 在 <code>YKPili.Desktop/Platforms/Mac/</code>，
-          <b>Android / iOS 侧没有</b>。这不是一个 UI 迭代，是<b>以周计</b>的缺口；<br>
-          ② D-01 底座未拍板时写移动端视图代码有<b>返工风险</b>
-          （GPUI 与 Avalonia 的控件模型完全不同）；<br>
-          ③ 第 15 节的设计口径（导航、热区、安全区、手势、令牌分叉）<b>独立于实现</b>，
-          先落文档不是浪费——它同时是 D-01 第二期的输入。<br>
-          若 Lead 选 A，则移动端播放器实现应<b>与 D-01 合并决策</b>（底座一换，
-          Android/iOS 的播放器宿主全部重写）。</td></tr>
-        <tr><td><b>影响面</b></td><td><code>YKPili.Android/</code>、<code>YKPili.iOS/</code>、
-          <code>YKPili/Views/MainView.axaml</code>（要加壳层）、
-          <code>YKPili/Platforms/</code>、第 15 节整节、第 11 节落地清单。</td></tr>
-        <tr><td><b>裁决</b></td><td><b>C —— 已裁决：本轮只出设计口径，不动代码</b>。
-          移动端实现排 <b>M7 里程碑（末位）</b>。<br>
-          理由（不变）：<code>Platforms/</code> 只有 <code>NullMediaPlayer</code>，
-          Android/iOS 没有原生播放器实现——这是一个以周计的缺口，不是 UI 迭代；
-          且第 15 节的设计口径独立于实现，先落文档不浪费。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag ok">已裁决；M7 排末位</span>
-          阻塞「移动端播放器」「移动端二级页栈」两条工作项的<b>排期</b>，
-          不阻塞任何桌面端工作，也不阻塞令牌层与第 05 节四态。<br>
-          <b>本轮交付物 = 第 15 节（设计口径）+ 附录 B.1 的 13 条移动端令牌清单</b>，
-          下一轮照单建令牌即可，不需要重新调研。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>选 C 时第 15 节仍然有价值</b>：它把「哪些桌面规范能复用、哪些必须分叉」
-        写成了可核对的表（见 15.7），并把移动端需要的令牌一次性列进附录 B。
-        下一轮开工时，<b>不需要重新做调研</b>，照着附录 B 建令牌即可。</div></div>
-  </div>
-
-  <!-- ==================== D-05 ==================== -->
-  <div class="panel">
-    <h3>D-05 · 面板收起态：保留 200px 半宽，还是完全隐藏 <span class="tag ok">已裁决</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td>第 06 / 08 节约定「右侧 hover 唤出为 400px，移出收回为 200px」。
-          200px 半宽态的作用是「不遮挡视频的同时露出一点信息（标题 + 头像）」。
-          候选是保留它，还是改成<b>完全隐藏</b>。</td></tr>
-        <tr><td><b>候选 A</b></td><td><b>保留 200px 半宽</b>（现状文档口径）——面板常驻半宽，
-          hover 展开到 400px。</td></tr>
-        <tr><td><b>候选 B</b></td><td><b>完全隐藏（0px）</b>——面板常态不占位，唤出时以浮层盖在视频右侧，
-          <b>视频尺寸全程不变</b>。</td></tr>
-        <tr><td><b>候选 C</b></td><td>保留但降到 120px，只留一个把手。</td></tr>
-        <tr><td><b>候选 D</b></td><td>保留但改成「只显示头像 + 标题一行」。</td></tr>
-        <tr><td><b>裁决</b></td><td><b>A（保留 200px 半宽）—— 已裁决</b>。<br>
-          <b>恢复 Lead 误裁前的原设计</b>：收起态面板收回到一半宽度（<b>200px</b>），
-          内容仍按 400px 排版、<b>右半被裁掉</b>，
-          左侧信息（标题 / UP 主 / 互动）<b>仍可见</b>；
-          <b>面板本体即 hover 热区</b>——鼠标进入展开到 400px，
-          移出延迟 220ms 收回 200px。<br>
-          <b>为什么保留</b>：<br>
-          ① 这是<b>用户早已调好的设计</b>，不是待裁决项——
-          上一轮以「移动端没有 hover、200px 半宽不划算」为由改成「完全隐藏 400→0」，
-          等于<b>删掉了用户已定稿的交互</b>，属于越权；<br>
-          ② <b>「移动端没有 hover」只是第 15 节的适配问题</b>，
-          <b>不构成改动桌面端定稿的理由</b>——移动端在第 15 节单独处理
-          （见 15.1「移动端不依赖 hover 唤出，由常驻按钮与手势承担」）；
-          <b>那是移动端自己的规则，不是桌面端规则的例外</b>。<br>
-          <b>结论</b>：本决策<b>不改动既有章节</b>，第 06 / 08 / 09 节的现有表述保持不变。</td></tr>
-        <tr><td><b>可发现性兜底</b></td><td>面板收起后仍可见 200px，<b>可发现性由三条兜底</b>：<br>
-          ① <b>面板本体即 hover 热区</b>（主入口）——鼠标进入展开、移出延迟 220ms 收回；<br>
-          ② <b>常驻骑边界按钮</b>（<code>LayerPanelToggle 46</code>）——收起后<b>仍然可见</b>，
-          收起态图标切为「展开」（<code>i-chevron-left</code>），点击同样展开；<br>
-          ③ <b>键盘快捷键唤出</b>（第 14 节的快捷键总表）。<br>
-          <b>补充</b>：点击播放后右上角短暂出现的「信息」按钮（3s 淡出）<b>作为补充保留</b>，
-          不承担主要唤回职责。</td></tr>
-        <tr><td><b>影响面</b></td><td>第 06 节实景（<code>.pw-side</code> / <code>.pw-x</code>）、
-          第 08 节「页面层级」表、第 09 节动效表（面板收起 400→200）——
-          <b>这三处均不改</b>；<br>
-          <code>dimensions.rs</code> 要新增 <code>PlayerInfoPanelWidth 400</code> 与
-          <code>PlayerInfoPanelCollapsedWidth 200</code>（<b>两者当前都没有令牌</b>）、
-          第 15 节 15.1 / 15.7（只改移动端那一列的表述）。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag ok">已裁决，不再阻塞</span>
-          第 06 节定稿与面板宽度动画的实现；附录 B 面板宽令牌的落法。<br>
-          <span class="tag ok">不阻塞</span> 面板内部结构（信息 / UP 主 / 互动 / Tab 区）。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout ok" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>裁决落地清单（恢复原设计）</b>：<br>
-        ① 第 06 / 08 / 09 节正文<b>不改</b>——「hover 唤出 400px / 移出延迟 220ms 收回 200px」
-        与「面板本体即 hover 热区」保持原样；<br>
-        ② 第 06 节实景 CSS <code>.pw.collapsed .pw-side</code> <b>不改</b>
-        （半宽态靠 <code>overflow:hidden</code> 裁掉右半）；<br>
-        ③ <code>dimensions.rs</code> 新增两条令牌：
-        <code>PlayerInfoPanelWidth 400</code> 与 <code>PlayerInfoPanelCollapsedWidth 200</code>；
-        <b>控制栏为面板让出 200px 的既有口径也不改</b>；<br>
-        ④ 第 15 节只改<b>移动端那一列</b>的表述，并注明
-        「移动端不依赖 hover 唤出，由常驻按钮与手势承担」——
-        <b>这是移动端自己的规则</b>，不改写桌面端规则。</div></div>
-  </div>
-
-  <!-- ==================== D-06 ==================== -->
-  <div class="panel">
-    <h3>D-06 · 文档已写、但令牌层还没有的 4 个尺寸：补齐还是继续留魔法数字 <span class="tag ok">已裁决</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td>主文档正文里出现了 4 个尺寸，但
-          <code>YKPili/Styles/Tokens/</code> <b>没有对应资源</b>：<br>
-          ① <b>信息面板宽 400px / 收起 200px</b>（第 06 / 08 节）；
-          ② <b>播放器控制栏高 88px</b>（第 08 节「控制栏悬浮在画面下沿（单条 88px，场景内 3）」）；
-          ③ <b>卡片数据层字号 11px</b>（第 04 节「数据层：11px + 文字阴影」）；
-          ④ <b>搜索建议面板宽 400px</b>（第 09 节「搜索建议…展开建议面板」）。</td></tr>
-        <tr><td><b>候选 A</b></td><td><b>一次性补齐</b>这 4 项 + 第 15 节新增的移动端尺寸
-          （完整清单见附录 B）。</td></tr>
-        <tr><td><b>候选 B</b></td><td>只补当前代码里真用到的——其中 <b>② 必须先解冲突</b>。</td></tr>
-        <tr><td><b>候选 C</b></td><td>全部留作代码内魔法数字，仅在文档里记录。</td></tr>
-        <tr><td><b>裁决</b></td><td><b>A —— 已裁决：令牌全部补齐，作为 M0 硬前置</b>。<br>
-          理由：契约 §1.2 明确「新增尺寸优先写成新令牌……不要在片段里散落魔法数字」，
-          第 11 节「落地时必须核对」也写了「新增尺寸走 Dimensions，间距保持 4px 网格」。</td></tr>
-        <tr><td><b>② 的处理：拆名，不合并</b></td><td>关于 <code>PlayerControlBarHeight</code> 的双口径，
-          <b>裁决的处理是不合并成一个数，而是拆成两个具名令牌</b>：<br>
-          · <code>PlayerControlBarHeight 50</code> —— <b>现状</b>，Avalonia 让位口径（画面被切掉 50）；<br>
-          · <code>PlayerControlBarHeightOverlay 88</code> —— <b>目标</b>，GPUI 悬浮口径（弹幕输入 38 + 操作条 50）。<br>
-          <b>两个值各自标注适用底座</b>；第 08 节的「单条 88px」补注「<b>目标态（GPUI）</b>」。<br>
-          <b>重新表述</b>：这不再是「同一个令牌有两个值」的冲突，
-          而是<b>两个底座各自成立的口径，拆名后不再是冲突</b>——
-          一期用 50，二期用 88，切换点就是换资源键。</td></tr>
-        <tr><td><b>影响面</b></td><td><code>dimensions.rs</code>、<code>typography.rs</code>、
-          第 04 节数据层、第 06 节面板、第 08 节控制栏行、第 09 节搜索建议、
-          第 15 节 15.7 令牌差异表、附录 B 全文。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag ok">已裁决；列为 M0 硬前置</span>
-          阻塞第 06 / 08 / 09 节的数值可落地性与附录 B 的令牌清单定稿——
-          <b>令牌没建起来，这三节就只是图</b>。<br>
-          <span class="tag ok">不阻塞</span> 令牌层的其余部分（圆角、间距、层级已完备）。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>补齐清单的落点（附录 B）</b>：B.1 移动端新增（13 条，落 <code>dimensions.rs</code>，
-        <code>Mobile*</code> 前缀，<b>不新建字典</b>）、
-        B.2 通用必补（5 条，含拆名后的两条控制栏高）、
-        B.3 排版补齐（<code>FontSizeDataOverlay 11</code> + <code>FontSizeMicro 10</code>）、
-        <b>B.6 第 12–14 节新增令牌汇总（103 条）</b>。</div></div>
-  </div>
-
-  <!-- ==================== D-07 ==================== -->
-  <div class="panel">
-    <h3>D-07 · 安全区令牌怎么落地（编译期默认值 + 运行期覆盖） <span class="tag warn">可延后</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td>安全区四值（状态栏 / 刘海 / 手势条 / 圆角）是<b>运行期量</b>，
-          随设备、随方向、随系统手势模式变化；而契约 §1.2 要求「新增尺寸写成新令牌」，
-          令牌却是编译期常量。两者怎么调和？</td></tr>
-        <tr><td><b>候选 A</b></td><td><b>两层</b>：<code>dimensions.rs</code> 放编译期默认值
-          （<code>SafeAreaTop/Bottom/Left/Right = 0</code>、<code>SafeCornerRadius 44</code>），
-          运行期由壳层读取平台 inset 后<b>覆盖</b>；视图一律用 <code>DynamicResource</code> 引用。</td></tr>
-        <tr><td><b>候选 B</b></td><td><b>完全不落 XAML</b>，只在壳层用一个可绑定对象提供。</td></tr>
-        <tr><td><b>候选 C</b></td><td>落成<b>固定推荐值</b>（如 Top 44 / Bottom 34），不做覆盖。</td></tr>
-        <tr><td><b>推荐</b></td><td><b>A</b>。理由：<br>
-          ① 契约要求新增尺寸<b>有令牌落点</b>，而运行期覆盖保证「令牌有默认、实际按设备」两者同时成立；<br>
-          ② 选 B 会让附录 B 的清单里查不到安全区，评审时无法核对；
-          ③ 选 C 会在非刘海机型上<b>凭空多出 44pt 内边距</b>，白白吃掉一屏内容。<br>
-          落地形式（Lead 裁决）：<b>不新建 <code>DimensionsMobile.axaml</code></b>——
-          移动端专属尺寸<b>全部进 <code>dimensions.rs</code></b>，用 <code>Mobile*</code> 前缀区分，
-          保持<b>单一令牌源</b>，避免两处合并逻辑。</td></tr>
-        <tr><td><b>影响面</b></td><td><code>dimensions.rs</code>（新增 <code>SafeArea*</code> 四个
-          <code>f32</code> 与 <code>SafeCornerRadius</code>）、
-          <code>YKPili.Android/MainActivity.cs</code>、
-          <code>YKPili.iOS/AppDelegate.cs</code>（运行时读 inset 并覆盖）、
-          第 15 节 15.4 与 15.7、附录 B.1。<br>
-          <b>不涉及新文件</b>——按裁决不建 <code>DimensionsMobile.axaml</code>。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag warn">可延后</span>
-          阻塞第 15 节 15.4 的落地与移动端壳层实现。<br>
-          <span class="tag ok">不阻塞</span> 其它令牌与全部桌面端工作。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>为什么这条不阻塞</b>：安全区只在<b>移动端壳层</b>里出现，
-        桌面端完全不受影响；而「令牌要有落点」这件事在 D-07 里已经给出了答案
-        （默认 0 + 运行期覆盖）。
-        因此即使 Lead 迟迟不拍板，第 15 节的其余部分照常可以落地，
-        只有壳层的那几行需要等。</div></div>
-  </div>
-
-  <!-- ==================== D-08 ==================== -->
-  <div class="panel">
-    <h3>D-08 · Avalonia 的图标管线怎么走 <span class="tag ok">已裁决</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td>整套设计文档用<b>内联 SVG sprite</b>
-          （<code>&lt;svg class="icon"&gt;&lt;use href="#i-xxx"/&gt;&lt;/svg&gt;</code>，契约 §1.5），
-          但 <b>Avalonia 没有 SVG sprite 渲染能力</b>——
-          <code>&lt;use href&gt;</code> 在 Avalonia 里不可用。
-          而 <code>typography.rs</code> 现有 <code>FontFamilyIcon</code>
-          （<code>Segoe UI Symbol, Apple Symbols, Noto Sans Symbols</code>）
-          是<b>字形</b>方案，跨平台字形不一致、且拿不到 1.6 描边的线性风格。
-          图标管线必须定一条路，否则第 01–15 节画的每一个图标都无法落地。</td></tr>
-        <tr><td><b>候选 A</b></td><td><b>Svg.Skia</b>——保留 SVG 源码，引入第三方渲染依赖
-          （<code>Svg.Skia</code> + <code>HarfBuzzSharp</code> 等）。
-          优点：<b>设计稿的 SVG 源码可以近乎原样落地</b>，改图标不用重画路径；
-          代价：<b>引入新依赖</b>（包体积、许可、跨平台一致性风险），且与 Avalonia 12 的
-          渲染管线集成需要额外验证。</td></tr>
-        <tr><td><b>候选 B</b></td><td><b>转 <code>PathIcon</code></b>——把每个 sprite 的路径
-          逐个转成 Avalonia 的 <code>PathIcon</code> 资源。
-          优点：<b>不引新依赖</b>；描边宽度、线帽、线接与主题色<b>完全可控</b>
-          （<code>PathIcon</code> 支持 <code>Stroke</code> / <code>StrokeEdges<Pixels></code>，
-          1.6 描边可以直接落到 1.6）；与 <code>DynamicResource</code> 的主题色联动天然成立。
-          代价：<b>一次性转换成本</b>（45 既有 + 12/13/15 节新增共约 74 个 id），
-          且之后每次改图标都要手工同步路径。</td></tr>
-        <tr><td><b>候选 C</b></td><td><b>图标字体</b>——把图标做成一个字体文件。
-          优点：体积小、按字号缩放自由；代价：<b>放弃线性风格统一性</b>，
-          描边粗细与端点由字体设计决定、无法随主题色精确控制，
-          且与契约 §1.5「统一 1.6 描边、线性、无 emoji」的要求正面冲突。</td></tr>
-        <tr><td><b>推荐</b></td><td><b>B（PathIcon）</b>。理由：<br>
-          ① <b>不引新依赖</b>——C 与 A 都要为「渲染图标」付出额外代价，
-          而图标不是本项目的核心竞争力；<br>
-          ② <b>描边与主题色可控</b>——<code>PathIcon</code> 的 <code>Stroke</code> /
-          <code>StrokeEdges<Pixels></code> 能<b>精确落实契约 §1.5 的「描边统一 1.6、线性」</b>，
-          并直接走 <code>DynamicResource</code> 随亮暗主题变色；
-          ③ 转换成本是<b>一次性</b>的，而 A 的依赖风险是<b>持续性</b>的；<br>
-          ④ 与既有 <code>FontFamilyIcon</code> 相比，PathIcon 在三平台上的渲染一致性更高。<br>
-          <b>配套动作</b>：<code>typography.rs</code> 的 <code>FontFamilyIcon</code> <b>建议废弃</b>
-          （跨平台字形不一致，且现有代码里也没有真正依赖它的图标控件）。</td></tr>
-        <tr><td><b>影响面</b></td><td><code>YKPili/Styles/Tokens/Iconpalette.rs</code>
-          （第 13 节建议新建的图标资源字典，60 个 symbol 转 PathIcon）、
-          <code>crates/yk-ui/src/theme/typography.rs</code>（<code>FontFamilyIcon</code> 废弃）、
-          <code>YKPili/Styles/Controls/ButtonStyles.axaml</code> 与其余样式字典里的图标引用、
-          <code>YKPili/Views/HomeView.axaml.cs</code>（代码后台创建的卡片图标）、
-          第 04 / 06 / 09 / 12 / 13 / 14 / 15 节全部图标条目、
-          <code>YKPili.csproj</code>（若走 A 则需加包引用）。</td></tr>
-        <tr><td><b>裁决</b></td><td><b>B（PathIcon）—— 已裁决。</b>
-          图标一律转为 Avalonia <code>PathIcon</code> 资源，<b>不引 Svg.Skia、不采用图标字体</b>；
-          <code>typography.rs</code> 的 <code>FontFamilyIcon</code> 一并废弃。
-          设计稿层面仍用内联 SVG sprite（本页预览即如此），
-          <b>实现层面</b>按本裁决走 PathIcon——两者不冲突，只是产物不同。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag ok">已裁决，不再阻塞</span>
-          阻塞<b>所有图标在 Avalonia 侧的落地</b>：<br>
-          ① 第 13 节的组件库（按钮 / 菜单 / 对话框 / Toast 的图标位）；<br>
-          ② 第 12 节页面里的 14 个新图标（<code>i-user / i-crown / i-trash</code> 等）；<br>
-          ③ 第 14 节播放器控件图标与第 15 节移动端 Tab 栏 / 手势图标；<br>
-          ④ <b>第 03 / 04 / 06 节的卡片与播放器实景</b>——它们现在全靠 sprite 才成立。<br>
-          <span class="tag ok">不阻塞</span> 纯文字与纯几何部分（令牌、布局、文案、状态）。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout err" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
-      <div><b>为什么这条必须拍板</b>：<b>它同时是第 13 节的存疑点 8 与本附录 A 的决策项</b>。
-        第 13 节当时的措辞是「落地需 (a) 引入 Svg.Skia，或 (b) 转 PathIcon 资源。
-        请 Lead 定技术路线」——本条就是那个拍板，<b>结论直接决定第 13 节
-        <code>Iconpalette.rs</code> 的实现方式与包引用</b>。<br>
-        另注：第 13 节统计「45 既有 + 15 新增 = 60 个 symbol」，
-        本附录第 12 / 13 / 15 节各自又有新增 id（12 节 14 个、13 节 8 个独有、15 节 3 个），
-        <b>合并去重后的最终数量需在转换时以 sprite 块为准</b>，
-        不能拿各节的局部数字直接相加。</div></div>
-  </div>
-
-  <!-- ==================== D-09 ==================== -->
-  <div class="panel">
-    <h3>D-09 · 危险确认对话框的 Esc 语义 <span class="tag ok">已裁决</span></h3>
-    <table>
-      <thead><tr><th>项</th><th>内容</th></tr></thead>
-      <tbody>
-        <tr><td><b>问题</b></td><td>第 13 节的组件库原规定「危险确认 <b>Esc 不关闭</b>、点遮罩不关闭」，
-          理由是防误触；但这与 <b>WAI-ARIA APG</b> 对 <code>AlertDialog</code> 的
-          字面要求「<code>Escape: Closes the dialog</code>」冲突。
-          APG 允许按场景取舍，但<b>取舍必须写成规则</b>，不能各写各的。</td></tr>
-        <tr><td><b>裁决</b></td><td><b>允许 Esc 关闭</b>——<b>Esc = 取消 = 安全</b>，符合 WAI-ARIA APG。<br>
-          原「不可逆所以禁止 Esc」的判断<b>不成立</b>：
-          禁止 Esc 并没有真正防住误操作（用户可以点遮罩外的任何地方、或直接关窗），
-          反而让对话框<b>无法用键盘快速退出</b>，反而增加了被困住的风险。<br>
-          但用<b>两条更硬的规则</b>替代「不可逆所以禁止 Esc」：<br>
-          ① <b>初始焦点落在「取消」按钮</b>——用户按 Enter / 空格时默认触发的是安全选项；<br>
-          ② <b>主操作按钮文案自解释</b>——写「<b>永久删除该收藏夹</b>」而不是「确定」，
-          让用户在按下之前就知道后果，而不是按下之后才知道。</td></tr>
-        <tr><td><b>影响面</b></td><td>第 13 节 <code>DialogStyles.axaml</code> 的 <code>AlertDialog</code> 变体、
-          第 13 节的键盘模型（<code>Esc</code> / <code>Enter</code> / <code>Tab</code> 焦点陷阱）、
-          <code>YKPili/Views/</code> 下的确认弹窗调用点、第 07 节登录页的对话框行为。</td></tr>
-        <tr><td><b>阻塞了什么</b></td><td><span class="tag ok">已裁决，不再阻塞</span>
-          第 13 节对话框组件的键盘模型与焦点初始值可以施工。<br>
-          <span class="tag ok">不阻塞</span> 其余组件（按钮 / 菜单 / Toast / 表单控件）。</td></tr>
-      </tbody>
-    </table>
-    <div class="callout ok" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>两条替代规则的落地口径</b>（供第 13 节同步）：<br>
-        ① <b>焦点初始值 = 「取消」</b>——对话框打开时，
-        <code>Tab</code> 的第一个停靠点是取消按钮，<code>Enter</code> 默认触发取消；
-        <b>危险操作的主按钮必须用 <code>Tab</code> 主动走到</b>，不能被默认焦点带过去。<br>
-        ② <b>主按钮文案自解释</b>——危险对话框的主按钮写「<b>永久删除该收藏夹</b>」，
-        禁用态写「删除中…」，<b>禁止出现裸的「确定」</b>；
-        这条与契约 §1.2「正文与标题共用 15px 基准」无关，是文案规则。<br>
-        <b>与 Esc 的关系</b>：Esc 关闭时等同于点击「取消」，<b>不触发任何副作用</b>
-        （不删除、不入回收站）——这正是「Esc = 安全」的技术含义。</div></div>
-  </div>
-
-  <!-- ==================== 二期项登记表 ==================== -->
-  <div class="panel">
-    <h3>二期项登记表（已裁决延后的功能，不阻塞本轮）</h3>
-    <p class="note">以下条目由 D-03 等决策正式降级为二期，登记在此以便排期。
-      <b>它们不是「待定」，而是「已决定不做这一轮」</b>——不要在评审时被当成遗漏项重新提出。</p>
-    <table>
-      <thead><tr><th>二期项</th><th>来源</th><th>阻塞原因</th><th>同批</th></tr></thead>
-      <tbody>
-        <tr><td><b>播放页「推荐」Tab</b>（相关推荐视频）</td><td>D-03</td>
-          <td>相关推荐接口本轮没有；<code>VideoInfoData</code> 现有 <code>pages</code> 支撑「选集」，
-            但撑不起「推荐」</td><td>与「周榜」同批</td></tr>
-        <tr><td><b>周榜</b>（全站 / 分区榜之外的周榜）</td><td>第 12 节 [S1] 裁决</td>
-          <td>依赖客户端每日快照 + 7 天窗口聚合</td><td>与「推荐」同批</td></tr>
-        <tr><td><b>进度拖动预览缩略图</b></td><td>第 14 节存疑点 4 / 第 15 节 15.5</td>
-          <td>依赖 B 站 <code>player/videoshot</code> 分镜预览图接口，
-            <b>项目当前无此 API</b>；本轮只给 HUD 数字</td><td>与播放器二期同批</td></tr>
-        <tr><td><b>缓存条目计数接口</b>（离线文案里的「N 条」）</td><td>附录 C.6</td>
-          <td>需 <code>CacheManager</code> 暴露计数接口；本轮文案写「N 条」占位</td><td>与缓存管理同批</td></tr>
-        <tr><td><b>移动端实现（壳层 / 二级页栈 / 原生播放器）</b></td><td>D-04</td>
-          <td>Android/iOS 无原生播放器实现（<code>Platforms/</code> 只有 <code>NullMediaPlayer</code>）</td>
-          <td><b>M7（末位）</b></td></tr>
-        <tr><td><b>GPUI 迁移与播放浮窗叠层合成</b></td><td>D-01</td>
-          <td>一期用 Avalonia 12 的「让位」口径；迁移面收敛到播放浮窗一个场景</td>
-          <td>二期</td></tr>
-      </tbody>
-    </table>
-    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>登记规则的用途</b>：本表让「本轮不做」与「本轮没想清楚」在文档上可区分——
-        前者在此登记（带原因与同批），后者才留在附录 A 的决策表里。
-        这样评审时可以直接问「登记表里的哪一项可以提前」，
-        而不必逐条重开已裁决的决策。</div></div>
-  </div>
+    <div><b>当前没有未决项。</b>所有会改变实现路径的决策都已拍板并落进正文；
+      出现新的待定项时再在此登记。</div></div>
 </section>
 
 <section id="appendix-b">
@@ -9853,7 +9255,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         <tr><td class="mono">BottomTabBarHeight</td><td class="mono">f32</td><td class="mono">56</td>
           <td>移动端底部 Tab 栏高度（<b>不含</b>手势条安全区）</td><td class="mono">dimensions.rs</td></tr>
         <tr><td class="mono">SafeAreaTop</td><td class="mono">f32</td><td class="mono">0</td>
-          <td>状态栏安全区；编译期默认 0，<b>运行期由壳层覆盖</b>（见附录 A 的 D-07）</td>
+          <td>状态栏安全区；编译期默认 0，<b>运行期由壳层覆盖</b></td>
           <td class="mono">dimensions.rs</td></tr>
         <tr><td class="mono">SafeAreaBottom</td><td class="mono">f32</td><td class="mono">0</td>
           <td>手势条 / 导航条安全区；运行期覆盖</td><td class="mono">dimensions.rs</td></tr>
@@ -9868,7 +9270,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>移动端播放器控制按钮热区（桌面为 <code>PlayerIconButtonSize 32</code>，此处分叉）</td>
           <td class="mono">dimensions.rs</td></tr>
         <tr><td class="mono">MobileCardCellHeight</td><td class="mono">f32</td><td class="mono">184</td>
-          <td>移动端单元格高（含署名行）；<b>取值待附录 A 的 D-02 拍板</b></td>
+          <td>移动端单元格高（含署名行）；<b>目标值 184（现状 166）</b></td>
           <td class="mono">dimensions.rs</td></tr>
         <tr><td class="mono">MobileSearchInputHeight</td><td class="mono">f32</td><td class="mono">44</td>
           <td>移动端搜索输入框高度（等于热区下限）</td><td class="mono">dimensions.rs</td></tr>
@@ -9900,7 +9302,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>播放浮窗右侧信息面板的<b>展开</b>宽度（第 06 / 08 节）</td><td class="mono">dimensions.rs</td></tr>
         <tr><td class="mono">PlayerInfoPanelCollapsedWidth</td><td class="mono">f32</td><td class="mono">200</td>
           <td>信息面板的<b>收起</b>宽度 = 200（<b>半宽</b>：内容仍按 400px 排版、右半被裁掉，
-          左侧信息仍可见，<b>面板本体即 hover 热区</b>）；<b>已裁决 = 保留半宽</b>，见附录 A 的 D-05</td>
+          左侧信息仍可见，<b>面板本体即 hover 热区</b>）；<b>已裁决 = 保留半宽</b></td>
           <td class="mono">dimensions.rs</td></tr>
         <tr><td class="mono">PlayerInfoTabHeight</td><td class="mono">f32</td><td class="mono">44</td>
           <td>信息面板内 Tab 行高（第 06 节预览为 42，移动端对齐热区下限 44）</td>
@@ -9919,7 +9321,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       </tbody>
     </table>
     <div class="callout ok" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-      <div><b>控制栏高不再是冲突，是两个具名令牌</b>（Lead 裁决，见 D-01 / D-06）：<br>
+      <div><b>控制栏高不再是冲突，是两个具名令牌</b>（Lead 裁决）：<br>
         <code>PlayerControlBarHeight 50</code> = <b>现状</b>，Avalonia 12 让位口径
         （视频渲染区让出 50，控制栏占独立高度）；<br>
         <code>PlayerControlBarHeightOverlay 88</code> = <b>目标</b>，GPUI 悬浮口径
@@ -10023,7 +9425,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         <b>已有</b>的不用动。<br>
         <b>落地顺序建议</b>：先建 <code>PlayerControlBarHeightOverlay</code> 与
         <code>PlayerInfoPanelWidth / PlayerInfoPanelCollapsedWidth</code>
-        （D-05、D-06 的直接产物），再补其余的缺失项；
+        （已定决策的直接产物），再补其余的缺失项；
         第 12–14 节的令牌见 <b>B.6</b>，与本表<b>无重名</b>，可一次性合并进同一个字典。</div></div>
   </div>
 
@@ -10120,16 +9522,16 @@ ul.clean li::marker { color: var(--theme-primary); }
         <tr><td class="mono">ToastDurationInfo</td><td class="mono">f32</td><td class="mono">3000</td><td>信息 Toast 停留（ms）</td><td class="mono">motion.rs</td></tr>
         <tr><td class="mono">ToastDurationWarning</td><td class="mono">f32</td><td class="mono">5000</td><td>警告 Toast 停留（ms）</td><td class="mono">motion.rs</td></tr>
         <tr><td class="mono">ToastDurationError</td><td class="mono">f32</td><td class="mono">0</td><td>错误 Toast 不自动消失（0 = 常驻）</td><td class="mono">motion.rs</td></tr>
-        <tr><td class="mono">StatusError70Brush</td><td class="mono">Hsla</td><td class="mono">待 Lead 核定</td>
-          <td>危险按钮按下态（比 <code>StatusErrorBrush</code> 深一档）</td><td class="mono">palette.rs</td></tr>
-        <tr><td class="mono">StatusError80Brush</td><td class="mono">Hsla</td><td class="mono">待 Lead 核定</td>
-          <td>危险按钮悬停态</td><td class="mono">palette.rs</td></tr>
-        <tr><td class="mono">FillDisabledBrush</td><td class="mono">Hsla</td><td class="mono">待 Lead 核定</td>
-          <td>禁用按钮底色——现状 <code>FluentOverrides</code> 的 <code>ButtonBackgroundDisabled</code>
-            在亮暗两套主题下是两个互不相同的半透明灰，建议统一为「<code>Fill1</code> 的 60% 不透明度」</td>
+        <tr><td class="mono">StatusError70Brush</td><td class="mono">Hsla</td><td class="mono">#B3E5484D</td>
+          <td>危险按钮按下态（比 <code>StatusErrorBrush</code> 深一档）。70% 不透明度，与既有 10/20/30 档同一换算</td><td class="mono">palette.rs</td></tr>
+        <tr><td class="mono">StatusError80Brush</td><td class="mono">Hsla</td><td class="mono">#CCE5484D</td>
+          <td>危险按钮悬停态。80% 不透明度</td><td class="mono">palette.rs</td></tr>
+        <tr><td class="mono">FillDisabledBrush</td><td class="mono">Hsla</td><td class="mono">#1A838391</td>
+          <td>禁用按钮底色。取 10% 不透明度的中性灰——比 <code>Fill1</code> 更低一档，
+            保证禁用态与普通填充一眼可分；亮暗两套共用同一档（暗色主题下改用 <code>#14838391</code> 以补偿底更暗）</td>
           <td class="mono">palette.rs</td></tr>
-        <tr><td class="mono">TextOnAccentDisabledBrush</td><td class="mono">Hsla</td><td class="mono">待 Lead 核定</td>
-          <td>禁用主按钮前景（现状为半透明白）</td><td class="mono">palette.rs</td></tr>
+        <tr><td class="mono">TextOnAccentDisabledBrush</td><td class="mono">Hsla</td><td class="mono">#80FFFFFF</td>
+          <td>禁用主按钮前景。白字 50% 不透明度</td><td class="mono">palette.rs</td></tr>
       </tbody>
     </table>
 
@@ -10189,7 +9591,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         ① <code>LayerPlayerMenu</code>（第 14 节，65）= <code>LayerMenu</code>（第 13 节，65）
         ——<b>同一个令牌</b>，第 14 节已注明「与第 12、13 节共用同一令牌，不另立」，本表只列一次；<br>
         ② <code>PlayerControlBarHeight</code>（第 14 节写「50 → 88」）
-        ——按 D-06 裁决<b>拆成两条具名令牌</b>（<code>PlayerControlBarHeight 50</code> /
+        ——按已定裁决<b>拆成两条具名令牌</b>（<code>PlayerControlBarHeight 50</code> /
         <code>PlayerControlBarHeightOverlay 88</code>），已归入 <b>B.2</b>，本表不重复；<br>
         ③ <code>DanmakuFontSmall / Medium / Large</code> 是 <code>FontSizeCaption / Body / Heading</code>
         的<b>别名</b>，不引入新的字阶；<br>
@@ -10594,6 +9996,333 @@ ul.clean li::marker { color: var(--theme-primary); }
   </div>
 </section>
 
+<!-- ==================== 附录 D · GPUI 技术底账 ==================== -->
+<section id="appendix-d">
+  <div class="sec-head">
+    <h2><span class="sec-num">附录 D</span>GPUI 技术底账</h2>
+    <p><b>这是给开发者的一次性速查</b>：GPUI 能做什么、不能做什么，以及从 Avalonia 过来时每个概念该换成什么。
+      正文各节都按这些事实写，但它们是散着的；本附录把它们集中成两张表，
+      开工前扫一遍，能少踩一半的坑。</p>
+  </div>
+
+  <div class="panel">
+    <h3>D.1 框架硬事实（决定设计怎么写）</h3>
+    <table>
+      <thead><tr><th>#</th><th>事实</th><th>对设计/实现的影响</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">1</td><td><b>样式是链式 API，不是资源字典</b><br>
+          <code>div().bg(..).px_4().rounded_lg()</code></td>
+          <td>没有 <code>{DynamicResource}</code>、没有选择器、没有样式类文件；
+            复用靠 Rust 函数 / <code>trait YkStyled</code> / <code>const</code> 常量。</td></tr>
+        <tr><td class="mono">2</td><td><b>没有 CSS 式 z-index</b><br>
+          只有元素树顺序、<code>deferred()</code>、<code>anchored()</code></td>
+          <td>原 8 个 <code>Layer*</code> 数值令牌整体失效，改为「场景挂 Root 的位置 + 场景内 child 顺序」；
+            <code>deferred(el).with_priority(n)</code> 中 <b>n 越大越在上</b>，且只在同一 deferred 集合内比较。</td></tr>
+        <tr><td class="mono">3</td><td><b>有 <code>box_shadow</code>，且支持 inset</b><br>
+          <code>BoxShadow</code> 有 <code>blur_radius</code> / <code>spread</code> / <code>inset</code></td>
+          <td><b>比 Avalonia 强</b>：<code>Shadow1–4</code> 与 <code>EdgeGlow</code>（inset 白色高光）可 1:1 移植。
+            玻璃材质的四层叠加能完整复刻。</td></tr>
+        <tr><td class="mono">4</td><td><b>没有元素级 backdrop blur</b><br>
+          只有窗口级 <code>WindowBackgroundAppearance</code>
+          （<code>Opaque</code> / <code>Transparent</code> / <code>Blurred</code> / <code>MicaBackdrop</code> / <code>MicaAltBackdrop</code>）</td>
+          <td>面板背后是视频/内容而非窗口背景，窗口级模糊帮不上忙。
+            <b>「浮在内容上的面板必须用 Strong 变体（0.92）」这条铁律成立</b>，理由从「Avalonia 无 BlurEffect」改为这条。</td></tr>
+        <tr><td class="mono">5</td><td><b>没有元素级 transform / scale</b><br>
+          <code>Style</code> 只有 <code>opacity</code>；<code>Transformation</code> 仅作用于 <code>svg()</code> 与字形/位图</td>
+          <td>卡片悬停 1.03、封面缓推 1.04 <b>不能用样式表达</b>。等效做法：内层 <code>.absolute()</code> + 负 <code>inset</code>
+            （208×3%÷2 = 3.12、184×3%÷2 = 2.76）+ 外层 <code>overflow_hidden()</code>。
+            <b>这是近似，不是等比矩阵</b>，观感需真机验收。</td></tr>
+        <tr><td class="mono">6</td><td><b><code>EaseEmphasized</code> 的回弹会被裁掉</b><br>
+          <code>gpui_base::animation::cubic_bezier</code> 把输出 clamp 到 [0,1]</td>
+          <td>项目第二条曲线 <code>cubic-bezier(0.34, 1.3, 0.64, 1)</code> 的 y = 1.3 &gt; 1，<b>回弹会被抹平</b>。
+            要么自写一份不裁剪的 bezier 传给 <code>with_easing</code>，要么放弃回弹。<code>EaseStandard</code> 不受影响。</td></tr>
+        <tr><td class="mono">7</td><td><b>字号 <code>text_*</code> scale 与项目字阶不对应</b><br>
+          GPUI 基于 rem：12 / 14 / 16 / 18 / 20 / 24 / 30；项目：12 / 13 / 15 / 20 / 24 / 28</td>
+          <td>只有 12 / 20 / 24 对得上。<b>字号阶不变</b>，13 / 15 / 28 一律用
+            <code>.text_size(px(13.))</code> 这类显式像素——用 <code>text_sm</code> 凑 14 会让
+            「正文与标题共用 15px、靠行高与字重分层」这条规则失效。</td></tr>
+        <tr><td class="mono">8</td><td><b>主题是全局单例，不是两个字典</b><br>
+          <code>Theme::global(cx)</code> / <code>Theme::update</code> /
+          <code>Theme::change(ThemeMode, window, cx)</code>；<code>light()</code>/<code>dark()</code> 在 <code>ThemeColor</code> 上</td>
+          <td><b>没有</b> <code>Theme::light()</code> / <code>Theme::dark()</code> 构造器（容易记错）。
+            主题切换是<b>取值变化 + <code>cx.notify()</code> 重绘</b>，<b>控件不重建</b>——
+            Avalonia 时代「切主题要重建卡片」的结论作废。</td></tr>
+        <tr><td class="mono">9</td><td><b><code>MotionTokens</code> 预设 ≠ 项目时长</b><br>
+          套件预设 120 / 180 / 280ms；项目 150 / 200 / 300ms</td>
+          <td>一律 <code>Animation::new(Duration::from_millis(150))</code> 显式构造，
+            <b>禁止</b>用 <code>duration_fast</code> 之类凑近似（与字号阶同原则：不为套框架改设计节奏）。</td></tr>
+        <tr><td class="mono">10</td><td><b>SVG 原生支持</b><br>
+          <code>svg()</code> + <code>Svg</code> 元素 + <code>SvgRenderer</code>；另有 <code>Icon</code> / <code>icon_named!</code></td>
+          <td>图标管线<b>不需要</b> PathIcon / Svg.Skia / 图标字体，直接引用 SVG 资源。</td></tr>
+        <tr><td class="mono">11</td><td><b>组件库已经有 60+ 组件</b><br>
+          button / input / menu / dialog / notification / tooltip / switch / slider / checkbox /
+          radio / tag / badge / avatar / progress / skeleton / empty / pagination / kbd / table /
+          tab / list / scroll / popover / sheet / sidebar / virtual_list …</td>
+          <td><b>不要自建重复实现</b>。第 13 节的组件从「设计 + 新建样式文件」改为「选用 + 主题覆盖」；
+            但组件内部定的几何不一定能覆盖，见附录 E。</td></tr>
+        <tr><td class="mono">12</td><td><b>渐变只有线性，且只支持 2 个色标</b><br>
+          <code>linear_gradient(angle, from, to)</code>，内部是 <code>[LinearColorStop; 2]</code>；
+          <b>没有 <code>radial_gradient</code></b></td>
+          <td>设计稿的三段背景渐变（<code>#DCF1F9</code> / <code>#EFF2F7</code> / <code>#F2F2F8</code>）
+            只能取首尾近似，或在上面再叠一层覆盖中段；左上角的径向主题光晕只能用线性渐变近似，
+            真正的径向衰减需要自定义 <code>Element</code> 去画。<b>M2 已按近似落地</b>。</td></tr>
+        <tr><td class="mono">13</td><td><b>开窗口必须走 <code>gpui_kit::open_window</code></b><br>
+          它会在视图外面包一层 <code>base::Root</code></td>
+          <td>直接用 <code>cx.open_window(...)</code> 把视图挂上去，窗口能创建但<b>会立刻退出</b>——
+            少了 Root 提供的事件循环与图层管理。这条是 M2 实际踩到的坑，不是推断。</td></tr>
+        <tr><td class="mono">14</td><td><b>作为 <code>children()</code> 加入的子视图必须绝对定位</b><br>
+          子视图的根元素写 <code>size_full()</code> 不够</td>
+          <td>外层没有尺寸约束时 <code>size_full()</code> 会退化成 <b>0×0</b>：渲染日志照常打印，
+            画面上却什么都没有，很难定位。子视图根元素应写
+            <code>.absolute().inset_0()</code>（相对最近的定位祖先）。M3 / M4 各踩一次。</td></tr>
+        <tr><td class="mono">15</td><td><b>主题覆盖必须在窗口创建之后</b><br>
+          先 <code>Theme::change(mode, Some(window), cx)</code>，再覆盖色值</td>
+          <td>窗口创建时会再走一次 <code>Theme::change</code>，把组件库默认色值装回来 ——
+            在 <code>init(cx)</code> 之后、<code>open_window</code> 之前覆盖会被这次 change 冲刷掉。
+            症状：页面背景是纯黑（组件库默认）而不是 <code>#222428</code>，
+            主按钮是白色而不是品牌蓝。<b>M4 实际踩到</b>。</td></tr>
+      </tbody>
+    </table>
+    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+      <div><b>怎么用这张表：</b>写任何一节之前，先扫一遍事实 1–4（决定了「能不能这么画」），
+        再看 5–9（决定了「动手时会撞上什么」）。11 是省力项——先查组件库有没有，再决定自己写；12–15 是 M2 / M3 / M4 实施时新踩出来的。</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>D.2 Avalonia → GPUI 映射对照</h3>
+    <p class="note">给从 Avalonia 版本接手的人：左边是旧概念，右边是新写法。这张表覆盖正文里出现过的全部映射。</p>
+    <table style="margin-top:10px">
+      <thead><tr><th>Avalonia</th><th>GPUI</th><th>备注</th></tr></thead>
+      <tbody>
+        <tr><td><code>Styles/Tokens/*.axaml</code>（6 个资源字典）</td>
+          <td><code>crates/yk-ui/src/theme/*.rs</code></td>
+          <td>palette / surfaces / typography / dimensions / motion / shadows</td></tr>
+        <tr><td><code>{DynamicResource Key}</code></td>
+          <td><code>.yk_key()</code>（<code>trait YkStyled</code>）或 <code>cx.theme().yk.key</code></td>
+          <td>取决于当前有没有 <code>cx</code>；纯函数式构造用前者</td></tr>
+        <tr><td><code>TryFindResource(key, ActualThemeVariant, out v)</code></td>
+          <td><code>Theme::global(cx)</code> / <code>Theme::update(cx, |t| …)</code></td>
+          <td>漏传主题变体导致静默回退的坑随之消失</td></tr>
+        <tr><td>切主题时重建控件</td>
+          <td><code>Theme::change(mode, …)</code> + <code>cx.notify()</code></td>
+          <td><b>只重绘、不重建</b></td></tr>
+        <tr><td><code>Panel.ZIndex</code> / 8 个 <code>Layer*</code> 数值</td>
+          <td><code>deferred(el).with_priority(n)</code> / 场景挂 Root 的位置 / child 顺序</td>
+          <td>场景之间比「谁挂得靠后」，场景内部比 priority</td></tr>
+        <tr><td><code>ContainerCanvas</code> + 容器池 + 按行节流</td>
+          <td><code>v_virtual_list(view, id, item_sizes, f)</code></td>
+          <td>item = 一整行；库自身多画 1 行 overdraw，不需要手写池</td></tr>
+        <tr><td><code>NativeControlHost</code> + <code>AVSampleBufferDisplayLayer</code></td>
+          <td><code>surface(cv_pixel_buffer)</code></td>
+          <td>视频帧与控件同管线合成，控件可以压在画面上</td></tr>
+        <tr><td><code>PathIcon</code> / <code>Svg.Skia</code> / <code>FontFamilyIcon</code></td>
+          <td><code>svg()</code> / <code>Icon</code></td>
+          <td>三条旧路线全部作废</td></tr>
+        <tr><td><code>Styles/Controls/*.axaml</code>（9 个样式文件）</td>
+          <td><code>gpui_component::*</code> 模块 + 主题字段覆盖</td>
+          <td>不再产出任何 axaml；56 处硬编码色值这笔债随迁移消失</td></tr>
+        <tr><td><code>*ViewModel</code> + <code>ObservableProperty</code></td>
+          <td>Rust 状态 + <code>Entity&lt;T&gt;</code></td>
+          <td>视图实现 <code>impl Render</code></td></tr>
+        <tr><td>事件绑定 / <code>ICommand</code></td>
+          <td><code>Action</code> + <code>KeyBinding</code> + <code>on_key_down</code></td>
+          <td>用 <code>key_context</code> 做作用域分派（全局 / 播放器两层）</td></tr>
+        <tr><td>焦点 / Tab 顺序</td>
+          <td><code>FocusHandle</code> + <code>tab_stop</code> + <code>FocusTrapElement</code></td>
+          <td>焦点陷阱用它包；关闭后 <code>window.focus(&amp;trigger)</code> 归还</td></tr>
+        <tr><td><code>AutomationProperties.Name</code></td>
+          <td><code>.aria_label(..)</code> + <code>.role(..)</code></td>
+          <td>AccessKit 只上报「有 id + 有 role」的节点</td></tr>
+        <tr><td><code>transition: …</code></td>
+          <td><code>with_animation(id, Animation::new(dur), |el, delta| …)</code></td>
+          <td>只过渡需要的属性，不做全属性动画</td></tr>
+        <tr><td><code>cursor: pointer</code></td>
+          <td><code>window.set_cursor_style(CursorStyle::PointingHand, &amp;hitbox)</code></td>
+          <td>需要 hitbox；不是样式属性</td></tr>
+      </tbody>
+    </table>
+    <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+      <div><b>映射不是 1:1 的几处，特别标出来：</b><br>
+        ① <b>层级</b>：不是「换个写法」，是<b>换了一种模型</b>——数值没了，只能靠树顺序表达意图。<br>
+        ② <b>缩放</b>：没有元素级 scale，1.03 / 1.04 只能用负 inset 近似。<br>
+        ③ <b>主题切换</b>：不再重建，这个认知要改。<br>
+        ④ <b>组件</b>：从「自建样式」变成「用现成的 + 覆盖」，能改的余量变少了（见附录 E）。</div></div>
+  </div>
+</section>
+
+<!-- ==================== 附录 E · 待核实清单 ==================== -->
+<section id="appendix-e">
+  <div class="sec-head">
+    <h2><span class="sec-num">附录 E</span>待核实清单</h2>
+    <p><b>这里不是「待定决策」，是「还没验证过的能力」。</b>
+      正文里那些标了「待核实」的条目全部收在这里，开工前应当先逐条核一遍——
+      核完的划掉，能做的补进正文，不能做的降级设计。
+      它们分四类：组件能力、框架能力缺口、API 可见性、需真机验收。其中 <b>E-11（系统动态字体）</b>另有跨平台取值细则，见 E.2 之后。</p>
+  </div>
+
+  <div class="panel">
+    <h3>E.1 组件能力（<code>gpui-component</code> 是否能做到）</h3>
+    <table>
+      <thead><tr><th>#</th><th>待核实</th><th>做不到时的退路</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">E-1</td><td><code>Notification</code> 是否有 per-notification 自动消失时长 API
+          （现状：<code>autohide(bool)</code>，时长在 <code>NotificationList</code> 内固定 5s）</td>
+          <td>包装层自计时后调 <code>dismiss()</code>，或自建 toast host</td></tr>
+        <tr><td class="mono">E-2</td><td><code>Input</code> 的错误态 / 校验提示槽；<code>aria-invalid</code> / <code>aria-describedby</code> 等价物</td>
+          <td>外层包一层错误文案 + 改边框色</td></tr>
+        <tr><td class="mono">E-3</td><td>焦点环是否区分键盘 / 指针来源（原 <code>:focus-visible</code> 语义）</td>
+          <td>自写 <code>yk_focus_ring()</code>，已计划这么做</td></tr>
+        <tr><td class="mono">E-4</td><td>滚动条轨道宽 6、最小滑块长 24、悬停加深一档是否可配</td>
+          <td>自绘滚动条（工作量中等）</td></tr>
+        <tr><td class="mono">E-5</td><td>开关 44×24 / 滑块轨道 4 + thumb 14 / 复选单选 16×16 /
+          Tooltip 最大宽 240 + 箭头 8×8 / 头像 18·34·46 / pill 22 / badge 18 这些几何是否可覆盖</td>
+          <td>不可覆盖则接受组件内定值并更新规范，或自建该组件</td></tr>
+        <tr><td class="mono">E-6</td><td>危险确认对话框能否指定初始焦点落「取消」；<code>Dialog</code> 的 Tab 循环是否内建</td>
+          <td>打开后手动 <code>window.focus(&amp;cancel)</code></td></tr>
+        <tr><td class="mono">E-7</td><td><code>ContextMenu</code> 的键盘唤出（Shift+F10 / 菜单键）如何绑定；
+          <code>native_menu::NativeMenu</code> 是否承担系统菜单键</td>
+          <td>用 <code>on_key_down</code> 手动分派</td></tr>
+        <tr><td class="mono">E-8</td><td>popover / menu / tooltip 的贴边翻转是否自动（<code>Placement</code>）</td>
+          <td>按可用空间自己选 <code>Placement</code></td></tr>
+        <tr><td class="mono">E-9</td><td>GPUI 无障碍桥接：<code>aria_label</code> / <code>role</code> 到
+          macOS / Windows 无障碍树的逐条映射</td>
+          <td>逐平台实测，缺的用原生桥接补</td></tr>
+        <tr><td class="mono">E-10</td><td>开关关态的轨道色对应哪个 <code>ThemeColor</code> 字段（字段名待核实）</td>
+          <td>用项目扩展字段 <code>yk.switch_track</code> 补</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h3>E.2 框架能力缺口（GPUI 层面没有，需自行接一层或降级）</h3>
+    <table>
+      <thead><tr><th>#</th><th>缺口</th><th>影响与退路</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">E-11</td><td><b>系统动态字体：GPUI 不提供读取入口，但平台 API 能读</b><br>
+          GPUI 只有 <code>window.set_rem_size(px(..))</code>，且项目字号走 <code>text_size(px(n))</code>
+          不吃 rem，所以单靠它无效</td>
+          <td><b>结论：不是能力缺口，是「大部分平台能读，需自己接一层」。</b>
+            按平台 API 读倍率后统一乘到字号与行高上（细则见下方 E-11 表）。
+            <b>唯一例外是 macOS</b>——第三方 app 读不到系统字号设置，只能提供应用内选项。</td></tr>
+        <tr><td class="mono">E-12</td><td>图片内存缓存无公开淘汰接口（<code>asset_cache.rs</code> 只有内部 <code>CachedLoad</code>）</td>
+          <td>在 <code>yk-media</code> 自建 LRU 或自持位图</td></tr>
+        <tr><td class="mono">E-13</td><td><code>aria-live</code> 等价物：<code>Role::Status</code> 有，
+          但「节点文本变化是否作为 live announcement 上报」源码看不出</td>
+          <td>扫码三态等需要播报的场景，实测后决定是否用原生桥接</td></tr>
+        <tr><td class="mono">E-14</td><td>弹幕的「1px 描边 + 投影」在文本渲染层怎么画，源码里没核实到 stroke 能力</td>
+          <td>用同一 <code>ShapedLine</code> 偏移多次绘制模拟，或去掉描边只留投影</td></tr>
+        <tr><td class="mono">E-15</td><td><code>deferred</code> 承载「常驻整层」（控制栏 / 信息面板）技术上可行但非主流用法</td>
+          <td>文档同时给了「<code>relative()</code> + 绝对定位子树按声明顺序」的等效写法；
+            同一组层只能选一种，实现时定死。</td></tr>
+        <tr><td class="mono">E-16</td><td>骨架脉冲：<code>skeleton::Skeleton</code> 把脉冲写死 2s bounce，只暴露 <code>secondary()</code></td>
+          <td>保留项目 1.5s 就自绘 <code>div()</code> + <code>with_animation</code>——
+            <b>建议这么做</b>，1.5s 是设计节奏，不为复用组件而改。</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h3>E-11 细则 · 各平台字号缩放怎么读</h3>
+    <p class="note">GPUI 不管这件事，但每个平台都有入口。读到倍率后<b>统一乘到字号与行高上</b>，
+      而不是只调 <code>window.set_rem_size</code>（项目字号不走 rem，那样无效）。</p>
+    <table style="margin-top:10px">
+      <thead><tr><th>平台</th><th>取值入口</th><th>变化通知</th><th>备注</th></tr></thead>
+      <tbody>
+        <tr><td><b>iOS</b></td>
+          <td>读 <code>UIApplication.shared.preferredContentSizeCategory</code>（<code>UIContentSizeCategory</code>）；
+            原生控件直接 <code>adjustsFontForContentSizeCategory = true</code>；
+            自定义字号用 <code>UIFontMetrics(forTextStyle:).scaledFont(for:)</code> 换算</td>
+          <td><code>UIContentSizeCategory.didChangeNotification</code></td>
+          <td>最完整的动态字体模型；建议直接用它算出的 point 值，不要自己乘系数</td></tr>
+        <tr><td><b>Android</b></td>
+          <td>读 <code>resources.configuration.fontScale</code>（float，1.0 为默认）；
+            换算用 <code>FontScaleConverter</code>（API 34+）；等价写法 <code>scaledDensity / density</code></td>
+          <td><code>Activity.onConfigurationChanged</code> 里比对 <code>fontScale</code></td>
+          <td>Android 14+ 支持 per-app 字号缩放，要按应用维度取；<code>FontScaleConverter</code> 专门处理「字号非线性缩放」</td></tr>
+        <tr><td><b>Windows</b></td>
+          <td>读 <code>UISettings.TextScaleFactor</code>（WinRT，double，<b>值域 1.0 – 2.25</b>）</td>
+          <td><code>UISettings.TextScaleFactorChanged</code></td>
+          <td><b>与 DPI 缩放是两件事</b>：DPI 由 GPUI 处理。官方说明「字号越大受影响越小」，所以不是纯线性倍率</td></tr>
+        <tr><td><b>macOS</b></td>
+          <td><b>读不到，且没有 API 可解。</b>Dynamic Type 不是 macOS 特性；macOS 26 的
+            「Preferred Text Size」不对第三方开放（Apple DTS 原话：
+            “That feature can't be used by 3rd party apps on macOS”）；
+            <code>NSFont.preferredFont(forTextStyle:)</code> <b>不跟随</b>该设置</td>
+          <td>无可订阅通知</td>
+          <td><b>只能提供应用内字号选项</b>（设置页 100% / 115% / 130%），不要指望跟随系统</td></tr>
+        <tr><td><b>Linux</b></td>
+          <td>GNOME：GSettings <code>org.gnome.desktop.interface text-scaling-factor</code>（1.0 默认）；
+            KDE：<code>kdeglobals</code> 的 <code>ForceFontDPI</code></td>
+          <td>GSettings <code>changed</code> 信号</td>
+          <td>跨桌面不统一；读不到时用 DPI 兜底，或直接按 1.0 处理</td></tr>
+      </tbody>
+    </table>
+    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+      <div><b>四个平台能自动跟随，一个不能——这决定了「要不要做应用内字号设置」。</b><br>
+        <b>能跟随</b>：iOS / Android / Windows / Linux（GNOME）都有可读的倍率与变化通知，
+        接上就能跟随系统。<br>
+        <b>不能跟随</b>：<b>macOS</b>。这不是「没查对 API」，是平台没开放——
+        所以 macOS 上<b>必须</b>在设置页提供应用内字号选项，否则该用户群完全无法调整字号。<br>
+        这条同时解释了为什么本项目<b>不能只依赖系统设置</b>：只要 macOS 在支持列表里，
+        应用内字号选项就是必需的兜底，而不是可选功能。</div></div>
+
+    <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
+      <div><b>落地时有三件事必须一起做，只改字号会撑破布局。</b><br>
+        ① <b>行高跟着乘</b>：字号 ×1.3 而行高不动，两行标题会挤在一起；<code>LineHeight*</code> 要一起缩放。<br>
+        ② <b>容器高度重算</b>：卡片 <code>COVER_CELL_HEIGHT</code> 是基准字号下的 184，放大后 2 行标题可能放不下——
+        要么让卡片高度随倍率增长，要么对标题做更严格的截断。<br>
+        ③ <b>限幅</b>：建议把倍率夹在 <b>0.85 – 1.3</b> 之间。超出范围的极端设置（iOS 最大档 ≈ 2.35 倍）
+        会把整个布局压垮，此时应回退到「只放大正文字号 + 允许滚动」，而不是等比放大所有尺寸。<br>
+        <b>不需要跟着缩放的</b>：触控热区 44×44（物理尺寸）、图标边长（几何不是文字）、
+        1px 描边与圆角。</div></div>
+    <div class="callout info" style="margin-top:10px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+      <div><b>建议的封装形式</b>（对应第 10 节的无障碍条目）：<br>
+        <code>yk_app::platform::text_scale() -&gt; f32</code> 读一次并缓存，平台层变化时更新全局；<br>
+        所有字号不直接写 <code>.text_size(px(n))</code>，而是走 <code>.yk_text(n)</code>，
+        内部 <code>px(n * scale)</code>。这样字号阶（12/13/15/20/24/28）保持不变，
+        倍率只在一个地方生效——<b>与附录 D · D.1 事实 7「不为套框架改字号阶」是同一个原则</b>。</div></div>
+  </div>
+
+  <div class="panel">
+    <h3>E.3 API 可见性（存在但应用层够不到）</h3>
+    <table>
+      <thead><tr><th>#</th><th>待核实</th><th>退路</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">E-17</td><td><code>Window::platform_window</code> 是 <code>pub(crate)</code>，
+          因此 <code>PlatformWindow::insets()</code> / <code>on_insets_changed</code> 应用层不能直接订阅</td>
+          <td>壳层自己封装一层；可用的替代是 <code>window.fully_visible_bounds()</code></td></tr>
+        <tr><td class="mono">E-18</td><td><code>tokio::sync::Semaphore</code> 不在 <code>gpui-kit</code> 的直接依赖里</td>
+          <td>在 <code>yk-app</code> 显式声明 <code>tokio = { version = "1", features = ["sync"] }</code>，
+            或改用 <code>futures::buffer_unordered(4)</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h3>E.4 需真机 / 实测验收（跑一下才知道）</h3>
+    <table>
+      <thead><tr><th>#</th><th>要验什么</th><th>为什么必须实测</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">E-19</td><td>卡片悬停 1.03 / 封面 1.04 的「负 inset 近似」观感</td>
+          <td>不是等比矩阵，x/y 会略各向异性；必要时改 <code>with_spring</code> 或自定义 Element 走 <code>TransformationMatrix</code></td></tr>
+        <tr><td class="mono">E-20</td><td><code>reduce_motion</code> 运行期变更（用户在系统设置里改开关）</td>
+          <td>macOS / Windows 无订阅通知，需再调 <code>apply_system_reduce_motion(cx)</code>，实际是否生效要试</td></tr>
+        <tr><td class="mono">E-21</td><td>移动端播放链路整体可行性</td>
+          <td>已单列为 <b>M8 里程碑</b>（见第 16 节）。<b>实测阻塞（2026-10）</b>：
+            本机只有 <code>aarch64-apple-darwin</code> 一个 target，<b>无 Xcode / iOS SDK</b>、
+            <b>无 Android SDK / NDK / cargo-ndk</b>；<code>rustup target add aarch64-apple-ios</code>
+            也因组件下载失败而回滚。M8 开工前必须先补齐工具链（见第 16 节 M8 的前置条件）。</td></tr>
+        <tr><td class="mono">E-22</td><td>移动端 IME 组合 / 无障碍 / 生命周期钩子</td>
+          <td>官方自述未完成；M8 里逐项验，不通就降级（例如移动端不发弹幕）</td></tr>
+      </tbody>
+    </table>
+    <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+      <div><b>使用方式：</b>开工前把 E-1 ～ E-18 逐条核一遍——核完能做的，把结论补回正文对应节；
+        做不到的，按「退路」列降级并在正文改口径。E-19 ～ E-22 只在实际做到那一步时才验，
+        不用提前核。核完的条目在本表里划掉（加删除线），保留记录。</div></div>
+  </div>
+</section>
+
 <!-- NOTES:
 ① 新增 CSS 类清单（前缀 s15-，共 9 个类 + 2 个修饰类）：
    s15-sheet, s15-sheet-grab, s15-rowitem, s15-rowval,
@@ -10648,32 +10377,6 @@ ul.clean li::marker { color: var(--theme-primary); }
      YKPili/Services/ApiManager.cs（HttpClient 15s 超时）
      YKPili/Views/HomeView.axaml.cs（封面 HttpClient 10s 超时 / CoverDecodeWidth 384）
 
-④ 存疑点 / 需要 Lead 拍板（**2026-10 修订：D-01 / D-02 / D-03 / D-04 / D-05 / D-06 / D-09
-   已裁决，D-08 仍为阻塞，D-07 可延后；下列为剩余项**）：
-   1) 【唯一仍阻塞的一项 · D-08 图标管线】Avalonia 没有 SVG sprite 渲染能力，
-      而全套文档都用内联 SVG。已按裁决推荐 <b>B（PathIcon）</b>——
-      不引新依赖、描边与主题色可控，代价是一次性转换成本。
-      它同时是第 13 节存疑点 8。<b>需 Lead 最终确认</b>（本条是唯一还会卡住
-      第 12 / 13 / 14 / 15 节图标落地的决策）。
-   2) 【D-07 · 可延后】安全区令牌的落地形式（默认 0 + 运行期覆盖）待确认；
-      已按裁决<b>不新建 <code>DimensionsMobile.axaml</code></b>，
-      移动端令牌全部进 <code>dimensions.rs</code>，用 <code>Mobile*</code> 前缀区分。
-   3) 【附录 B.6 的两处偏差】① 第 13 节新增的 <code>LayerMenu 65</code> / <code>LayerToast 75</code>
-      把契约 §1.4 的跨场景层号集合从 <code>{0,20,25,30,60,70}</code> 扩到
-      <code>{0,20,25,30,60,65,70,75}</code>，<b>第 01 节的层号表需补这两行</b>；
-      ② 第 12 节自报「30 个尺寸令牌」但报备表实列 29 条，<b>请第 12 节作者核对</b>。
-   4) 【附录 B.6 的 4 个待核定色值】<code>StatusError70Brush</code> / <code>StatusError80Brush</code> /
-      <code>FillDisabledBrush</code> / <code>TextOnAccentDisabledBrush</code>
-      的值来自第 13 节，<b>仍待 Lead 核定</b>（本清单原样转录，未擅填）。
-   5) 【附录 C.6 的超时口径 · 已裁决】<b>以代码为准</b>：<code>ApiManager</code> 是 15s，
-      10s 是<b>封面下载</b>超时（<code>HomeView.axaml.cs</code>）。
-      本附录 C.4 已写 15s 并注明差异；<b>Lead 去改主文档第 05 节的「请求超时（10s）」</b>。
-   6) 【附录 C 的离线文案「N 条」· 已裁决】文案示例写「已为你展示本地缓存的 <b>N 条内容</b>」，
-      <b>计数接口本轮不做</b>——<code>CacheManager</code> 暂不暴露条目数，
-      N 由占位符渲染；该接口已登记为<b>二期项</b>（见附录 A 末尾的二期项登记表）。
-   7) 【附录 C 的 11px / 10px · 已裁决】新增 <code>FontSizeDataOverlay 11</code>（<code>--fs-overlay</code>）
-      与 <code>FontSizeMicro 10</code>（<code>--fs-micro</code>），一起落 <code>typography.rs</code>；
-      预览页里散落的 11px / 10px 字面量随之改为引用令牌（<b>由 Lead 在整合主文档时一并替换</b>）。
 -->
 
 <div class="foot">YKPili UX 设计规范 · 生成自 <code>ui-ux-pro-max</code> 设计智能库 + 项目既有 Token 层</div>
@@ -10825,7 +10528,6 @@ function syncPlayIcon() {
 }
 /* 简略进度条只有一条线、没有按钮，因此不需要图标同步（保留空实现以便调用处不改） */
 function syncMiniIcon() {}
-
 
 /* 以下绑定逐个容错：任一节点缺失只跳过该条，不会中断后续绑定 */
 const on = (sel, fn) => { const el = document.querySelector(sel); if (el) el.addEventListener('click', fn); };
