@@ -115,12 +115,19 @@ impl MpvPlayer {
         // 把这个块单独隔离：`Symbol` 借用 `lib`，块结束即释放，
         // 之后才能把 `lib` move 进 Self。
         let (ctx, render, render_fn, free_fn, term_fn, wait_fn, report_fn) = unsafe {
-            let create: unsafe extern "C" fn() -> *mut MpvHandle =
-                *lib.get(b"mpv_create").map_err(|e| MpvError::Library(e.to_string()))?;
+            let create: unsafe extern "C" fn() -> *mut MpvHandle = *lib
+                .get(b"mpv_create")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
             let init: unsafe extern "C" fn(*mut MpvHandle) -> c_int =
-                *lib.get(b"mpv_initialize").map_err(|e| MpvError::Library(e.to_string()))?;
-            let set_opt: unsafe extern "C" fn(*mut MpvHandle, *const c_char, *const c_char) -> c_int =
-                *lib.get(b"mpv_set_option_string").map_err(|e| MpvError::Library(e.to_string()))?;
+                *lib.get(b"mpv_initialize")
+                    .map_err(|e| MpvError::Library(e.to_string()))?;
+            let set_opt: unsafe extern "C" fn(
+                *mut MpvHandle,
+                *const c_char,
+                *const c_char,
+            ) -> c_int = *lib
+                .get(b"mpv_set_option_string")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
             let render_create: unsafe extern "C" fn(
                 *mut *mut MpvRenderCtx,
                 *mut MpvHandle,
@@ -131,20 +138,20 @@ impl MpvPlayer {
             let render_fn: unsafe extern "C" fn(*mut MpvRenderCtx, *mut MpvRenderParam) -> c_int =
                 *lib.get(b"mpv_render_context_render")
                     .map_err(|e| MpvError::Library(e.to_string()))?;
-            let free_fn: unsafe extern "C" fn(*mut MpvRenderCtx) =
-                *lib.get(b"mpv_render_context_free")
-                    .map_err(|e| MpvError::Library(e.to_string()))?;
-            let term_fn: unsafe extern "C" fn(*mut MpvHandle) =
-                *lib.get(b"mpv_terminate_destroy")
-                    .map_err(|e| MpvError::Library(e.to_string()))?;
-            let wait_fn: unsafe extern "C" fn(*mut MpvHandle, f64) -> *mut c_void =
-                *lib.get(b"mpv_wait_event")
-                    .map_err(|e| MpvError::Library(e.to_string()))?;
+            let free_fn: unsafe extern "C" fn(*mut MpvRenderCtx) = *lib
+                .get(b"mpv_render_context_free")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
+            let term_fn: unsafe extern "C" fn(*mut MpvHandle) = *lib
+                .get(b"mpv_terminate_destroy")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
+            let wait_fn: unsafe extern "C" fn(*mut MpvHandle, f64) -> *mut c_void = *lib
+                .get(b"mpv_wait_event")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
             // SW 渲染后必须 report_swap，否则 mpv 认为「上一帧还没显示」，
             // 不会推进播放（表现就是画面永远停在第一帧）。
-            let report_fn: unsafe extern "C" fn(*mut MpvRenderCtx) =
-                *lib.get(b"mpv_render_context_report_swap")
-                    .map_err(|e| MpvError::Library(e.to_string()))?;
+            let report_fn: unsafe extern "C" fn(*mut MpvRenderCtx) = *lib
+                .get(b"mpv_render_context_report_swap")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
 
             let ctx = create();
             if ctx.is_null() {
@@ -163,13 +170,26 @@ impl MpvPlayer {
                 // 所以不能像 AVFoundation 那样把音频包喂给自定义渲染器。
                 // 让 mpv 播音频的好处：音画同步由它的 playloop 保证，
                 // 我们只需要按时取视频帧。
-                ("ao", std::env::var("YK_AO").unwrap_or_else(|_| "avfoundation".into()).leak()),
+                (
+                    "ao",
+                    std::env::var("YK_AO")
+                        .unwrap_or_else(|_| "avfoundation".into())
+                        .leak(),
+                ),
                 // 把 mpv 自己的日志打到 stderr，便于确认 AO 是否初始化成功
                 ("terminal", "yes"),
                 ("msg-level", "ao=info,vo=info,cplayer=warn"),
                 ("vid", "1"),
                 ("hwdec", "auto"),
                 ("keep-open", "yes"),
+                // B 站 CDN 对 Referer/UA 有要求；直接交给 mpv 的 HTTP 层，
+                // 避免 m4s 请求 403。
+                (
+                    "user-agent",
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+                     (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                ),
+                ("http-header-fields", "Referer: https://www.bilibili.com/"),
             ] {
                 let ck = CString::new(k).unwrap();
                 let cv = CString::new(v).unwrap();
@@ -189,7 +209,10 @@ impl MpvPlayer {
                     type_: MPV_RENDER_PARAM_API_TYPE,
                     data: api.as_ptr() as *mut c_void,
                 },
-                MpvRenderParam { type_: MPV_RENDER_PARAM_INVALID, data: ptr::null_mut() },
+                MpvRenderParam {
+                    type_: MPV_RENDER_PARAM_INVALID,
+                    data: ptr::null_mut(),
+                },
             ];
             let mut render: *mut MpvRenderCtx = ptr::null_mut();
             let rc = render_create(&mut render, ctx, params.as_mut_ptr());
@@ -233,9 +256,47 @@ impl MpvPlayer {
 
     /// 打开一个视频文件并等它加载完成。
     pub fn load_file(&mut self, path: &str) -> Result<(), MpvError> {
+        self.load_file_with_audio(path, None)
+    }
+
+    /// 打开视频；DASH 场景把独立音频作为附加音轨。
+    ///
+    /// **不要用 `loadfile ... audio-file=...`**：`loadfile` 的第三个参数只接受
+    /// 逗号分隔的 per-file 选项，`audio-file` 不是其中之一，mpv 会把它当成
+    /// 整数选项解析并报 `The loadfile option must be an integer`。
+    /// 正确路径是先 loadfile 视频，再用 `audio-add <url>` 添加音轨。
+    pub fn load_file_with_audio(
+        &mut self,
+        path: &str,
+        audio: Option<&str>,
+    ) -> Result<(), MpvError> {
+        self.load_plain(path)?;
+        let Some(audio) = audio else {
+            return Ok(());
+        };
         unsafe {
-            let cmd: unsafe extern "C" fn(*mut MpvHandle, *const *const c_char) -> c_int =
-                *self._lib.get(b"mpv_command").map_err(|e| MpvError::Library(e.to_string()))?;
+            let cmd: unsafe extern "C" fn(*mut MpvHandle, *const *const c_char) -> c_int = *self
+                ._lib
+                .get(b"mpv_command")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
+            let c_add = CString::new("audio-add").map_err(|_| MpvError::Command(-1))?;
+            let c_audio = CString::new(audio).map_err(|_| MpvError::Command(-1))?;
+            let args = [c_add.as_ptr(), c_audio.as_ptr(), ptr::null()];
+            let rc = cmd(self.ctx, args.as_ptr());
+            if rc < 0 {
+                // 音轨失败不应让视频也打不开：保留无声播放，至少画面可用。
+                eprintln!("[mpv] audio-add 失败（rc={rc}），视频继续无声播放");
+            }
+        }
+        Ok(())
+    }
+
+    fn load_plain(&mut self, path: &str) -> Result<(), MpvError> {
+        unsafe {
+            let cmd: unsafe extern "C" fn(*mut MpvHandle, *const *const c_char) -> c_int = *self
+                ._lib
+                .get(b"mpv_command")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
             let c_load = CString::new("loadfile").unwrap();
             let c_path = CString::new(path).unwrap();
             let args = [c_load.as_ptr(), c_path.as_ptr(), ptr::null()];
@@ -244,7 +305,10 @@ impl MpvPlayer {
                 return Err(MpvError::Command(rc));
             }
         }
+        self.wait_file_loaded()
+    }
 
+    fn wait_file_loaded(&mut self) -> Result<(), MpvError> {
         // 等 FILE_LOADED（事件 8）；最多 10 秒
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while std::time::Instant::now() < deadline {
@@ -263,6 +327,25 @@ impl MpvPlayer {
             }
         }
         Err(MpvError::Timeout)
+    }
+
+    /// 暂停 / 继续播放（卡片视频控制栏用）。
+    pub fn set_pause(&mut self, paused: bool) -> Result<(), MpvError> {
+        unsafe {
+            let cmd: unsafe extern "C" fn(*mut MpvHandle, *const *const c_char) -> c_int = *self
+                ._lib
+                .get(b"mpv_command")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
+            let c_cmd = CString::new("set").unwrap();
+            let c_prop = CString::new("pause").unwrap();
+            let c_val = CString::new(if paused { "yes" } else { "no" }).unwrap();
+            let args = [c_cmd.as_ptr(), c_prop.as_ptr(), c_val.as_ptr(), ptr::null()];
+            let rc = cmd(self.ctx, args.as_ptr());
+            if rc < 0 {
+                return Err(MpvError::Command(rc));
+            }
+        }
+        Ok(())
     }
 
     /// 渲染当前帧到内部缓冲区。
@@ -313,11 +396,26 @@ impl MpvPlayer {
         let mut stride = self.stride;
 
         let mut params = [
-            MpvRenderParam { type_: MPV_RENDER_PARAM_SW_SIZE, data: size.as_mut_ptr() as *mut c_void },
-            MpvRenderParam { type_: MPV_RENDER_PARAM_SW_FORMAT, data: c_format.as_ptr() as *mut c_void },
-            MpvRenderParam { type_: MPV_RENDER_PARAM_SW_STRIDE, data: &mut stride as *mut _ as *mut c_void },
-            MpvRenderParam { type_: MPV_RENDER_PARAM_SW_POINTER, data: self.buf.as_mut_ptr() as *mut c_void },
-            MpvRenderParam { type_: MPV_RENDER_PARAM_INVALID, data: ptr::null_mut() },
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_SW_SIZE,
+                data: size.as_mut_ptr() as *mut c_void,
+            },
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_SW_FORMAT,
+                data: c_format.as_ptr() as *mut c_void,
+            },
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_SW_STRIDE,
+                data: &mut stride as *mut _ as *mut c_void,
+            },
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_SW_POINTER,
+                data: self.buf.as_mut_ptr() as *mut c_void,
+            },
+            MpvRenderParam {
+                type_: MPV_RENDER_PARAM_INVALID,
+                data: ptr::null_mut(),
+            },
         ];
 
         let rc = unsafe { (self.render_render)(self.render, params.as_mut_ptr()) };
@@ -384,7 +482,11 @@ fn encode_png(w: u32, h: u32, raw: &[u8]) -> Vec<u8> {
         for i in 0..256u32 {
             let mut c = i;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             table[i as usize] = c;
         }
