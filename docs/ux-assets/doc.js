@@ -136,7 +136,7 @@
     if (!rail) return;
     var w = rail.clientWidth || (rail.parentElement ? rail.parentElement.clientWidth : 0);
     if (!w) return;
-    var cols = Math.max(2, Math.min(12, Math.floor(w / 208)));
+    var cols = Math.max(1, Math.floor((w + 16) / 224));
     rail.style.setProperty('--cols', cols);
   }
 

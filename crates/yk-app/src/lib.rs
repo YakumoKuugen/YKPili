@@ -1477,10 +1477,8 @@ fn top_bar(
                 .items_center()
                 .gap(px(SPACE_1))
                 .flex_shrink_0()
-                .child(top_icon_button(t, IconName::Clock, false))
-                .child(top_icon_button(t, IconName::Bookmark, false))
-                .child(top_icon_button(t, IconName::RefreshCw, false))
-                .child(top_icon_button(t, IconName::Bell, true))
+                // 历史 / 收藏 / 消息 / 刷新 四个快捷动作已挪进底部 Dock，
+                // 顶栏右侧只保留账号头像。
                 .child(avatar(t, face_url, hide_avatar, cx)),
         )
 }
@@ -2605,6 +2603,55 @@ const DOCK_ENTRIES: [DockEntry; 3] = [
     },
 ];
 
+/// Dock 里的动作项：与导航项同高同字号，图标 + 文字。
+///
+/// 顶栏原来的四个图标移进来时只有图标，和左侧三个导航项不一致；
+/// 这里统一成「16 图标 + 12 文字」，消息保留未读红点。
+fn dock_action(
+    t: &YkTheme,
+    icon: IconName,
+    label: &'static str,
+    unread: bool,
+) -> impl IntoElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    let hover_bg = s.fill_1;
+    let hover_fg = s.text_primary;
+    let fg = s.text_secondary;
+    div()
+        .h(px(DOCK_ITEM_HEIGHT))
+        .px(px(SPACE_3))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_2))
+        .rounded_full()
+        .text_size(px(FONT_SIZE_CAPTION))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(fg)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
+        .child(
+            div()
+                .relative()
+                .flex()
+                .items_center()
+                .child(Icon::new(icon).size(px(16.)).text_color(fg))
+                .when(unread, |el| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .top(px(-2.))
+                            .right(px(-2.))
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(p.bili_pink),
+                    )
+                }),
+        )
+        .child(label)
+}
+
 fn dock(
     t: &YkTheme,
     page: Option<pages::PageKind>,
@@ -2685,6 +2732,21 @@ fn dock(
                 })),
         );
     }
+
+    // 顶栏原来的四个快捷动作挪进 Dock：导航与动作之间用 1px 分隔线。
+    row = row
+        .child(
+            div()
+                .w(px(1.))
+                .h(px(20.))
+                .mx(px(SPACE_1))
+                .bg(s.border_subtle),
+        )
+        // 顺序：历史 / 收藏 / 消息 / 刷新；与导航项一样带文字
+        .child(dock_action(t, IconName::Clock, "历史", false))
+        .child(dock_action(t, IconName::Bookmark, "收藏", false))
+        .child(dock_action(t, IconName::Bell, "消息", true))
+        .child(dock_action(t, IconName::RefreshCw, "刷新", false));
 
     div()
         .absolute()

@@ -1891,3 +1891,23 @@ ul.clean li::marker { color: var(--theme-primary); }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--fs-caption); color: var(--text-4);
 }
+
+/* ---------- 03 首页 · 当前实现（底部三入口 Dock + 定宽网格） ---------- */
+.home-rail { display: flex; flex-wrap: wrap; justify-content: center; gap: 16px; }
+.home-rail .card { width: 208px; flex: 0 0 208px; }
+.app > .home-dock { position: absolute; left: 50%; bottom: 20px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 4px; padding: 6px;
+  border-radius: var(--radius-full); background: var(--surface-elevated-strong);
+  border: 1px solid var(--border-subtle); box-shadow: var(--shadow-3), var(--edge-glow); }
+.home-dock button { height: 40px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+  border: 0; border-radius: var(--radius-full); background: transparent; color: var(--text-2);
+  font-family: inherit; font-size: var(--fs-caption); font-weight: var(--fw-medium);
+  cursor: pointer; white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard); }
+.home-dock button:hover { background: var(--fill-1); color: var(--text-1); }
+.home-dock button.on { background: var(--theme-primary); color: #fff; font-weight: var(--fw-semibold); }
+
+.home-dock .sep { flex: none; width: 1px; height: 20px; margin: 0 4px;
+  background: var(--border-subtle); }
+.home-dock .dot { display: inline-block; width: 6px; height: 6px; margin-left: 2px;
+  border-radius: 50%; background: var(--bili-pink); }
