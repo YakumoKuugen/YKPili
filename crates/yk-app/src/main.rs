@@ -20,65 +20,41 @@ fn main() {
         // 关键：GPUI 默认是 NullHttpClient（不发请求、静默失败），
         // 换成真实的客户端后 img() 才能拉到图床上的封面。
         .with_http_client(yk_app::http::YkHttpClient::shared())
-        .with_assets(assets::Assets)
+        // 卡片封面操作图标（clock / download / message-circle 等）不在
+        // 组件库的默认子集里，必须注册完整图标目录，否则 `Icon` 取不到 SVG。
+        .with_assets(assets::AllAssets)
         .run(|cx| {
             init(cx);
 
-            // M7：启动时尝试拉一页真实推荐。
-            // 失败不阻塞启动 —— 先回退本地缓存，再退回占位数据。
+            // 首屏策略：先把「能立刻显示的内容」铺上，网络请求移到窗口里异步做。
+            // - 有缓存：先显示缓存，请求回来后原地替换；
+            // - 无缓存：首屏骨架（设计文档第 05 节），请求回来后回填；
+            // - YK_OFFLINE：直接用缓存 / 占位数据，不显示骨架。
             let cache = yk_core::feed_cache::FeedCache::new();
             let forced_offline = std::env::var("YK_OFFLINE").is_ok();
-            let mut offline = forced_offline;
-            let mut real_items = None;
+            // 空缓存不当作可显示内容，否则首屏会是一张空网格而不是骨架。
+            let cached = cache.load().filter(|c| !c.items.is_empty());
 
             if forced_offline {
                 eprintln!("[offline] YK_OFFLINE=1，跳过网络请求");
-            } else {
-                match yk_core::api::client::ReqwestClient::new() {
-                    Ok(client) => {
-                        match yk_core::api::client::fetch_recommend(
-                            &client,
-                            "",
-                            30,
-                            yk_core::api::client::now_wts(),
-                        ) {
-                            Ok(items) => {
-                                eprintln!("[api] 真实推荐拉取成功：{} 条", items.len());
-                                if let Err(e) = cache.save(&items) {
-                                    eprintln!("[cache] 推荐流写入失败：{e}");
-                                }
-                                real_items = Some(items);
-                            }
-                            Err(e) => {
-                                eprintln!("[api] 真实推荐拉取失败，尝试缓存：{e}");
-                                offline = true;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[api] HTTP 客户端初始化失败，尝试缓存：{e}");
-                        offline = true;
-                    }
+                match &cached {
+                    Some(c) => eprintln!(
+                        "[offline] 使用缓存：{} 条（{}）",
+                        c.items.len(),
+                        yk_core::feed_cache::age_text(c.updated_at)
+                    ),
+                    None => eprintln!("[offline] 没有可用缓存，使用占位数据"),
                 }
+            } else if let Some(c) = &cached {
+                eprintln!(
+                    "[cache] 首屏先显示缓存：{} 条（{}），后台刷新",
+                    c.items.len(),
+                    yk_core::feed_cache::age_text(c.updated_at)
+                );
+            } else {
+                eprintln!("[api] 无缓存，首屏显示卡片骨架");
             }
 
-            // 离线 / 启动失败：有缓存就用缓存，没有就交给 AppRoot::new() 的占位数据。
-            let mut offline_updated_at = None;
-            if real_items.is_none() {
-                match cache.load() {
-                    Some(cached) => {
-                        eprintln!(
-                            "[offline] 使用缓存：{} 条（{}）",
-                            cached.items.len(),
-                            yk_core::feed_cache::age_text(cached.updated_at)
-                        );
-                        offline_updated_at = Some(cached.updated_at);
-                        real_items = Some(cached.items);
-                    }
-                    None if offline => eprintln!("[offline] 没有可用缓存，使用占位数据"),
-                    None => {}
-                }
-            }
             open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -87,7 +63,10 @@ fn main() {
                     })),
                     titlebar: Some(TitlebarOptions {
                         title: Some("YKPili".into()),
-                        ..Default::default()
+                        // 原生标题栏透明 + FullSizeContentView：去掉白色标题条，
+                        // 红黄绿按钮直接压在应用顶栏上；顶栏左侧为按钮让出空间。
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(20.), px(18.))),
                     }),
                     ..Default::default()
                 },
@@ -109,23 +88,68 @@ fn main() {
                     eprintln!("[build] 窗口 build 闭包第 {n} 次执行");
                     // 窗口创建时构造一次播放器（若指定了 YK_VIDEO）。
                     let theme = yk_ui::theme::YkTheme::dark();
-                    let want_player = std::env::var("YK_VIDEO").is_ok();
+                    let want_player =
+                        std::env::var("YK_VIDEO").is_ok() || std::env::var("YK_BVID").is_ok();
                     let player = if want_player {
-                        Some(cx.new(|_| yk_app::player::PlayerView::new(theme)))
+                        let player = cx.new(|cx| yk_app::player::PlayerView::new(theme, cx));
+                        // 验收入口：YK_BVID=BV... 直接走和卡片点击同一条取流链路。
+                        if let Ok(bvid) = std::env::var("YK_BVID") {
+                            let _ = player.update(cx, |view, cx| view.open_bvid(bvid, cx));
+                        }
+                        Some(player)
                     } else {
                         None
                     };
-                    let mut app = match real_items {
-                        Some(items) => AppRoot::with_real_data(&items),
-                        None => AppRoot::new(),
+                    // 启动时恢复上次登录；无效/损坏的会话自动忽略。
+                    let saved_session = if std::env::var("YK_FORCE_LOGIN").is_ok() {
+                        None
+                    } else {
+                        yk_core::session::load(&yk_core::session::session_path())
+                            .filter(|s| s.is_valid())
                     };
-                    if offline {
-                        app = app.with_offline(offline_updated_at);
-                    }
+                    let mut app = if forced_offline {
+                        match cached {
+                            Some(c) => {
+                                AppRoot::with_real_data(&c.items).with_offline(Some(c.updated_at))
+                            }
+                            None => AppRoot::new().with_offline(None),
+                        }
+                    } else {
+                        match cached {
+                            Some(c) => AppRoot::with_real_data(&c.items),
+                            None => AppRoot::loading(),
+                        }
+                    };
                     if let Some(p) = player {
                         app = app.with_player(p);
                     }
-                    cx.new(|_| app)
+                    app = app.with_session(saved_session);
+                    // 验收入口：YK_PAGE=following 直接落到关注瀑布流。
+                    let start_page =
+                        std::env::var("YK_PAGE")
+                            .ok()
+                            .and_then(|page| match page.as_str() {
+                                "following" => Some(yk_app::pages::PageKind::Following),
+                                "hot" => Some(yk_app::pages::PageKind::Hot),
+                                "rank" => Some(yk_app::pages::PageKind::Rank),
+                                "live" => Some(yk_app::pages::PageKind::Live),
+                                _ => None,
+                            });
+                    if let Some(page) = start_page {
+                        app = app.with_page(page);
+                    }
+                    let entity = cx.new(|_| app);
+                    // 页面图片缓存：滚动时按「可视 + 一行」驱逐卡片图，
+                    // 同时释放 CPU 解码资源与窗口图集条目。
+                    let page_image_cache = yk_app::page_image_cache::PageImageCache::new(cx);
+                    let _ = entity.update(cx, |app, _| app.set_page_image_cache(page_image_cache));
+                    let _ = entity.update(cx, |app, cx| app.install_player_close_handler(cx));
+                    if !forced_offline {
+                        // 首屏请求放到窗口里异步跑：窗口先出骨架/缓存，不阻塞启动。
+                        let _ = entity.update(cx, |app, cx| app.start_initial_load(cx));
+                    }
+                    let _ = entity.update(cx, |app, cx| app.load_current_page(cx));
+                    entity
                 },
             )
             .expect("打开窗口失败");

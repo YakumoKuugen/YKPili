@@ -17,6 +17,8 @@ pub enum PageKind {
     Category,
     Rank,
     Live,
+    /// 关注动态：底部 Dock 的「正在关注」入口。
+    Following,
     Mine,
     Settings,
     Search,
@@ -29,6 +31,7 @@ impl PageKind {
             Self::Category => "分区",
             Self::Rank => "排行",
             Self::Live => "直播",
+            Self::Following => "正在关注",
             Self::Mine => "我的",
             Self::Settings => "设置",
             Self::Search => "搜索",
@@ -45,7 +48,12 @@ pub enum PageState {
     Error,
 }
 
-pub fn render(theme: &YkTheme, page: PageKind, state: PageState) -> impl IntoElement {
+pub fn render(
+    theme: &YkTheme,
+    page: PageKind,
+    state: PageState,
+    signed_in: bool,
+) -> impl IntoElement {
     let s = &theme.surfaces;
     let mut col = div()
         .flex()
@@ -61,8 +69,10 @@ pub fn render(theme: &YkTheme, page: PageKind, state: PageState) -> impl IntoEle
                 "换个分类或稍后再试",
             )
             .into_any_element(),
-            PageState::Error => status::error(theme, "加载失败", "检查网络后重试").into_any_element(),
-            PageState::Ready => body(theme, page).into_any_element(),
+            PageState::Error => {
+                status::error(theme, "加载失败", "检查网络后重试").into_any_element()
+            }
+            PageState::Ready => body(theme, page, signed_in).into_any_element(),
         });
     // 内容区背景用页面底色，避免与顶栏/分类条同色糊成一片
     col = col.bg(s.bg_base);
@@ -87,17 +97,15 @@ fn header(theme: &YkTheme, page: PageKind) -> impl IntoElement {
 
 // ================= 四态 =================
 
-
-
-
 // ================= 各页面正文 =================
 
-fn body(theme: &YkTheme, page: PageKind) -> AnyElement {
+fn body(theme: &YkTheme, page: PageKind, signed_in: bool) -> AnyElement {
     match page {
         PageKind::Hot => hot(theme).into_any_element(),
         PageKind::Category => category(theme).into_any_element(),
         PageKind::Rank => rank(theme).into_any_element(),
         PageKind::Live => live(theme).into_any_element(),
+        PageKind::Following => following(theme, signed_in),
         PageKind::Mine => mine(theme).into_any_element(),
         PageKind::Settings => settings(theme).into_any_element(),
         PageKind::Search => search(theme).into_any_element(),
@@ -136,7 +144,11 @@ fn hot(theme: &YkTheme) -> impl IntoElement {
                         .w(px(24.))
                         .text_size(px(FONT_SIZE_BODY))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(if i < 3 { p.status_error } else { s.text_quaternary })
+                        .text_color(if i < 3 {
+                            p.status_error
+                        } else {
+                            s.text_quaternary
+                        })
                         .child(format!("{}", i + 1)),
                 )
                 .child(
@@ -241,7 +253,11 @@ fn chip(theme: &YkTheme, label: &str, active: bool) -> impl IntoElement {
         .rounded(px(RADIUS_FULL))
         .bg(if active { p.theme_primary_20 } else { s.fill_1 })
         .text_size(px(FONT_SIZE_CONTROL))
-        .text_color(if active { p.theme_primary } else { s.text_secondary })
+        .text_color(if active {
+            p.theme_primary
+        } else {
+            s.text_secondary
+        })
         .child(label.to_string())
 }
 
@@ -293,6 +309,135 @@ fn live(theme: &YkTheme) -> impl IntoElement {
     grid
 }
 
+const FOLLOWING_UPDATES: [(&str, &str, &str, &str); 5] = [
+    (
+        "生",
+        "生肉烹饪师",
+        "发布了新视频：一顿饭的成本到底有多少",
+        "12 分钟前",
+    ),
+    (
+        "甜",
+        "一碗甜子",
+        "发布了新视频：深夜食堂 · 第 12 期",
+        "1 小时前",
+    ),
+    (
+        "班",
+        "班长captain",
+        "发布了 3 张图片 · 极限运动合集",
+        "3 小时前",
+    ),
+    (
+        "明",
+        "技术宅小明",
+        "发布了新视频：用 Rust 从零写一个播放器",
+        "昨天",
+    ),
+    (
+        "猫",
+        "猫猫观察日记",
+        "转发了动态：这个夏天最值得去的十个地方",
+        "昨天",
+    ),
+];
+
+/// 关注动态：未登录只给登录引导，登录后展示关注 UP 主的更新流。
+fn following(theme: &YkTheme, signed_in: bool) -> AnyElement {
+    let s = &theme.surfaces;
+    let p = &theme.palette;
+
+    if !signed_in {
+        return status::empty(
+            theme,
+            "登录后查看关注动态",
+            "关注 UP 主后，TA 的新视频和动态会出现在这里",
+        )
+        .into_any_element();
+    }
+
+    let mut list = div().flex().flex_col().gap(px(SPACE_2)).w_full();
+    for (avatar, up, text, time) in FOLLOWING_UPDATES {
+        list = list.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(SPACE_3))
+                .p(px(SPACE_3))
+                .rounded(px(CARD_RADIUS))
+                .bg(s.surface_content)
+                .border_1()
+                .border_color(s.border_subtle)
+                .child(
+                    div()
+                        .w(px(40.))
+                        .h(px(40.))
+                        .rounded_full()
+                        .bg(p.theme_primary_20)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(FONT_SIZE_BODY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.theme_primary)
+                        .child(avatar.to_string()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(px(FONT_SIZE_CONTROL))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(s.text_primary)
+                                .child(up.to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(FONT_SIZE_CAPTION))
+                                .text_color(s.text_tertiary)
+                                .line_clamp(1)
+                                .child(text.to_string()),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(s.text_quaternary)
+                        .child(time.to_string()),
+                ),
+        );
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(SPACE_3))
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(SPACE_2))
+                .child(chip(theme, "全部动态", true))
+                .child(chip(theme, "新视频", false))
+                .child(chip(theme, "图文动态", false))
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(s.text_tertiary)
+                        .child("按发布时间排序"),
+                ),
+        )
+        .child(list)
+        .into_any_element()
+}
+
 fn mine(theme: &YkTheme) -> impl IntoElement {
     let s = &theme.surfaces;
     let p = &theme.palette;
@@ -340,41 +485,29 @@ fn mine(theme: &YkTheme) -> impl IntoElement {
                         ),
                 ),
         )
-        .child(
-            div()
-                .flex()
-                .gap(px(SPACE_3))
-                .children(["观看历史", "我的收藏", "关注动态", "稍后再看"].map(|label| {
-                    div()
-                        .flex_1()
-                        .h(px(88.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(CARD_RADIUS))
-                        .bg(s.surface_content)
-                        .border_1()
-                        .border_color(s.border_subtle)
-                        .text_size(px(FONT_SIZE_CONTROL))
-                        .text_color(s.text_secondary)
-                        .child(label)
-                })),
-        )
+        .child(div().flex().gap(px(SPACE_3)).children(
+            ["观看历史", "我的收藏", "关注动态", "稍后再看"].map(|label| {
+                div()
+                    .flex_1()
+                    .h(px(88.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(CARD_RADIUS))
+                    .bg(s.surface_content)
+                    .border_1()
+                    .border_color(s.border_subtle)
+                    .text_size(px(FONT_SIZE_CONTROL))
+                    .text_color(s.text_secondary)
+                    .child(label)
+            }),
+        ))
 }
 
 const SETTINGS_GROUPS: [(&str, [&str; 3]); 3] = [
-    (
-        "播放",
-        ["默认清晰度", "自动连播", "记忆播放进度"],
-    ),
-    (
-        "外观",
-        ["主题跟随系统", "卡片密度", "右侧信息面板默认展开"],
-    ),
-    (
-        "其它",
-        ["开机自启", "检查更新", "清除缓存"],
-    ),
+    ("播放", ["默认清晰度", "自动连播", "记忆播放进度"]),
+    ("外观", ["主题跟随系统", "卡片密度", "右侧信息面板默认展开"]),
+    ("其它", ["开机自启", "检查更新", "清除缓存"]),
 ];
 
 fn settings(theme: &YkTheme) -> impl IntoElement {
@@ -427,7 +560,13 @@ fn settings(theme: &YkTheme) -> impl IntoElement {
     col
 }
 
-const SEARCH_HISTORY: [&str; 5] = ["GPUI 布局性能", "Rust 视频播放", "B 站 API", "弹幕渲染", "材质设计"];
+const SEARCH_HISTORY: [&str; 5] = [
+    "GPUI 布局性能",
+    "Rust 视频播放",
+    "B 站 API",
+    "弹幕渲染",
+    "材质设计",
+];
 
 fn search(theme: &YkTheme) -> impl IntoElement {
     let s = &theme.surfaces;

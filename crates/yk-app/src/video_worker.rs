@@ -36,9 +36,14 @@ use yk_media::MpvPlayer;
 struct SendBuffer(CFRetained<CVPixelBuffer>, f64);
 unsafe impl Send for SendBuffer {}
 
+enum WorkerCommand {
+    Pause(bool),
+}
+
 /// 渲染线程句柄。
 pub struct FrameWorker {
     rx: Receiver<SendBuffer>,
+    commands: mpsc::Sender<WorkerCommand>,
     stop: Arc<AtomicBool>,
     pub video: String,
 }
@@ -46,16 +51,22 @@ pub struct FrameWorker {
 impl FrameWorker {
     /// 启动渲染线程。失败（找不到 libmpv / 打不开文件）返回 `None`。
     pub fn spawn(video: String, width: u32, height: u32) -> Option<Self> {
-        // 防重复：历史上 PlayerView 被点击穿透反复重建，每次都会起一个渲染线程，
-        // 日志里出现过 14 个线程同时解码同一个文件。现在实例唯一（附录 F L-1），
-        // 这个全局闸门保留作为兜底。
-        static SPAWNED: AtomicBool = AtomicBool::new(false);
-        if SPAWNED.swap(true, Ordering::SeqCst) {
-            eprintln!("[video] 已有渲染线程，跳过重复启动");
-            return None;
-        }
+        Self::spawn_with_audio(video, None, width, height)
+    }
 
+    /// 启动渲染线程；DASH 视频把独立音轨一起交给 mpv。
+    ///
+    /// **不要再用全局 `SPAWNED` 闸门**：点不同卡片时要换源重建 worker，
+    /// 旧 worker drop 后必须允许新线程启动；防重复由 `PlayerView` 单实例 +
+    /// `worker.is_some()` 保证。
+    pub fn spawn_with_audio(
+        video: String,
+        audio: Option<String>,
+        width: u32,
+        height: u32,
+    ) -> Option<Self> {
         let (tx, rx) = mpsc::channel::<SendBuffer>();
+        let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_in_thread = stop.clone();
         let path = video.clone();
@@ -70,21 +81,58 @@ impl FrameWorker {
                         return;
                     }
                 };
-                if let Err(e) = player.load_file(&path) {
+                if let Err(e) = player.load_file_with_audio(&path, audio.as_deref()) {
                     eprintln!("[video] load_file 失败：{e}");
                     return;
                 }
-                eprintln!("[video] 渲染线程已启动：{path}");
+                eprintln!(
+                    "[video] 渲染线程已启动：{path}{}",
+                    if audio.is_some() {
+                        "（含独立音轨）"
+                    } else {
+                        ""
+                    }
+                );
 
+                let mut frames_sent = 0u64;
+                let mut render_errors = 0u32;
                 while !stop_in_thread.load(Ordering::Relaxed) {
+                    while let Ok(command) = command_rx.try_recv() {
+                        match command {
+                            WorkerCommand::Pause(paused) => {
+                                if let Err(e) = player.set_pause(paused) {
+                                    eprintln!("[video] set pause={paused} 失败：{e}");
+                                }
+                            }
+                        }
+                    }
                     player.drain_events();
                     let t = player.get_property_double("time-pos").unwrap_or(0.0);
-                    if let Ok(rgba) = player.render_frame() {
-                        let nv12 = rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
-                        let buf = nv12_to_pixel_buffer(&nv12);
-                        // 队列里积压的旧帧直接丢弃：UI 只要最新的
-                        if tx.send(SendBuffer(buf, t)).is_err() {
-                            break; // UI 侧已释放 channel
+                    match player.render_frame() {
+                        Ok(rgba) => {
+                            if frames_sent == 0 {
+                                let vw = player.get_property_double("width").unwrap_or(0.0);
+                                let vh = player.get_property_double("height").unwrap_or(0.0);
+                                eprintln!(
+                                    "[video] 首帧 {}x{}（片源 {vw:.0}x{vh:.0}）t={t:.2}",
+                                    rgba.width, rgba.height
+                                );
+                            }
+                            frames_sent += 1;
+                            let nv12 = rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
+                            let buf = nv12_to_pixel_buffer(&nv12);
+                            // 队列里积压的旧帧直接丢弃：UI 只要最新的
+                            if tx.send(SendBuffer(buf, t)).is_err() {
+                                break; // UI 侧已释放 channel
+                            }
+                        }
+                        Err(e) => {
+                            if render_errors < 5 {
+                                render_errors += 1;
+                                eprintln!(
+                                    "[video] render_frame 失败（第 {render_errors} 次）：{e}"
+                                );
+                            }
                         }
                     }
                     std::thread::sleep(Duration::from_millis(16));
@@ -92,7 +140,17 @@ impl FrameWorker {
             })
             .ok()?;
 
-        Some(Self { rx, stop, video })
+        Some(Self {
+            rx,
+            commands: command_tx,
+            stop,
+            video,
+        })
+    }
+
+    /// 暂停 / 继续；命令投递给渲染线程，UI 线程不直接碰 mpv。
+    pub fn set_paused(&self, paused: bool) {
+        let _ = self.commands.send(WorkerCommand::Pause(paused));
     }
 
     /// 取最新一帧（丢弃中间积压的）。没新帧时返回 `None`。

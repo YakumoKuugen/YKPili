@@ -3,11 +3,15 @@
 //! 绘制顺序 = 这个文件里 child 的排列顺序（GPUI 没有 z-index）：
 //!
 //! ```text
-//! ① 视频 surface      absolute inset_0       最先挂，铺满
-//! ② 底部渐变遮罩      absolute bottom        让控制栏文字在亮画面上可读
-//! ③ 控制栏 88px       deferred(priority 30)  弹幕输入 38 + 操作条 50
-//! ④ 信息面板          deferred(priority 60)  展开 400 / 收起 200
-//! ⑤ 骑边界按钮        deferred(priority 61)  唯一常驻的唤回入口
+//! ⓪ 浮窗外侧点击层    topbar 之下、整页      点击关闭（顶栏保持可用）
+//! ① 浮窗 600 高       顶栏下方 16px          圆角 + shadow_glass_modal
+//!    ⓪ 入场          封面 bounds → 目标框    280ms 单段曲线 + 轻回弹
+//!    ①a 视频 surface   absolute inset_0     铺满窗口
+//!    ①b 弹幕层 / 取流状态 / 底部渐变
+//!    ①c 控制栏 88px     absolute bottom
+//!    ①d 信息面板       展开 400 / 收起 200
+//!    ①e 骑边界按钮
+//!    ①f Esc 提示       第一次 Esc 显示
 //! ```
 //!
 //! **D-05 规格（用户已调好，不要改）**：
@@ -15,7 +19,7 @@
 
 use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::prelude::*;
-use gpui::{InteractiveElement, StatefulInteractiveElement, *};
+use gpui::{FocusHandle, InteractiveElement, StatefulInteractiveElement, *};
 use yk_core::danmaku::{Danmaku, DanmakuSet, LaneAllocator};
 use yk_core::player::PlayerState;
 use yk_ui::theme::*;
@@ -73,7 +77,10 @@ impl MpvFrameSource {
         }
         let cost = t0.elapsed();
         if cost.as_millis() >= 8 {
-            eprintln!("[player] pump 耗时 {}ms（>8ms 会拖慢 UI）", cost.as_millis());
+            eprintln!(
+                "[player] pump 耗时 {}ms（>8ms 会拖慢 UI）",
+                cost.as_millis()
+            );
         }
         t
     }
@@ -89,6 +96,27 @@ const CTRL_H: f32 = PLAYER_CONTROL_BAR_HEIGHT; // 88
 const DANMAKU_INPUT_H: f32 = 38.0;
 const INFO_PANEL_EXPANDED: f32 = PLAYER_INFO_PANEL_WIDTH; // 400
 const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
+/// 浮窗高度（设计文档第 06 节：600）。
+const PLAYER_FLOAT_HEIGHT: f32 = 600.0;
+/// 从封面展开：一条连续曲线走完，避免两段缓动在交界处出现速度断点。
+/// 280ms 向 macOS Quick Look 的快速预览节奏靠拢，尾部只留很短的过冲回弹。
+const PLAYER_ENTRANCE_MS: u64 = 280;
+/// 关闭缩回封面；Quick Look 收回通常比展开更短，这里 260ms。
+const PLAYER_EXIT_MS: u64 = 260;
+
+/// 点击卡片时冻结的封面几何与视觉信息。
+///
+/// 坐标已经换算成 AppRoot 页面坐标；`root_size` 用来在播放器窗口里
+/// 重新算目标尺寸，窗口 resize 时不会用旧宽度。
+#[derive(Clone)]
+pub struct CoverSource {
+    pub bounds: Bounds<Pixels>,
+    pub root_size: Size<Pixels>,
+    pub bvid: String,
+    pub title: String,
+    pub image_url: String,
+    pub placeholder_color: String,
+}
 
 pub struct PlayerView {
     theme: YkTheme,
@@ -99,7 +127,7 @@ pub struct PlayerView {
     /// 最近一帧（由 worker 产出）
     #[cfg(target_os = "macos")]
     current: Option<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>>,
-    /// 播放循环是否已启动（render 首帧时启动一次）
+    /// 播放循环是否已启动（worker 创建后同帧启动一次，不能等下一次 render）
     #[cfg(target_os = "macos")]
     loop_started: bool,
     /// 面板是否展开（hover 唤起）。
@@ -118,11 +146,38 @@ pub struct PlayerView {
     /// 输入框按了 Enter（`InputEvent::PressEnter`），下一轮 render 里发送。
     /// 订阅回调拿不到 `Window`，而清空输入框需要，所以用 defer 转一手。
     submit_requested: bool,
-    /// 是否已尝试启动渲染线程（防重复）
+    /// 是否已尝试启动渲染线程（换源时重置）
     tried_worker: bool,
+    /// 当前卡片的播放源；None = 还没点卡片 / 正在请求。
+    source: Option<yk_core::PlaybackSource>,
+    /// 正在后台取播放地址。
+    loading_source: bool,
+    /// 取流失败原因（卡片没有 bvid / 需要登录 / 视频受限）。
+    source_error: Option<String>,
+    /// 取流代次：连续点不同卡片时只接受最后一次结果。
+    load_generation: u64,
     /// 输入框是否处于聚焦。聚焦时暂停渲染循环 ——
     /// 因为 pump() 在 UI 线程要做 10-25ms 的转换，会把输入事件和音频都拖卡。
     input_focused: bool,
+    /// 浮窗根焦点：Esc 两次关闭。
+    focus_handle: FocusHandle,
+    /// 下一次 render 把焦点交给浮窗根（打开 / 换源时置位）。
+    needs_focus: bool,
+    /// 第一次 Esc 后显示「再次按 Esc 关闭」。
+    escape_hint: bool,
+    /// 提示代际：5 秒自动收回 / 关闭 / 换源时递增，旧定时器不能误关新提示。
+    escape_hint_generation: u64,
+    /// 点封面打开时的起始几何；None = 程序化打开（YK_BVID / YK_VIDEO）。
+    entrance_source: Option<CoverSource>,
+    /// 入场动画代际：只换 id，不在 render 里生成新时钟。
+    entrance_generation: u64,
+    /// 正在播放关闭缩回动画（此期间不再响应第二次关闭）。
+    closing: bool,
+    /// 关闭动画代际：旧定时器不能结束新一次关闭。
+    closing_generation: u64,
+    /// 关闭回调：`false` = 开始缩回，`true` = 缩回结束可移除实体。
+    /// AppRoot 在开始时先恢复分类条/网格，让卡片回到封面快照的坐标。
+    close_handler: Option<Box<dyn Fn(&mut App, bool)>>,
 }
 
 /// 进程内 `PlayerView` 实例数。
@@ -131,6 +186,10 @@ pub struct PlayerView {
 /// （附录 F L-1）。`AppRoot::ensure_player` 已经保证复用，这里是第二道防线 ——
 /// 以后谁再写一条 `cx.new(|_| PlayerView::new(..))`，会在这里立刻暴露。
 static LIVE_PLAYERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// 入场动画 id 的进程内序号：关闭再打开也拿新 id，避免元素状态复用导致直接跳到终点。
+static ENTRANCE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// 关闭缩回动画 id 的进程内序号：同一窗口反复开关也不会复用旧动画状态。
+static EXIT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Drop for PlayerView {
     fn drop(&mut self) {
@@ -139,7 +198,7 @@ impl Drop for PlayerView {
 }
 
 impl PlayerView {
-    pub fn new(theme: YkTheme) -> Self {
+    pub fn new(theme: YkTheme, cx: &mut Context<Self>) -> Self {
         let n = LIVE_PLAYERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         assert!(
             n <= 1,
@@ -157,11 +216,16 @@ impl PlayerView {
             #[cfg(target_os = "macos")]
             worker: None,
             tried_worker: false,
+            source: None,
+            loading_source: false,
+            source_error: None,
+            load_generation: 0,
             #[cfg(target_os = "macos")]
             current: None,
             #[cfg(target_os = "macos")]
             loop_started: false,
-            expanded: true,
+            // 沉浸优先：播放浮窗默认收起信息面板（200px）。
+            expanded: false,
             tab: 0,
             danmaku: {
                 let set = mock_danmaku();
@@ -181,6 +245,15 @@ impl PlayerView {
             danmaku_input: None,
             submit_requested: false,
             input_focused: false,
+            focus_handle: cx.focus_handle().tab_stop(true),
+            needs_focus: true,
+            escape_hint: false,
+            escape_hint_generation: 0,
+            entrance_source: None,
+            entrance_generation: 0,
+            closing: false,
+            closing_generation: 0,
+            close_handler: None,
             state: {
                 let mut st = PlayerState::new();
                 st.duration_secs = 754.0;
@@ -189,6 +262,222 @@ impl PlayerView {
                 st
             },
         }
+    }
+
+    /// 卡片点击时注入起始封面；必须在 `open_bvid` 之前调用。
+    pub fn set_entrance(&mut self, source: CoverSource, cx: &mut Context<Self>) {
+        eprintln!(
+            "[player] 封面展开：{}（{:.0}x{:.0} → 浮窗）",
+            source.title,
+            source.bounds.size.width.as_f32(),
+            source.bounds.size.height.as_f32()
+        );
+        self.entrance_source = Some(source);
+        self.entrance_generation = ENTRANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        cx.notify();
+    }
+
+    /// 卡片点击入口：按 bvid 取详情 + playurl，回填后由下一次 render 启动 mpv。
+    ///
+    /// 请求在后台 executor 跑；用 `load_generation` 丢弃过期结果，
+    /// 连续点两张卡时不会出现旧视频覆盖新视频。
+    pub fn open_bvid(&mut self, bvid: String, cx: &mut Context<Self>) {
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
+        self.loading_source = true;
+        self.source_error = None;
+        self.source = None;
+        #[cfg(target_os = "macos")]
+        {
+            self.worker = None;
+            self.current = None;
+        }
+        self.tried_worker = false;
+        self.play_time = 0.0;
+        self.state.position_secs = 0.0;
+        self.state.playing = true;
+        self.needs_focus = true;
+        self.escape_hint = false;
+        self.escape_hint_generation = self.escape_hint_generation.wrapping_add(1);
+        eprintln!("[player] 请求播放：{bvid}");
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let cookie = current_session_cookie();
+                    let client =
+                        yk_core::api::client::ReqwestClient::new().map_err(|e| e.to_string())?;
+                    yk_core::api::client::fetch_playback(&client, &bvid, &cookie)
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                if view.load_generation != generation {
+                    return;
+                }
+                view.loading_source = false;
+                match result {
+                    Ok(src) => {
+                        eprintln!(
+                            "[player] 取流成功：{}（{}s，音轨 {}）",
+                            src.title,
+                            src.duration_secs,
+                            if src.audio_url.is_some() {
+                                "有"
+                            } else {
+                                "无"
+                            }
+                        );
+                        view.state.duration_secs = src.duration_secs as f64;
+                        view.state.position_secs = 0.0;
+                        view.state.playing = true;
+                        view.source = Some(src);
+                    }
+                    Err(e) => {
+                        eprintln!("[player] 取流失败：{e}");
+                        view.source_error = Some(e);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// AppRoot 注入：关闭时把自己的 `playing` 置空。
+    pub fn set_close_handler(&mut self, handler: impl Fn(&mut App, bool) + 'static) {
+        self.close_handler = Some(Box::new(handler));
+    }
+
+    fn escape_hint_overlay(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.escape_hint {
+            return None;
+        }
+        Some(
+            div()
+                .id("player-esc-hint")
+                .absolute()
+                // 顶栏右侧：在浮窗/视频之外，不遮画面。
+                .top(px((TOP_BAR_HEIGHT - 32.) / 2.))
+                .right(px(SPACE_4))
+                .occlude()
+                .h(px(32.))
+                .px(px(SPACE_2))
+                .flex()
+                .items_center()
+                .gap(px(SPACE_2))
+                .rounded(px(INTERACTIVE_RADIUS))
+                .bg(t.surfaces.surface_elevated_strong)
+                .border_1()
+                .border_color(t.surfaces.border_popover)
+                .shadow(t.shadows.shadow_2.clone())
+                .child(
+                    div()
+                        .w(px(18.))
+                        .h(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS_SM))
+                        .bg(t.palette.status_error)
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(rgb(0xFFFFFF))
+                        .child("×"),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(t.surfaces.text_secondary)
+                        .child("再次按 Esc 关闭"),
+                )
+                .child(
+                    div()
+                        .px(px(4.))
+                        .h(px(18.))
+                        .flex()
+                        .items_center()
+                        .rounded(px(RADIUS_SM))
+                        .border_1()
+                        .border_color(t.surfaces.border_strong)
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(t.surfaces.text_tertiary)
+                        .child("Esc"),
+                )
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.request_close(window, cx);
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// 第一次 Esc：显示提示，5 秒后自动收回；期间再按 Esc 才关闭。
+    fn arm_escape_hint(&mut self, cx: &mut Context<Self>) {
+        self.escape_hint = true;
+        let generation = self.escape_hint_generation.wrapping_add(1);
+        self.escape_hint_generation = generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(5))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.escape_hint_generation == generation && view.escape_hint {
+                    view.escape_hint = false;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn request_close(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_close(cx);
+    }
+
+    /// 关闭状态机本体；不依赖 Window，方便关闭请求从 Esc/遮罩/按钮统一进入。
+    fn begin_close(&mut self, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
+        self.escape_hint = false;
+        self.escape_hint_generation = self.escape_hint_generation.wrapping_add(1);
+
+        // 先恢复页面布局：关闭起点是“打开前”的封面坐标，分类条必须回来，
+        // 否则网格还压在上移后的位置，缩回终点会对不上卡片。
+        if let Some(handler) = self.close_handler.as_ref() {
+            handler(cx, false);
+        }
+
+        // 没有封面快照（YK_BVID/YK_VIDEO 程序化打开）就直接收掉。
+        if self.entrance_source.is_none() {
+            if let Some(handler) = self.close_handler.as_ref() {
+                handler(cx, true);
+            }
+            return;
+        }
+
+        self.closing = true;
+        self.closing_generation = EXIT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let generation = self.closing_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(PLAYER_EXIT_MS + 30))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if !view.closing || view.closing_generation != generation {
+                    return;
+                }
+                view.closing = false;
+                if let Some(handler) = view.close_handler.as_ref() {
+                    handler(cx, true);
+                }
+            });
+        })
+        .detach();
     }
 
     fn panel_width(&self) -> f32 {
@@ -200,19 +489,250 @@ impl PlayerView {
     }
 }
 
+/// 入场/退场共用一条平滑曲线：EaseStandard 起手，尾部约 0.9% 过冲后
+/// 自然回到 1。单段曲线没有速度断点，缩放过程不会在 300ms 附近「顿一下」。
+fn entrance_progress(raw: f32) -> f32 {
+    ease_entrance()(raw.clamp(0.0, 1.0))
+}
+
+fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
+    let mix = |a: Pixels, b: Pixels| px(a.as_f32() + (b.as_f32() - a.as_f32()) * t);
+    Bounds {
+        origin: point(mix(a.origin.x, b.origin.x), mix(a.origin.y, b.origin.y)),
+        size: size(
+            mix(a.size.width, b.size.width),
+            mix(a.size.height, b.size.height),
+        ),
+    }
+}
+
+/// 入场期的 Esc 也从同一个焦点句柄进；用弱实体回到 PlayerView 的状态机。
+fn player_escape_handler(
+    weak: WeakEntity<PlayerView>,
+) -> impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static {
+    move |event, window, cx| {
+        if event.keystroke.key != "escape" {
+            return;
+        }
+        let _ = weak.update(cx, |view, cx| {
+            if view.escape_hint {
+                view.request_close(window, cx);
+            } else {
+                view.arm_escape_hint(cx);
+            }
+        });
+        cx.stop_propagation();
+    }
+}
+
+/// 入场/退场共用的封面海报：渐变兜底 + 标题垫底 + 真实缩略图。
+fn cover_poster(theme: &YkTheme, source: &CoverSource) -> AnyElement {
+    let mut poster = div().absolute().inset_0().bg(crate::placeholder_gradient(
+        &source.placeholder_color,
+        theme.surfaces.fill_3,
+    ));
+    if !source.title.is_empty() {
+        poster = poster.child(
+            div()
+                .absolute()
+                .inset_0()
+                .p(px(SPACE_3))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(16.))
+                .line_height(px(20.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xFFFFFF))
+                .text_center()
+                .line_clamp(3)
+                .child(source.title.clone()),
+        );
+    }
+    if !source.image_url.is_empty() {
+        poster = poster.child(
+            img(ImageSource::from(source.image_url.clone()))
+                .absolute()
+                .inset_0()
+                .w_full()
+                .h_full()
+                .object_fit(ObjectFit::Cover),
+        );
+    }
+    poster.into_any_element()
+}
+
+/// 从封面几何展开到播放器目标尺寸。
+///
+/// 过渡期只挂封面海报，到 `progress == 1` 才挂完整播放器内容：
+/// 控制栏/信息面板不会被塞进 192×108 的盒子，也不会让 deferred 的
+/// 面板唤回按钮从窗口边缘跑出去。
+#[derive(gpui::IntoElement)]
+struct PlayerEntrance {
+    theme: YkTheme,
+    source: CoverSource,
+    content: Option<AnyElement>,
+    focus_handle: FocusHandle,
+    weak: WeakEntity<PlayerView>,
+    progress: f32,
+}
+
+impl RenderOnce for PlayerEntrance {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let PlayerEntrance {
+            theme,
+            source,
+            content,
+            focus_handle,
+            weak,
+            progress,
+        } = self;
+        let p = entrance_progress(progress);
+        let root_w = source.root_size.width.as_f32().max(2.0 * SPACE_4 + 1.0);
+        let destination = Bounds {
+            origin: point(px(SPACE_4), px(TOP_BAR_HEIGHT + SPACE_4)),
+            size: size(px(root_w - 2.0 * SPACE_4), px(PLAYER_FLOAT_HEIGHT)),
+        };
+        let bounds = lerp_bounds(source.bounds, destination, p);
+
+        let shell = div()
+            .id("player-window")
+            .absolute()
+            .left(px(bounds.origin.x.as_f32()))
+            .top(px(bounds.origin.y.as_f32()))
+            .w(px(bounds.size.width.as_f32().max(1.0)))
+            .h(px(bounds.size.height.as_f32().max(1.0)))
+            .rounded(px(CARD_RADIUS))
+            .overflow_hidden()
+            .bg(rgb(0x0B0F14))
+            .border_1()
+            .border_color(theme.surfaces.border_popover)
+            .shadow(theme.shadows.shadow_glass_modal.clone())
+            .occlude()
+            .key_context("Player")
+            .track_focus(&focus_handle)
+            .on_key_down(player_escape_handler(weak));
+
+        if progress >= 1.0 {
+            return shell.child(content.expect("入场结束时必须挂上播放器内容"));
+        }
+
+        shell.child(cover_poster(&theme, &source))
+    }
+}
+
+/// 关闭缩回：从当前播放器目标框缩回点击时的封面几何。
+///
+/// 过渡期只保留当前视频帧（没有帧时用封面海报），不挂控制栏/信息面板，
+/// 避免窗口缩小时控件被重排得乱跳。
+#[derive(gpui::IntoElement)]
+struct PlayerExit {
+    theme: YkTheme,
+    source: CoverSource,
+    visual: Option<AnyElement>,
+    progress: f32,
+}
+
+impl RenderOnce for PlayerExit {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let PlayerExit {
+            theme,
+            source,
+            visual,
+            progress,
+        } = self;
+        let p = entrance_progress(progress);
+        let q = 1.0 - p;
+        let root_w = source.root_size.width.as_f32().max(2.0 * SPACE_4 + 1.0);
+        let destination = Bounds {
+            origin: point(px(SPACE_4), px(TOP_BAR_HEIGHT + SPACE_4)),
+            size: size(px(root_w - 2.0 * SPACE_4), px(PLAYER_FLOAT_HEIGHT)),
+        };
+        let bounds = lerp_bounds(source.bounds, destination, q);
+        let shell = div()
+            .id("player-window")
+            .absolute()
+            .left(px(bounds.origin.x.as_f32()))
+            .top(px(bounds.origin.y.as_f32()))
+            .w(px(bounds.size.width.as_f32().max(1.0)))
+            .h(px(bounds.size.height.as_f32().max(1.0)))
+            .rounded(px(CARD_RADIUS))
+            .overflow_hidden()
+            .bg(rgb(0x0B0F14))
+            .border_1()
+            .border_color(theme.surfaces.border_popover)
+            .shadow(theme.shadows.shadow_glass_modal.clone())
+            .occlude();
+        shell.children(visual)
+    }
+}
+
+/// 登录会话的 Cookie 头；未登录/旧文件损坏返回空串（仍可取 480P）。
+fn current_session_cookie() -> String {
+    let path = yk_core::session::session_path();
+    yk_core::session::load(&path)
+        .filter(|s| s.is_valid())
+        .map(|s| s.cookie_header())
+        .unwrap_or_default()
+}
+
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         eprintln!("[M3] PlayerView::render 被调用");
+        if self.needs_focus {
+            self.needs_focus = false;
+            let handle = self.focus_handle.clone();
+            // 等这一帧的元素树挂上 track_focus 后再交焦点，避免首帧焦点丢失。
+            cx.defer_in(window, move |_view, window, cx| {
+                window.focus(&handle, cx);
+            });
+        }
         if self.submit_requested {
             self.submit_requested = false;
             cx.defer_in(window, |view, window, cx| view.send_danmaku(window, cx));
         }
+        // 渲染线程：有播放源才启动；换源时 open_bvid 会把 tried_worker 复位。
+        // 没有播放源时只有 YK_VIDEO 验收入口会退回本地测试文件，
+        // 正常点卡片期间（loading_source）绝不先播测试视频。
+        #[cfg(target_os = "macos")]
+        if !self.tried_worker {
+            let source = self
+                .source
+                .as_ref()
+                .map(|s| (s.video_url.clone(), s.audio_url.clone()));
+            let fallback =
+                if source.is_none() && !self.loading_source && self.source_error.is_none() {
+                    std::env::var("YK_VIDEO").ok()
+                } else {
+                    None
+                };
+            if let Some((video, audio)) = source.or_else(|| fallback.map(|v| (v, None))) {
+                self.tried_worker = true;
+                self.worker =
+                    crate::video_worker::FrameWorker::spawn_with_audio(video, audio, 1280, 720);
+                // 取流期间用户可能已经按过暂停：新 worker 启动后补发一次状态。
+                if let Some(w) = self.worker.as_ref() {
+                    w.set_paused(!self.state.playing);
+                }
+                // 渲染循环已在同一个 render 里、worker 创建之后立即启动；
+                // 这里再 notify 一次，让首帧尽快重绘，而不是等下一次用户事件。
+                if self.worker.is_some() {
+                    cx.notify();
+                }
+            }
+        }
+
         // 播放循环：每 16ms 取一帧最新画面并重绘（≈60fps）。
+        // **必须放在 worker 创建之后**：以前放在 render 开头，靠 cx.notify()
+        // 等下一轮 render 才启动；窗口未激活/被遮挡时下一轮可能永远不来，
+        // 表现就是音频在播、画面不出，点一下播放器触发 render 后才出首帧。
         // libmpv 已在自动播放，这里只负责「把当前帧搬到 surface 上」。
         #[cfg(target_os = "macos")]
         if !self.loop_started && self.worker.is_some() {
             self.loop_started = true;
             cx.spawn(async move |this, cx| {
+                let mut received = 0u64;
+                let mut idle_ticks = 0u32;
                 loop {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(16))
@@ -226,12 +746,25 @@ impl Render for PlayerView {
                             if let Some((buf, t)) = w.latest() {
                                 view.current = Some(buf);
                                 view.play_time = t;
+                                view.state.position_secs = t;
                                 got = true;
                             }
                         }
                         if got {
+                            received += 1;
+                            idle_ticks = 0;
+                            if received == 1 {
+                                eprintln!("[player] 收到首帧");
+                            }
                             cx.notify();
+                        } else {
+                            idle_ticks += 1;
+                            if idle_ticks == 125 {
+                                idle_ticks = 0;
+                                eprintln!("[player] 连续 2s 没有新帧");
+                            }
                         }
+                        got
                     });
                     if alive.is_err() {
                         break;
@@ -241,22 +774,11 @@ impl Render for PlayerView {
             .detach();
         }
 
-        // 渲染线程：首次 render 启动一次（构造保持纯赋值，副作用不放在 new 里）。
-        #[cfg(target_os = "macos")]
-        if !self.tried_worker {
-            self.tried_worker = true;
-            let path = std::env::var("YK_VIDEO")
-                .unwrap_or_else(|_| "/tmp/mpv-test.mp4".to_string());
-            self.worker = crate::video_worker::FrameWorker::spawn(path, 1280, 720);
-        }
-
         // 弹幕输入框：首次 render 才有 window，所以在这里创建。
         // 用 gpui-component 的 Input —— 它内部走 InputHandler，
         // 支持 IME 组合（marked text），中文输入必需。
         if self.danmaku_input.is_none() {
-            let state = cx.new(|cx| {
-                InputState::new(window, cx).placeholder("发一条友善的弹幕吧")
-            });
+            let state = cx.new(|cx| InputState::new(window, cx).placeholder("发一条友善的弹幕吧"));
             // Enter 走 Input 自己的 Enter action（外层补了 key_context("Input") 才匹配），
             // 由它发出 PressEnter。Shift+Enter 不发送。
             // 中文输入法组合中的 Enter 应由输入法先消费（用于选词）；
@@ -278,21 +800,15 @@ impl Render for PlayerView {
         }
 
         let t = self.theme.clone();
-
-        // 浮窗是「独立场景」，必须绝对定位铺满最近的定位祖先（AppRoot 根 div 是 relative）。
-        // 只写 size_full 不行：作为 children 加入时外层没有尺寸约束，会退化成 0×0，
-        // 表现就是「渲染日志有、画面上什么都没有」。
-        //
-        // `.occlude()` 是 L-1 的根因修复：GPUI 的命中测试会穿透没有 hitbox 的普通 div，
-        // 播放器铺满整屏时，点画面任意处都会落到下层封面卡片的 on_click 上 ——
-        // 于是每次点击都 `cx.new` 一个新的 PlayerView，输入框随之换成空的。
-        // BlockMouse 会在播放器根节点截断命中链，下层卡片再也收不到事件；
-        // 自己的子元素（输入框/按钮/面板）的 hitbox 仍在更上层，交互不受影响。
-        div()
-            .occlude()
+        // 入场目标宽度跟随当前窗口；封面起点仍是点击时冻结的那一份。
+        if let Some(source) = self.entrance_source.as_mut() {
+            source.root_size = window.viewport_size();
+        }
+        // 浮窗内部：绝对铺满窗口。窗口本身负责圆角/裁剪/阴影/遮挡。
+        let content = div()
             .absolute()
             .inset_0()
-            .bg(rgb(0x000000))
+            .bg(rgb(0x0B0F14))
             // ① 视频层（弹幕作为它的子元素，避免形成独立的合成层把 surface 遮掉）
             .child({
                 #[cfg(target_os = "macos")]
@@ -307,34 +823,70 @@ impl Render for PlayerView {
             // ①b 弹幕层：gpui-fast 已解决 surface 与文字的合成冲突，
             // 直接 canvas 绘制即可（见附录 D 事实 16）。
             .child(self.danmaku_layer())
+            // ①c 取流状态：加载中 / 失败说明，不遮挡控制栏与右侧面板
+            .children(
+                if self.loading_source {
+                    Some("正在获取播放地址…".to_string())
+                } else {
+                    self.source_error.clone()
+                }
+                .map(|text| {
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(FONT_SIZE_CONTROL))
+                        .text_color(rgb(0xFFFFFF))
+                        .child(text)
+                        .into_any_element()
+                }),
+            )
             // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
             .child(
-                div().absolute().left_0().right_0().bottom_0().h(px(CTRL_H + 120.)).bg(
-                    linear_gradient(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(CTRL_H + 120.))
+                    .bg(linear_gradient(
                         0.0,
                         linear_color_stop(hsla(0.0, 0.0, 0.0, 0.0), 0.0),
                         linear_color_stop(hsla(0.0, 0.0, 0.0, 0.72), 1.0),
-                    ),
-                ),
+                    )),
             )
             // ③ 控制栏（deferred priority 30）
             .child(
                 // gpui-fast 下不再需要 deferred（合成问题已解决）。
                 // 而且 deferred 元素的 hit-test 有问题：输入框收不到点击。
-                control_bar(&t, &self.state, self.danmaku_input.as_ref(), cx, cx.listener(
-                    |this, _: &ClickEvent, window, cx| {
+                control_bar(
+                    &t,
+                    &self.state,
+                    self.danmaku_input.as_ref(),
+                    cx,
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
                         // 点播放按钮 = 放弃输入焦点，恢复渲染循环
                         this.input_focused = false;
                         this.state.toggle_play();
+                        #[cfg(target_os = "macos")]
+                        if let Some(w) = this.worker.as_ref() {
+                            w.set_paused(!this.state.playing);
+                        }
                         window.refresh();
                         cx.notify();
-                    },
-                )),
+                    }),
+                ),
             )
             // ④ 信息面板（deferred priority 60）
-            .child(
-                info_panel(&t, self.expanded, self.tab, self.panel_width(), cx),
-            )
+            .child(info_panel(
+                &t,
+                self.expanded,
+                self.tab,
+                self.panel_width(),
+                cx,
+            ))
             // ⑤ 骑边界按钮（deferred priority 61）：面板收起时的常驻唤回入口
             .child(
                 deferred(
@@ -357,6 +909,126 @@ impl Render for PlayerView {
                 )
                 .with_priority(61usize),
             )
+            .into_any_element();
+
+        // 浮窗外侧点击层：从顶栏下方开始，顶栏本身保持可用。
+        let backdrop = div()
+            .id("player-backdrop")
+            .absolute()
+            .top(px(TOP_BAR_HEIGHT))
+            .left_0()
+            .right_0()
+            .bottom_0()
+            // 极低透明度背景：确保这层一定参与命中测试（纯 alpha=0 的 div
+            // 在部分路径下会被当成不绘制元素，点击直接落到下层封面卡）。
+            .bg(rgba(0x00000001))
+            // 挡住下层卡片/页面：点浮窗外侧只关闭，不触发新卡片。
+            .occlude()
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                // 关闭浮窗的这一拍不要再把 click 传给下层封面卡。
+                cx.stop_propagation();
+                this.request_close(window, cx);
+            }));
+
+        // 关闭缩回时只保留画面：当前视频帧优先，没有帧就用封面海报。
+        // 控制栏/面板不挂树，窗口缩小时不会被重排得乱跳。
+        let closing_visual: Option<AnyElement> = if self.closing {
+            #[cfg(target_os = "macos")]
+            {
+                if self.current.is_some() {
+                    Some(video_layer(&self.frame, self.current.as_ref()).into_any_element())
+                } else {
+                    self.entrance_source
+                        .as_ref()
+                        .map(|source| cover_poster(&t, source))
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.entrance_source
+                    .as_ref()
+                    .map(|source| cover_poster(&t, source))
+            }
+        } else {
+            None
+        };
+
+        // 卡片打开：用同一套窗口外壳，从点击时的封面几何展开到目标尺寸。
+        // 动画进度来自稳定 id 的 Animation 时钟；render 里绝不新建起点。
+        let window: AnyElement = if self.closing {
+            let source = self
+                .entrance_source
+                .clone()
+                .expect("关闭缩回必须有封面快照");
+            let exit = PlayerExit {
+                theme: t.clone(),
+                source,
+                visual: closing_visual,
+                progress: 0.0,
+            };
+            exit.with_animation(
+                format!("player-exit-{}", self.closing_generation),
+                Animation::new(std::time::Duration::from_millis(PLAYER_EXIT_MS)).with_easing(|t| t),
+                |el, progress| PlayerExit { progress, ..el },
+            )
+            .into_any_element()
+        } else if let Some(source) = self.entrance_source.clone() {
+            let entrance = PlayerEntrance {
+                theme: t.clone(),
+                source,
+                content: Some(content),
+                focus_handle: self.focus_handle.clone(),
+                weak: cx.entity().downgrade(),
+                progress: 0.0,
+            };
+            entrance
+                .with_animation(
+                    format!("player-entrance-{}", self.entrance_generation),
+                    Animation::new(std::time::Duration::from_millis(PLAYER_ENTRANCE_MS))
+                        .with_easing(|t| t),
+                    |el, progress| PlayerEntrance { progress, ..el },
+                )
+                .into_any_element()
+        } else {
+            div()
+                .id("player-window")
+                .absolute()
+                .top(px(TOP_BAR_HEIGHT + SPACE_4))
+                .left(px(SPACE_4))
+                .right(px(SPACE_4))
+                .h(px(PLAYER_FLOAT_HEIGHT))
+                .rounded(px(CARD_RADIUS))
+                .overflow_hidden()
+                .bg(rgb(0x0B0F14))
+                .border_1()
+                .border_color(t.surfaces.border_popover)
+                .shadow(t.shadows.shadow_glass_modal.clone())
+                // 浮窗本体截断命中的穿透；子控件仍在更上层。
+                .occlude()
+                .key_context("Player")
+                .track_focus(&self.focus_handle)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key != "escape" {
+                        return;
+                    }
+                    if this.escape_hint {
+                        this.request_close(window, cx);
+                    } else {
+                        this.arm_escape_hint(cx);
+                    }
+                    cx.stop_propagation();
+                }))
+                .child(content)
+                .into_any_element()
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .child(backdrop)
+            .child(window)
+            // 第一次 Esc 提示放在浮窗之外：顶栏右侧。
+            .children(self.escape_hint_overlay(&t, cx))
     }
 }
 
@@ -392,7 +1064,10 @@ impl PlayerView {
         // 所以追加到末尾不会破坏「从早到晚」的顺序。
         let lane = self.lanes.assign(&d);
         self.danmaku.push((d, lane));
-        eprintln!("[danmaku] 已发送，轨道 {lane}，共 {} 条", self.danmaku.len());
+        eprintln!(
+            "[danmaku] 已发送，轨道 {lane}，共 {} 条",
+            self.danmaku.len()
+        );
 
         // 清空输入框（set_value 在 gpui-base 的 InputState 上，三参）
         if let Some(st) = self.danmaku_input.as_ref() {
@@ -513,8 +1188,18 @@ impl PlayerView {
 /// 占位弹幕（真实数据要从 `/x/v1/dm/list.so` 拉 XML，属于后续）。
 fn mock_danmaku() -> DanmakuSet {
     const TEXTS: [&str; 12] = [
-        "前方高能", "这也太真实了", "哈哈哈哈", "有一说一，确实", "第一次看到这种",
-        "好家伙", "这个可以", "泪目", "up主加油", "妙啊", "学到了", "名场面",
+        "前方高能",
+        "这也太真实了",
+        "哈哈哈哈",
+        "有一说一，确实",
+        "第一次看到这种",
+        "好家伙",
+        "这个可以",
+        "泪目",
+        "up主加油",
+        "妙啊",
+        "学到了",
+        "名场面",
     ];
     let raw = (0..300).map(|i| {
         // 从 -6 秒开始：这样首帧（play_time≈0）就有弹幕在屏幕上，
@@ -668,11 +1353,9 @@ fn control_bar(
                         .text_size(px(FONT_SIZE_MICRO))
                         .text_color(rgb(0xFFFFFF))
                         .cursor_pointer()
-                        .on_click(cx.listener(
-                            |view, _: &ClickEvent, window, cx| {
-                                view.send_danmaku(window, cx);
-                            },
-                        ))
+                        .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
+                            view.send_danmaku(window, cx);
+                        }))
                         .child("发送"),
                 ),
         )
@@ -772,7 +1455,11 @@ fn info_panel(
         tab_row = tab_row.child(
             div()
                 .text_size(px(FONT_SIZE_CONTROL))
-                .font_weight(if on { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM })
+                .font_weight(if on {
+                    FontWeight::SEMIBOLD
+                } else {
+                    FontWeight::MEDIUM
+                })
                 .text_color(if on { s.text_primary } else { s.text_tertiary })
                 .child(*name),
         );
