@@ -35,6 +35,12 @@ pub fn ease_standard() -> impl Fn(f32) -> f32 {
     bezier_ease(x1, y1, x2, y2)
 }
 
+/// 浮窗入场/退场：沿用 EaseStandard 的起手，只把终点 y2 拉到 1.08，
+/// 形成一次连续、无速度断点的轻微过冲（峰值约 0.9%），最后回到 1。
+pub fn ease_entrance() -> impl Fn(f32) -> f32 {
+    bezier_ease(0.22, 0.61, 0.36, 1.08)
+}
+
 /// 强调缓动（带回弹，`cubic-bezier(0.34, 1.3, 0.64, 1)`）。
 ///
 /// **不用框架自带的 cubic_bezier**：它把输出裁到 [0, 1]，会吃掉 y1 = 1.3 的过冲，
@@ -82,8 +88,24 @@ mod tests {
         assert!((f(0.0) - 0.0).abs() < 1e-5);
         assert!((f(1.0) - 1.0).abs() < 1e-3);
         // 曲线中段应出现 > 1 的过冲（被裁剪的实现会恒 <= 1）
-        let peak = (1..100).map(|i| f(i as f32 / 100.0)).fold(0.0_f32, f32::max);
+        let peak = (1..100)
+            .map(|i| f(i as f32 / 100.0))
+            .fold(0.0_f32, f32::max);
         assert!(peak > 1.01, "回弹被抹平了，peak = {peak}");
+    }
+
+    #[test]
+    fn entrance_overshoots_softly_and_lands_on_one() {
+        let f = ease_entrance();
+        assert!((f(0.0) - 0.0).abs() < 1e-5);
+        assert!((f(1.0) - 1.0).abs() < 1e-5);
+        let peak = (1..1000)
+            .map(|i| f(i as f32 / 1000.0))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            peak > 1.005 && peak < 1.015,
+            "入场过冲应收在 ~0.9%，peak={peak}"
+        );
     }
 
     #[test]

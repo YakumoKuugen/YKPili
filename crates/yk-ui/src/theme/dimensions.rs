@@ -92,10 +92,9 @@ pub const PLAYER_CONTROL_BAR_HEIGHT: f32 = 88.0;
 pub const COVER_ITEM_WIDTH: f32 = 192.0;
 pub const COVER_ITEM_HEIGHT: f32 = 108.0;
 pub const COVER_CELL_WIDTH: f32 = 208.0;
-/// 当前值。设计目标是 184（多一行署名行），属于 M1 的实施项，本轮不改。
-pub const COVER_CELL_HEIGHT: f32 = 166.0;
-/// 设计目标值（M1 落地时把 COVER_CELL_HEIGHT 改为它，并同步卡片布局）。
-pub const COVER_CELL_HEIGHT_TARGET: f32 = 184.0;
+/// 卡片单元格高：8 上边距 + 108 封面 + 4 间距 + 36 两行标题
+/// + 2 行距 + 18 署名行 + 8 下边距 = 184（设计文档第 04 节的目标值）。
+pub const COVER_CELL_HEIGHT: f32 = 184.0;
 
 // ================= 播放浮窗信息面板 =================
 
