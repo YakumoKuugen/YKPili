@@ -2113,6 +2113,9 @@ impl AppRoot {
         self.history.loading = true;
         self.history.error = None;
         self.history.cursor = None;
+        // 重拉第一页后旧的 kid 可能已经不在列表里，批量选择不再可信。
+        self.history.batch = false;
+        self.history.selected.clear();
         self.history.scroll.scroll_to_item(0, ScrollStrategy::Top);
         let cookie = self.cookie();
         cx.notify();

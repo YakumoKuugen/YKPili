@@ -2891,7 +2891,9 @@ fn dock(
                     if this.session.is_none() {
                         this.ensure_login(cx);
                     }
-                    this.ensure_history(cx);
+                    // 从其他页面进入历史：重拉第一页，确保刚看完的视频、
+                    // 其他设备产生的记录能立刻出现；不是只在首次进入时加载。
+                    this.load_history(cx);
                     this.history.scroll.scroll_to_item(0, ScrollStrategy::Top);
                     window.refresh();
                     cx.notify();
