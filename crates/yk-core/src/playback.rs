@@ -4,7 +4,7 @@
 //! 不能直接把视频流丢给 mpv 就期待有声音。这里把响应收敛成
 //! 「一条视频 URL + 可选一条音频 URL」交给播放器。
 
-use crate::api::models::{DashStream, PlayUrlData, VideoInfoData};
+use crate::api::models::{DashStream, PlayUrlData, VideoInfoData, VideoPage};
 
 /// 一次播放所需的全部来源信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,14 +15,98 @@ pub struct PlaybackSource {
     pub audio_url: Option<String>,
     /// 视频标题（详情接口返回）。
     pub title: String,
+    /// 简介（详情接口返回）。
+    pub desc: String,
+    /// 发布时间（Unix 秒）。
+    pub pubdate: u64,
+    /// 分区名（如「游戏 · 射击游戏」），标签拉取失败时作为标签兜底。
+    pub category: String,
+    /// 选中的画质文案（如「1080P 高清」）。
+    pub quality: String,
     /// 时长（秒）。
     pub duration_secs: u64,
-    /// 视频 aid；观看历史心跳上报用。
+    /// 视频 aid；观看历史心跳上报 / 评论 oid 用。
     pub aid: i64,
     /// 视频 bvid；观看历史心跳上报用。
     pub bvid: String,
     /// 当前分 P 的 cid；观看历史心跳上报用。
     pub cid: i64,
+    /// UP 主昵称。
+    pub owner_name: String,
+    /// UP 主头像 URL（原始地址，视图侧再按尺寸取）。
+    pub owner_face: String,
+    /// 播放量。
+    pub view_count: u64,
+    /// 弹幕数。
+    pub danmaku_count: u64,
+    /// 评论数。
+    pub reply_count: u64,
+    /// 点赞数。
+    pub like_count: u64,
+    /// 投币数。
+    pub coin_count: u64,
+    /// 收藏数。
+    pub favorite_count: u64,
+    /// 分享数。
+    pub share_count: u64,
+    /// 分 P 列表（「选集」Tab）。
+    pub pages: Vec<VideoPage>,
+    /// 当前播放的分 P 序号（从 1 开始；0 = 未知）。
+    pub current_page: i32,
+}
+
+/// 由画质 id / 分辨率推一个展示文案。
+fn quality_label(height: i32) -> String {
+    match height {
+        h if h >= 2160 => "4K 超清",
+        h if h >= 1440 => "2K",
+        h if h >= 1080 => "1080P 高清",
+        h if h >= 720 => "720P 高清",
+        h if h >= 480 => "480P 清晰",
+        h if h > 0 => "360P 流畅",
+        _ => "",
+    }
+    .to_string()
+}
+
+/// 从详情里收集信息面板需要的元数据（两条选流分支共用）。
+fn meta_from_info(info: &VideoInfoData, duration_secs: u64, quality: String) -> PlaybackSource {
+    let owner = info.owner.as_ref();
+    let stat = info.stat.as_ref();
+    let count = |f: fn(&crate::api::models::VideoStat) -> u64| stat.map(f).unwrap_or(0);
+    PlaybackSource {
+        video_url: String::new(),
+        audio_url: None,
+        title: info.title.clone(),
+        desc: info.desc.trim().to_string(),
+        pubdate: info.pubdate,
+        category: info.tname.trim().to_string(),
+        quality,
+        duration_secs,
+        aid: info.aid,
+        bvid: if info.bvid.is_empty() {
+            String::new()
+        } else {
+            info.bvid.clone()
+        },
+        cid: info.cid.max(0),
+        owner_name: owner.map(|o| o.name.trim().to_string()).unwrap_or_default(),
+        owner_face: owner.map(|o| o.face.trim().to_string()).unwrap_or_default(),
+        view_count: count(|s| s.view),
+        danmaku_count: count(|s| s.danmaku),
+        reply_count: count(|s| s.reply),
+        like_count: count(|s| s.like),
+        coin_count: count(|s| s.coin),
+        favorite_count: count(|s| s.favorite),
+        share_count: count(|s| s.share),
+        pages: info.pages.clone(),
+        current_page: info
+            .pages
+            .iter()
+            .find(|p| p.cid == info.cid)
+            .map(|p| p.page)
+            .unwrap_or(1),
+    }
 }
 
 impl DashStream {
@@ -88,32 +172,17 @@ pub fn select_playback(info: &VideoInfoData, play: &PlayUrlData) -> Result<Playb
                 .iter()
                 .filter(|a| !a.play_url().is_empty())
                 .max_by_key(|a| a.id);
-            return Ok(PlaybackSource {
-                video_url: video.play_url().to_string(),
-                audio_url: audio.map(|a| a.play_url().to_string()),
-                title: info.title.clone(),
-                duration_secs,
-                aid: info.aid,
-                bvid: if info.bvid.is_empty() {
-                    String::new()
-                } else {
-                    info.bvid.clone()
-                },
-                cid: info.cid.max(0),
-            });
+            let mut source = meta_from_info(info, duration_secs, quality_label(video.height));
+            source.video_url = video.play_url().to_string();
+            source.audio_url = audio.map(|a| a.play_url().to_string());
+            return Ok(source);
         }
     }
 
     if let Some(part) = play.durl.iter().find(|d| !d.url.is_empty()) {
-        return Ok(PlaybackSource {
-            video_url: part.url.clone(),
-            audio_url: None,
-            title: info.title.clone(),
-            duration_secs,
-            aid: info.aid,
-            bvid: info.bvid.clone(),
-            cid: info.cid.max(0),
-        });
+        let mut source = meta_from_info(info, duration_secs, String::new());
+        source.video_url = part.url.clone();
+        return Ok(source);
     }
 
     Err("playurl 没有可用的视频流（可能需要登录或该视频受限）".into())
@@ -122,7 +191,7 @@ pub fn select_playback(info: &VideoInfoData, play: &PlayUrlData) -> Result<Playb
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::models::{DashData, DurlItem, VideoPage};
+    use crate::api::models::{DashData, DurlItem, VideoOwner, VideoPage, VideoStat};
 
     fn stream(id: i32, w: i32, h: i32, codecs: &str, url: &str) -> DashStream {
         DashStream {
@@ -147,6 +216,7 @@ mod tests {
                 cid: 42,
                 page: 1,
                 part: "P1".into(),
+                duration: 100,
             }],
             ..Default::default()
         }
@@ -225,6 +295,50 @@ mod tests {
         assert_eq!(src.video_url, "progressive.mp4");
         assert_eq!(src.audio_url, None);
         assert_eq!(src.duration_secs, 100);
+    }
+
+    #[test]
+    fn carries_panel_metadata_and_quality() {
+        let mut info = info();
+        info.owner = Some(VideoOwner {
+            name: "UP".into(),
+            face: "https://i0.hdslb.com/f.jpg".into(),
+            ..Default::default()
+        });
+        info.stat = Some(VideoStat {
+            view: 1234,
+            danmaku: 5,
+            reply: 6,
+            like: 7,
+            coin: 8,
+            favorite: 9,
+            share: 10,
+        });
+        info.desc = "简介".into();
+        info.pubdate = 42;
+        info.tname = "单机游戏".into();
+        let play = PlayUrlData {
+            dash: Some(DashData {
+                video: vec![stream(80, 1920, 1080, "avc1", "v")],
+                audio: vec![],
+            }),
+            ..Default::default()
+        };
+        let src = select_playback(&info, &play).unwrap();
+        assert_eq!(src.quality, "1080P 高清");
+        assert_eq!(src.owner_name, "UP");
+        assert_eq!(src.owner_face, "https://i0.hdslb.com/f.jpg");
+        assert_eq!(src.view_count, 1234);
+        assert_eq!(src.danmaku_count, 5);
+        assert_eq!(src.reply_count, 6);
+        assert_eq!(src.like_count, 7);
+        assert_eq!(src.coin_count, 8);
+        assert_eq!(src.favorite_count, 9);
+        assert_eq!(src.share_count, 10);
+        assert_eq!(src.desc, "简介");
+        assert_eq!(src.pubdate, 42);
+        assert_eq!(src.category, "单机游戏");
+        assert_eq!(src.current_page, 1);
     }
 
     #[test]

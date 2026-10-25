@@ -6,21 +6,32 @@
 //! ⓪ 浮窗外侧点击层    topbar 之下、整页      点击关闭（顶栏保持可用）
 //! ① 浮窗 600 高       顶栏下方 16px          圆角 + shadow_glass_modal
 //!    ⓪ 入场          封面 bounds → 目标框    280ms 单段曲线 + 轻回弹
-//!    ①a 视频 surface   absolute inset_0     铺满窗口
-//!    ①b 弹幕层 / 取流状态 / 底部渐变
-//!    ①c 控制栏 88px     absolute bottom
-//!    ①d 信息面板       展开 400 / 收起 200
-//!    ①e 骑边界按钮
+//!    ①a 视频 surface   红框：窗口−侧栏200    Contain 在红框里居中
+//!    ①b 弹幕层 / 取流状态
+//!    ①c 控制栏 88px     bottom；right 200   宽度 = 播放层（贴侧栏左缘）
+//!    ①d 信息面板       展开 400 / 收起 200    贴窗口右边界、通高、常驻
+//!    ①e 骑边界按钮     骑在面板左边界
 //!    ①f Esc 提示       第一次 Esc 显示
 //! ```
 //!
-//! **D-05 规格（用户已调好，不要改）**：
-//! 收起态是 **200px 半宽仍可见**，不是消失；且**面板本体即 hover 热区**。
+//! **面板 / 播放层（2026-10-25 用户调整）**：
+//! 右侧是侧栏**常驻占用**的区域（收起 200 / 展开 400，贴窗口右边界、top:0 → bottom:0 通高），
+//! 它不属于播放层。播放层（红框）宽度 = 窗口宽 − 200，视频在该红框内居中。
+//! 控制栏宽度 = 播放层宽度（窗口 − 200），右端贴侧栏左边缘。
+//! 播放层右缘另有一条 88px 透明 hover 热区（覆盖在视频上、控制栏上方），用于唤出侧栏。
+//! 播放器底边在 Dock 上方 20px（距窗口底部 92），宽度/高度随窗口缩放。
+//!
+//! **控制栏自动隐藏**：起播、窗口失焦、有焦点但鼠标 5s 不动时隐藏；
+//! 鼠标移动 / 点击后重新浮出。隐藏时只剩底部 3px 进度线。
 
+use gpui::assets::IconName;
 use gpui::component::input::{Input, InputEvent, InputState};
+use gpui::component::Icon;
 use gpui::prelude::*;
 use gpui::{FocusHandle, InteractiveElement, StatefulInteractiveElement, *};
 use yk_core::danmaku::{Danmaku, DanmakuSet, LaneAllocator};
+use yk_core::dynamic::{asset_url, fitted_width, CommentTarget, DynamicComment};
+use yk_core::format;
 use yk_core::player::PlayerState;
 use yk_ui::theme::*;
 
@@ -96,8 +107,16 @@ const CTRL_H: f32 = PLAYER_CONTROL_BAR_HEIGHT; // 88
 const DANMAKU_INPUT_H: f32 = 38.0;
 const INFO_PANEL_EXPANDED: f32 = PLAYER_INFO_PANEL_WIDTH; // 400
 const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
-/// 浮窗高度（设计文档第 06 节：600）。
-const PLAYER_FLOAT_HEIGHT: f32 = 600.0;
+/// 播放层右缘的 hover 热区宽度（覆盖在视频右侧、控制栏上方）。
+/// 侧栏常驻右侧 200；播放层/控制栏宽度都是「窗口 − 200」，不再额外缩 88。
+/// 88 只是控制栏高度 / 这条热区的宽度，不是控制栏与侧栏之间的空隙。
+const PANEL_HOVER_WIDTH: f32 = 88.0;
+
+/// 播放器下边界距窗口底部的距离。
+///
+/// Dock 高 52（40 + 6×2）+ 下边距 20 = 顶部在 72；播放器底边再留 20px 呼吸：
+/// 72 + 20 = 92。窗口缩放时播放器跟随拉伸，不再固定 600 高。
+const PLAYER_BOTTOM_INSET: f32 = 92.0;
 /// 从封面展开：一条连续曲线走完，避免两段缓动在交界处出现速度断点。
 /// 280ms 向 macOS Quick Look 的快速预览节奏靠拢，尾部只留很短的过冲回弹。
 const PLAYER_ENTRANCE_MS: u64 = 280;
@@ -131,6 +150,15 @@ struct HistoryReport {
     csrf: String,
     /// 本轮打开时刻（单调时钟，用于 5 秒冷却）。
     opened_at: std::time::Instant,
+}
+
+/// 信息面板「评论」Tab 的加载状态。
+enum CommentState {
+    /// 还没有播放源（取流中 / 失败），不显示评论态。
+    Idle,
+    Loading,
+    Ready(Vec<DynamicComment>),
+    Error(String),
 }
 
 pub struct PlayerView {
@@ -195,6 +223,47 @@ pub struct PlayerView {
     /// 关闭回调：`false` = 开始缩回，`true` = 缩回结束可移除实体。
     /// AppRoot 在开始时先恢复分类条/网格，让卡片回到封面快照的坐标。
     close_handler: Option<Box<dyn Fn(&mut App, bool)>>,
+    /// 本地续播记录（每个视频上次看到的位置）。
+    resume: yk_core::resume::ResumeStore,
+    /// 打开时由「观看历史」带进来的起播位置（服务端进度）。
+    /// 与本地记录一起交给 `yk_core::resume::resolve_start_position` 取更靠后的。
+    resume_seed: Option<f64>,
+    /// 本次播放的实际起播位置（取流成功后算出，0 = 从头播）。
+    start_position: f64,
+    /// 当前视频的续播记录键（`bvid#cid`）。
+    resume_key: Option<String>,
+    /// 上次写续播记录时的播放位置，用来按间隔落盘。
+    last_resume_save: f64,
+    /// 信息面板标签（标签接口异步填充；失败时用分区名兜底）。
+    tags: Vec<String>,
+    /// 评论加载状态（打开视频后异步拉第一页）。
+    comments: CommentState,
+    /// 元数据请求代次：换源后旧请求的结果直接丢弃。
+    meta_generation: u64,
+    /// 左下角眼睛按钮：关掉后不再绘制弹幕层。
+    danmaku_visible: bool,
+    /// 关注按钮的本地态（本轮不写服务端，只做视觉反馈）。
+    followed: bool,
+    /// 面板 hover 延迟收起的代际：鼠标掠过边界不会闪收。
+    panel_collapse_generation: u64,
+    /// 面板宽度动画代际：每次展开 / 收起换一个 id，200ms EaseStandard 重新起跑。
+    panel_generation: u64,
+    /// 面板刚收起时的短暂抑制：鼠标还停在面板左缘/热区时不立刻重新弹出。
+    panel_hover_grace_until: Option<std::time::Instant>,
+    /// 上次鼠标位置：过滤「位置没变」的重复 move（滚轮不应把控制栏叫出来）。
+    last_pointer: Point<Pixels>,
+    /// 控制栏（连同底部黑框 / 左下角标）是否可见。
+    controls_visible: bool,
+    /// 最近一次鼠标 / 键盘活动时间，驱动 5 秒自动隐藏。
+    last_activity: std::time::Instant,
+    /// 5 秒空闲检测任务的代际：换源 / 隐藏时作废旧任务。
+    controls_timer_generation: u64,
+    /// 当前是否有一个空闲检测任务在跑，避免鼠标移动时重复 spawn。
+    controls_timer_running: bool,
+    /// 窗口激活 / 失活观察者是否已注册（首帧注册一次）。
+    activation_observed: bool,
+    /// 观察者订阅句柄；随视图析构一起释放。
+    activation_observer: Option<gpui::Subscription>,
 }
 
 /// 进程内 `PlayerView` 实例数。
@@ -218,6 +287,9 @@ impl Drop for PlayerView {
                 dispatch_history_report(&report, position);
             }
         }
+        // 兜底：正常关闭 / 换源已经存过，这里再存一次不亏（换源时旧视频
+        // 的位置可能还没落盘）。位置没变时是幂等的。
+        self.save_resume_position();
         LIVE_PLAYERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -250,7 +322,7 @@ impl PlayerView {
             current: None,
             #[cfg(target_os = "macos")]
             loop_started: false,
-            // 沉浸优先：播放浮窗默认收起信息面板（200px）。
+            // 沉浸优先：播放浮窗默认收起信息面板（右侧 200 hover 热区唤出）。
             expanded: false,
             tab: 0,
             danmaku: {
@@ -280,6 +352,26 @@ impl PlayerView {
             closing: false,
             closing_generation: 0,
             close_handler: None,
+            resume: yk_core::resume::ResumeStore::load_default(),
+            resume_seed: None,
+            start_position: 0.0,
+            resume_key: None,
+            last_resume_save: 0.0,
+            tags: Vec::new(),
+            comments: CommentState::Idle,
+            meta_generation: 0,
+            danmaku_visible: true,
+            followed: false,
+            panel_collapse_generation: 0,
+            panel_generation: 0,
+            panel_hover_grace_until: None,
+            last_pointer: point(px(0.), px(0.)),
+            controls_visible: true,
+            last_activity: std::time::Instant::now(),
+            controls_timer_generation: 0,
+            controls_timer_running: false,
+            activation_observed: false,
+            activation_observer: None,
             state: {
                 let mut st = PlayerState::new();
                 st.duration_secs = 754.0;
@@ -308,9 +400,18 @@ impl PlayerView {
     /// 请求在后台 executor 跑；用 `load_generation` 丢弃过期结果，
     /// 连续点两张卡时不会出现旧视频覆盖新视频。
     pub fn open_bvid(&mut self, bvid: String, cx: &mut Context<Self>) {
+        self.open_bvid_at(bvid, None, cx);
+    }
+
+    /// 同 [`Self::open_bvid`]，但带一个「已知进度」（秒）。
+    ///
+    /// `seed` 来自「观看历史」页：那条记录本身就写着上次看到哪，
+    /// 直接拿来当起播位置，不用等本地记录或再发一次请求。
+    pub fn open_bvid_at(&mut self, bvid: String, seed: Option<f64>, cx: &mut Context<Self>) {
         // 换源前先把上一条的关闭上报补掉，否则连续点两个视频时
         // 第一个只留下打开时的 0s 那一拍。
         self.flush_history_report();
+        self.save_resume_position();
         self.load_generation = self.load_generation.wrapping_add(1);
         let generation = self.load_generation;
         self.loading_source = true;
@@ -325,9 +426,28 @@ impl PlayerView {
         self.play_time = 0.0;
         self.state.position_secs = 0.0;
         self.state.playing = true;
+        // 起播即藏控制栏：画面优先，鼠标一动再浮出来。
+        self.controls_visible = false;
+        self.controls_timer_generation = self.controls_timer_generation.wrapping_add(1);
+        self.controls_timer_running = false;
+        self.panel_hover_grace_until = None;
         self.needs_focus = true;
         self.escape_hint = false;
         self.escape_hint_generation = self.escape_hint_generation.wrapping_add(1);
+        // 续播上下文重置：起播位置要等取流成功（拿到时长）才能定。
+        self.resume_seed = seed;
+        self.start_position = 0.0;
+        self.resume_key = None;
+        self.last_resume_save = 0.0;
+        // 信息面板数据跟着换源重置：旧视频的标签/评论不能落到新视频上。
+        self.tags.clear();
+        self.comments = CommentState::Idle;
+        self.meta_generation = self.meta_generation.wrapping_add(1);
+        self.followed = false;
+        // 本地没有记录、也没有历史页带来的进度时，才去服务端历史里找一次
+        // （别的设备 / 别的客户端看过，本地不知道）。
+        let need_remote_history =
+            seed.is_none() && self.resume.resume_position(bvid.trim()).is_none();
         eprintln!("[player] 请求播放：{bvid}");
         cx.notify();
 
@@ -336,9 +456,56 @@ impl PlayerView {
                 .background_executor()
                 .spawn(async move {
                     let cookie = current_session_cookie();
-                    let client =
-                        yk_core::api::client::ReqwestClient::new().map_err(|e| e.to_string())?;
-                    yk_core::api::client::fetch_playback(&client, &bvid, &cookie)
+                    let client = match yk_core::api::client::ReqwestClient::new() {
+                        Ok(client) => client,
+                        Err(error) => return (Err(error), None),
+                    };
+                    // 服务端历史查询与取流并行：都是阻塞请求，放两条线程上跑。
+                    // 查询走 channel 而不是 join —— 就算它卡住，超时后也直接
+                    // 从头播，不能让历史查询拖住起播。
+                    let (history_tx, history_rx) = std::sync::mpsc::channel::<Option<u64>>();
+                    if need_remote_history && !cookie.trim().is_empty() {
+                        let cookie = cookie.clone();
+                        let bvid = bvid.clone();
+                        std::thread::spawn(move || {
+                            let progress = (|| {
+                                let client = match yk_core::api::client::ReqwestClient::new() {
+                                    Ok(client) => client,
+                                    Err(error) => {
+                                        eprintln!("[resume] 历史查询客户端创建失败：{error}");
+                                        return None;
+                                    }
+                                };
+                                match yk_core::api::client::fetch_history(
+                                    &client, &cookie, None, "",
+                                ) {
+                                    Ok((entries, _)) => {
+                                        let progress = yk_core::api::client::find_history_progress(
+                                            &entries, &bvid,
+                                        );
+                                        if let Some(progress) = progress {
+                                            eprintln!(
+                                                "[resume] 服务端历史命中：{bvid} @ {progress}s"
+                                            );
+                                        }
+                                        progress
+                                    }
+                                    Err(error) => {
+                                        eprintln!("[resume] 服务端历史查询失败：{error}");
+                                        None
+                                    }
+                                }
+                            })();
+                            let _ = history_tx.send(progress);
+                        });
+                    }
+                    let source = yk_core::api::client::fetch_playback(&client, &bvid, &cookie);
+                    // 等历史查询的结果，但最多等 2 秒。
+                    let remote_progress = history_rx
+                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .ok()
+                        .flatten();
+                    (source, remote_progress)
                 })
                 .await;
 
@@ -347,7 +514,8 @@ impl PlayerView {
                     return;
                 }
                 view.loading_source = false;
-                match result {
+                let (source, remote_progress) = result;
+                match source {
                     Ok(src) => {
                         eprintln!(
                             "[player] 取流成功：{}（{}s，音轨 {}）",
@@ -360,11 +528,17 @@ impl PlayerView {
                             }
                         );
                         view.state.duration_secs = src.duration_secs as f64;
-                        view.state.position_secs = 0.0;
                         view.state.playing = true;
+                        // 续播：本地记录 + 历史页带来的进度 + 服务端历史，取更靠后的。
+                        let start =
+                            view.resolve_resume_position(&src, remote_progress.map(|p| p as f64));
+                        view.start_position = start;
+                        view.state.position_secs = start;
                         let (aid, bvid, cid) = (src.aid, src.bvid.clone(), src.cid);
                         view.source = Some(src);
-                        view.begin_history_report(aid, bvid, cid);
+                        view.begin_history_report(aid, bvid.clone(), cid, start);
+                        // 标签 / 评论不阻塞起播：源挂上之后再拉，回来一轮重绘。
+                        view.spawn_video_meta(aid, bvid, cx);
                     }
                     Err(e) => {
                         eprintln!("[player] 取流失败：{e}");
@@ -377,11 +551,266 @@ impl PlayerView {
         .detach();
     }
 
-    /// 打开视频时上报一次历史（进度 0，状态「已观看」）。
+    /// 拉信息面板的标签与评论第一页。
+    ///
+    /// 起播不依赖这两个请求：取流成功、面板已有标题/UP 主之后再后台补。
+    /// 失败只影响面板里的对应区块，不把整个播放器打成错误态。
+    fn spawn_video_meta(&mut self, aid: i64, bvid: String, cx: &mut Context<Self>) {
+        if aid <= 0 && bvid.trim().is_empty() {
+            self.comments = CommentState::Ready(Vec::new());
+            return;
+        }
+        self.meta_generation = self.meta_generation.wrapping_add(1);
+        let generation = self.meta_generation;
+        self.comments = CommentState::Loading;
+        let cookie = current_session_cookie();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    let tags = if bvid.trim().is_empty() {
+                        Vec::new()
+                    } else {
+                        match yk_core::api::client::fetch_video_tags(&client, &bvid, &cookie) {
+                            Ok(tags) => tags,
+                            Err(error) => {
+                                eprintln!("[player] 标签加载失败：{error}");
+                                Vec::new()
+                            }
+                        }
+                    };
+                    // 评论 oid 用 aid；没有 aid 的视频不请求，直接给空列表。
+                    let comments = if aid > 0 {
+                        let target = CommentTarget {
+                            oid: aid.to_string(),
+                            kind: 1,
+                        };
+                        yk_core::api::client::fetch_dynamic_comments(&client, &cookie, &target)
+                    } else {
+                        Ok(Vec::new())
+                    };
+                    Ok::<_, String>((tags, comments))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.meta_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok((tags, comments)) => {
+                        if !tags.is_empty() {
+                            view.tags = tags;
+                        }
+                        view.comments = match comments {
+                            Ok(list) => CommentState::Ready(list),
+                            Err(error) => {
+                                eprintln!("[player] 评论加载失败：{error}");
+                                CommentState::Error(error)
+                            }
+                        };
+                    }
+                    Err(error) => {
+                        eprintln!("[player] 评论加载失败：{error}");
+                        view.comments = CommentState::Error(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 面板 hover：进入立刻展开；离开延迟 220ms 再收，避免掠边界闪收。
+    fn set_panel_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if hovered {
+            self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
+                if !self.expanded {
+                self.expanded = true;
+                self.panel_generation = self.panel_generation.wrapping_add(1);
+                cx.notify();
+            }
+            return;
+        }
+        self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
+        let generation = self.panel_collapse_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(220))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.panel_collapse_generation != generation || !view.expanded {
+                    return;
+                }
+                view.expanded = false;
+                view.panel_generation = view.panel_generation.wrapping_add(1);
+                // 鼠标可能还停在面板左缘/热区：400ms 内不响应，避免反复弹出。
+                view.panel_hover_grace_until = Some(
+                    std::time::Instant::now() + std::time::Duration::from_millis(400),
+                );
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 鼠标移动：位置真的变了才算活动。滚轮/重绘触发的重复 move 不应反复叫出控制栏。
+    fn note_pointer_move(
+        &mut self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dx = (position.x.as_f32() - self.last_pointer.x.as_f32()).abs();
+        let dy = (position.y.as_f32() - self.last_pointer.y.as_f32()).abs();
+        self.last_pointer = position;
+        // 滚轮/重绘可能带出位置几乎不变的 move；2px 以内不算「移动」。
+        if dx < 2.0 && dy < 2.0 {
+            return;
+        }
+        self.note_activity(window, cx);
+    }
+
+    /// 鼠标 / 键盘活动：控制栏浮出，并重新开始 5 秒空闲计时。
+    ///
+    /// 只在窗口有焦点时响应：窗口在后台时鼠标掠过不应该把控制栏叫出来。
+    fn note_activity(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() {
+            return;
+        }
+        self.last_activity = std::time::Instant::now();
+        if !self.controls_visible {
+            self.controls_visible = true;
+            cx.notify();
+        }
+        if !self.controls_timer_running {
+            self.arm_controls_timer(cx);
+        }
+    }
+
+    /// 起一个 250ms 轮询的 5 秒空闲计时；可见后一直挂着，隐藏时退出。
+    fn arm_controls_timer(&mut self, cx: &mut Context<Self>) {
+        self.controls_timer_running = true;
+        self.controls_timer_generation = self.controls_timer_generation.wrapping_add(1);
+        let generation = self.controls_timer_generation;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(250))
+                    .await;
+                let keep = this.update(cx, |view, cx| {
+                    if view.controls_timer_generation != generation {
+                        return false;
+                    }
+                    if !view.controls_visible {
+                        return false;
+                    }
+                    // 正在输入弹幕时不自动隐藏，否则输入框会从眼前消失。
+                    if view.input_focused {
+                        view.last_activity = std::time::Instant::now();
+                        return true;
+                    }
+                    if view.last_activity.elapsed() >= std::time::Duration::from_secs(5) {
+                        view.controls_visible = false;
+                        view.controls_timer_running = false;
+                        view.controls_timer_generation =
+                            view.controls_timer_generation.wrapping_add(1);
+                        cx.notify();
+                        return false;
+                    }
+                    true
+                });
+                if !matches!(keep, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// 立即藏起控制栏（播放开始 / 窗口失焦 / 鼠标离开时用）。
+    fn hide_controls(&mut self, cx: &mut Context<Self>) {
+        // 正在输入弹幕时不能把输入框从树里拿掉，等失焦后再走自动隐藏。
+        if self.input_focused {
+            return;
+        }
+        self.controls_timer_generation = self.controls_timer_generation.wrapping_add(1);
+        self.controls_timer_running = false;
+        if self.controls_visible {
+            self.controls_visible = false;
+            cx.notify();
+        }
+    }
+
+    /// 算出这次的起播位置（秒）；0 表示从头播。
+    ///
+    /// 三个来源取更靠后的：
+    /// - 本地续播记录（`bvid#cid`，退而求其次只用 `bvid`）；
+    /// - 打开时带进来的历史进度（`resume_seed`）；
+    /// - 服务端观看历史里的进度（`remote`，本地没记录时才会去查）。
+    ///
+    /// 规则见 [`yk_core::resume::resolve_start_position`]：刚开始看 / 已看完
+    /// 都从头播。
+    fn resolve_resume_position(
+        &mut self,
+        src: &yk_core::PlaybackSource,
+        remote: Option<f64>,
+    ) -> f64 {
+        let duration = src.duration_secs as f64;
+        let key = yk_core::resume::key(&src.bvid, src.cid);
+        let local = self
+            .resume
+            .resume_position(&key)
+            .or_else(|| self.resume.resume_position(&src.bvid));
+        let seed = self.resume_seed;
+        let start = yk_core::resume::resolve_start_position(
+            &[local, seed, remote],
+            duration,
+        )
+        .unwrap_or(0.0);
+        self.resume_key = Some(key);
+        if start > 0.0 {
+            eprintln!(
+                "[resume] 从 {:.1}s 起播：{}（本地 {:?} / 历史 {:?} / 服务端 {:?}，时长 {}s）",
+                start, src.bvid, local, seed, remote, src.duration_secs
+            );
+        } else {
+            eprintln!("[resume] 无可续播记录，从头播：{}", src.bvid);
+        }
+        start
+    }
+
+    /// 把当前播放位置写进本地续播记录。
+    ///
+    /// 只在明确的节点调用（关闭 / 换源 / 播放中定期落盘），
+    /// 不在每帧写盘。
+    fn save_resume_position(&mut self) {
+        let Some(key) = self.resume_key.clone() else {
+            return;
+        };
+        let position = self.play_time.max(0.0);
+        let duration = self.state.duration_secs;
+        self.resume.record(&key, position, duration);
+        // 只按 bvid 存一份作为兜底（cid 未知时仍能续上）。
+        let bvid = key.split('#').next().unwrap_or_default().to_string();
+        if !bvid.is_empty() && bvid != key {
+            self.resume.record(&bvid, position, duration);
+        }
+        if let Err(e) = self.resume.save() {
+            eprintln!("[resume] 写盘失败：{e}");
+        }
+    }
+
+    /// 打开视频时上报一次历史（进度 = 起播位置，状态「已观看」）。
     ///
     /// 不做周期心跳：只在打开 / 关闭两个时机各报一次。关闭时是否再报，
     /// 由 [`Self::flush_history_report`] 判断「打开是否已满 5 秒」。
-    fn begin_history_report(&mut self, aid: i64, bvid: String, cid: i64) {
+    ///
+    /// `start_position` 是这次实际的起播位置（续播时不是 0）：
+    /// 服务端进度直接写成它，避免「续播中」的历史条目被重置成 0%。
+    fn begin_history_report(&mut self, aid: i64, bvid: String, cid: i64, start_position: f64) {
         let Some(session) = current_session() else {
             self.history_report = None;
             return;
@@ -399,8 +828,11 @@ impl PlayerView {
             csrf: session.bili_jct.clone(),
             opened_at: std::time::Instant::now(),
         };
-        eprintln!("[history-report] 打开上报：{bvid}（aid={aid} cid={cid}）");
-        dispatch_history_report(&report, 0);
+        eprintln!(
+            "[history-report] 打开上报：{bvid}（aid={aid} cid={cid} progress={:.0}s）",
+            start_position
+        );
+        dispatch_history_report(&report, start_position.max(0.0) as u64);
         self.history_report = Some(report);
     }
 
@@ -520,6 +952,8 @@ impl PlayerView {
         }
         // 关闭前补最后一拍；打开不足 5s 的会在 flush 里被冷却拦掉。
         self.flush_history_report();
+        // 关闭时把当前位置存进本地续播记录，下次打开从这里继续。
+        self.save_resume_position();
         self.escape_hint = false;
         self.escape_hint_generation = self.escape_hint_generation.wrapping_add(1);
 
@@ -667,9 +1101,18 @@ impl RenderOnce for PlayerEntrance {
         } = self;
         let p = entrance_progress(progress);
         let root_w = source.root_size.width.as_f32().max(2.0 * SPACE_4 + 1.0);
+        let root_h = source
+            .root_size
+            .height
+            .as_f32()
+            .max(TOP_BAR_HEIGHT + SPACE_4 + PLAYER_BOTTOM_INSET + 1.0);
+        let top = TOP_BAR_HEIGHT + SPACE_4;
         let destination = Bounds {
-            origin: point(px(SPACE_4), px(TOP_BAR_HEIGHT + SPACE_4)),
-            size: size(px(root_w - 2.0 * SPACE_4), px(PLAYER_FLOAT_HEIGHT)),
+            origin: point(px(SPACE_4), px(top)),
+            size: size(
+                px(root_w - 2.0 * SPACE_4),
+                px((root_h - top - PLAYER_BOTTOM_INSET).max(1.0)),
+            ),
         };
         let bounds = lerp_bounds(source.bounds, destination, p);
 
@@ -722,9 +1165,18 @@ impl RenderOnce for PlayerExit {
         let p = entrance_progress(progress);
         let q = 1.0 - p;
         let root_w = source.root_size.width.as_f32().max(2.0 * SPACE_4 + 1.0);
+        let root_h = source
+            .root_size
+            .height
+            .as_f32()
+            .max(TOP_BAR_HEIGHT + SPACE_4 + PLAYER_BOTTOM_INSET + 1.0);
+        let top = TOP_BAR_HEIGHT + SPACE_4;
         let destination = Bounds {
-            origin: point(px(SPACE_4), px(TOP_BAR_HEIGHT + SPACE_4)),
-            size: size(px(root_w - 2.0 * SPACE_4), px(PLAYER_FLOAT_HEIGHT)),
+            origin: point(px(SPACE_4), px(top)),
+            size: size(
+                px(root_w - 2.0 * SPACE_4),
+                px((root_h - top - PLAYER_BOTTOM_INSET).max(1.0)),
+            ),
         };
         let bounds = lerp_bounds(source.bounds, destination, q);
         let shell = div()
@@ -821,8 +1273,14 @@ impl Render for PlayerView {
                 };
             if let Some((video, audio)) = source.or_else(|| fallback.map(|v| (v, None))) {
                 self.tried_worker = true;
-                self.worker =
-                    crate::video_worker::FrameWorker::spawn_with_audio(video, audio, 1280, 720);
+                // 起播位置（续播）：mpv 打开文件时直接定位过去。
+                self.worker = crate::video_worker::FrameWorker::spawn_with_audio(
+                    video,
+                    audio,
+                    1280,
+                    720,
+                    self.start_position,
+                );
                 // 取流期间用户可能已经按过暂停：新 worker 启动后补发一次状态。
                 if let Some(w) = self.worker.as_ref() {
                     w.set_paused(!self.state.playing);
@@ -861,6 +1319,12 @@ impl Render for PlayerView {
                                 view.play_time = t;
                                 view.state.position_secs = t;
                                 got = true;
+                                // 播放中定期把进度落盘：进程被杀 / 崩溃时
+                                // 也不至于丢掉续播位置。
+                                if t - view.last_resume_save >= 30.0 {
+                                    view.last_resume_save = t;
+                                    view.save_resume_position();
+                                }
                             }
                         }
                         if got {
@@ -891,7 +1355,7 @@ impl Render for PlayerView {
         // 用 gpui-component 的 Input —— 它内部走 InputHandler，
         // 支持 IME 组合（marked text），中文输入必需。
         if self.danmaku_input.is_none() {
-            let state = cx.new(|cx| InputState::new(window, cx).placeholder("发一条友善的弹幕吧"));
+            let state = cx.new(|cx| InputState::new(window, cx).placeholder("发个友善的弹幕见证当下"));
             // Enter 走 Input 自己的 Enter action（外层补了 key_context("Input") 才匹配），
             // 由它发出 PressEnter。Shift+Enter 不发送。
             // 中文输入法组合中的 Enter 应由输入法先消费（用于选词）；
@@ -906,6 +1370,11 @@ impl Render for PlayerView {
                     view.submit_requested = true;
                     cx.notify();
                 }
+                if matches!(event, InputEvent::Blur) {
+                    // 输入框失焦后不再阻止控制栏自动隐藏。
+                    view.input_focused = false;
+                    cx.notify();
+                }
             })
             .detach();
             eprintln!("[input] InputState 已创建");
@@ -913,29 +1382,91 @@ impl Render for PlayerView {
         }
 
         let t = self.theme.clone();
+        // 窗口失焦：立即收起，不依赖「下一帧」（暂停时没有视频帧驱动 render）。
+        if !self.activation_observed {
+            self.activation_observed = true;
+            // 放到本帧之后注册：observe_window_activation 会立刻回调一次，
+            // 直接在 render 里注册会造成重入。
+            cx.defer_in(window, |view, window, cx| {
+                view.activation_observer = Some(cx.observe_window_activation(
+                    window,
+                    |view, window, cx| {
+                        if !window.is_window_active() {
+                            // 失焦时输入框也拿不到键盘，直接收起。
+                            view.input_focused = false;
+                            view.hide_controls(cx);
+                        }
+                    },
+                ));
+            });
+        }
+        if !window.is_window_active() && self.controls_visible {
+            self.controls_visible = false;
+            self.controls_timer_generation = self.controls_timer_generation.wrapping_add(1);
+            self.controls_timer_running = false;
+        }
         // 入场目标宽度跟随当前窗口；封面起点仍是点击时冻结的那一份。
         if let Some(source) = self.entrance_source.as_mut() {
             source.root_size = window.viewport_size();
         }
+        // 控制区元素提前建好：可见时才挂树，隐藏时只留一条 3px 进度线。
+        let watch_badge = self.controls_visible.then(|| self.watch_badge(cx));
+        let bar: Option<AnyElement> = if self.controls_visible {
+            Some(
+                control_bar(
+                    &t,
+                    &self.state,
+                    self.danmaku_input.as_ref(),
+                    self.source
+                        .as_ref()
+                        .map(|source| source.quality.as_str())
+                        .unwrap_or(""),
+                    cx,
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.toggle_playback(window, cx);
+                    }),
+                )
+                .into_any_element(),
+            )
+        } else {
+            None
+        };
+        let mini_progress = (!self.controls_visible).then(|| self.mini_progress(&t, cx));
+        let panel_hover = (!self.expanded).then(|| self.panel_hover_zone(cx));
         // 浮窗内部：绝对铺满窗口。窗口本身负责圆角/裁剪/阴影/遮挡。
         let content = div()
+            .id("player-content")
             .absolute()
             .inset_0()
             .bg(rgb(0x0B0F14))
-            // ① 视频层（弹幕作为它的子元素，避免形成独立的合成层把 surface 遮掉）
-            .child({
-                #[cfg(target_os = "macos")]
-                {
-                    video_layer(&self.frame, self.current.as_ref())
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    video_layer(&self.frame)
-                }
-            })
+            // ① 视频层：只占红框（播放层）宽度 = 窗口 − 右侧侧栏 200；
+            //    侧栏是常驻占位，不算播放层。Contain 在这个红框里居中。
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .bottom_0()
+                    .right(px(INFO_PANEL_COLLAPSED))
+                    .child({
+                        #[cfg(target_os = "macos")]
+                        {
+                            video_layer(&self.frame, self.current.as_ref())
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            video_layer(&self.frame)
+                        }
+                    }),
+            )
             // ①b 弹幕层：gpui-fast 已解决 surface 与文字的合成冲突，
             // 直接 canvas 绘制即可（见附录 D 事实 16）。
-            .child(self.danmaku_layer())
+            // 左下角眼睛按钮关掉后整层不挂树。
+            .children(if self.danmaku_visible {
+                Some(self.danmaku_layer())
+            } else {
+                None
+            })
             // ①c 取流状态：加载中 / 失败说明，不遮挡控制栏与右侧面板
             .children(
                 if self.loading_source {
@@ -946,7 +1477,10 @@ impl Render for PlayerView {
                 .map(|text| {
                     div()
                         .absolute()
-                        .inset_0()
+                        .top_0()
+                        .left_0()
+                        .bottom_0()
+                        .right(px(INFO_PANEL_COLLAPSED))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -956,72 +1490,32 @@ impl Render for PlayerView {
                         .into_any_element()
                 }),
             )
-            // ② 底部渐变遮罩：控制栏压在画面上时必须靠它保证文字可读
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(CTRL_H + 120.))
-                    .bg(linear_gradient(
-                        0.0,
-                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.0), 0.0),
-                        linear_color_stop(hsla(0.0, 0.0, 0.0, 0.72), 1.0),
-                    )),
-            )
-            // ③ 控制栏（deferred priority 30）
-            .child(
-                // gpui-fast 下不再需要 deferred（合成问题已解决）。
-                // 而且 deferred 元素的 hit-test 有问题：输入框收不到点击。
-                control_bar(
-                    &t,
-                    &self.state,
-                    self.danmaku_input.as_ref(),
-                    cx,
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
-                        // 点播放按钮 = 放弃输入焦点，恢复渲染循环
-                        this.input_focused = false;
-                        this.state.toggle_play();
-                        #[cfg(target_os = "macos")]
-                        if let Some(w) = this.worker.as_ref() {
-                            w.set_paused(!this.state.playing);
-                        }
-                        window.refresh();
-                        cx.notify();
-                    }),
-                ),
-            )
-            // ④ 信息面板（deferred priority 60）
-            .child(info_panel(
-                &t,
-                self.expanded,
-                self.tab,
-                self.panel_width(),
-                cx,
-            ))
-            // ⑤ 骑边界按钮（deferred priority 61）：面板收起时的常驻唤回入口
-            .child(
-                deferred(
-                    div()
-                        .absolute()
-                        .top(px(0.))
-                        .right(px(self.panel_width() - 14.))
-                        .w(px(28.))
-                        .h(px(56.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded(px(RADIUS_SM))
-                        .bg(t.surfaces.surface_elevated_strong)
-                        .border_1()
-                        .border_color(t.surfaces.border_popover)
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(t.surfaces.text_secondary)
-                        .child(if self.expanded { "»" } else { "«" }),
-                )
-                .with_priority(61usize),
-            )
+            // ①e 暂停态中央播放按钮
+            .child(self.center_play(&t, cx))
+            // ② 控制栏黑框 + 左下角标：只在鼠标活动时挂树；隐藏时留一条 3px 进度线。
+            .children(watch_badge)
+            // ③ 视频右缘与面板左缘之间让出的 88px 是唤出热区。
+            //    先挂热区、后挂控制栏：控制栏右端 88 的控件压在热区之上可点击。
+            .children(panel_hover)
+            .children(bar)
+            .children(mini_progress)
+            // ④ 信息面板：通高浮层，从播放页层顶一直到底
+            .child(self.info_panel(&t, window.scale_factor(), cx))
+            // ⑤ 骑边界按钮：面板之后挂载 → 压在面板之上（GPUI 没有 z-index）
+            .child(self.panel_toggle(&t, cx))
+            // 鼠标移动 / 点击都算活动：把控制栏叫回来并重新计时 5 秒。
+            .on_mouse_move(cx.listener(|view, _: &MouseMoveEvent, window, cx| {
+                view.note_activity(window, cx);
+            }))
+            .on_mouse_down(MouseButton::Left, cx.listener(|view, _: &MouseDownEvent, window, cx| {
+                view.note_activity(window, cx);
+            }))
+            // 鼠标离开播放器（去了顶栏 / 页面 / 其它窗口）：控制栏直接收起。
+            .on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
+                if !*hovered {
+                    view.hide_controls(cx);
+                }
+            }))
             .into_any_element();
 
         // 浮窗外侧点击层：从顶栏下方开始，顶栏本身保持可用。
@@ -1106,10 +1600,11 @@ impl Render for PlayerView {
             div()
                 .id("player-window")
                 .absolute()
+                // 跟随窗口拉伸：顶在顶栏下方 16，底在 Dock 上方 20。
                 .top(px(TOP_BAR_HEIGHT + SPACE_4))
                 .left(px(SPACE_4))
                 .right(px(SPACE_4))
-                .h(px(PLAYER_FLOAT_HEIGHT))
+                .bottom(px(PLAYER_BOTTOM_INSET))
                 .rounded(px(CARD_RADIUS))
                 .overflow_hidden()
                 .bg(rgb(0x0B0F14))
@@ -1296,6 +1791,1090 @@ impl PlayerView {
         .absolute()
         .inset_0()
     }
+
+    /// 播放 / 暂停：控制栏与画面中央按钮共用。
+    fn toggle_playback(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 点播放 = 放弃输入焦点，恢复渲染循环。
+        self.input_focused = false;
+        self.state.toggle_play();
+        #[cfg(target_os = "macos")]
+        if let Some(worker) = self.worker.as_ref() {
+            worker.set_paused(!self.state.playing);
+        }
+        if self.state.playing {
+            // 起播即藏：黑框不挡画面；鼠标一动会重新浮出。
+            window.focus(&self.focus_handle, cx);
+            self.hide_controls(cx);
+        } else {
+            // 暂停态把控制栏叫回来，方便继续操作。
+            self.note_activity(window, cx);
+        }
+        window.refresh();
+        cx.notify();
+    }
+
+    /// 暂停态的中央播放按钮（设计稿的大圆按钮；播放中不挂树）。
+    fn center_play(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+        if self.source.is_none() || self.state.playing {
+            return div().into_any_element();
+        }
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .bottom_0()
+            .right(px(INFO_PANEL_COLLAPSED))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .id("player-center-play")
+                    .w(px(84.))
+                    .h(px(84.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgba(0x0000006B))
+                    .border_1()
+                    .border_color(rgba(0xFFFFFF4D))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(t.palette.theme_primary_60))
+                    .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
+                        view.toggle_playback(window, cx);
+                    }))
+                    .child(
+                        Icon::new(IconName::Play)
+                            .size(px(34.))
+                            .text_color(rgb(0xFFFFFF)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 面板右侧横向让出的 88px hover 热区：鼠标进入即展开面板。
+    ///
+    /// 这个 88 是**横向**让位，不是面板底部的 88；面板高度是 top:0 → bottom:0 通高。
+    fn panel_hover_zone(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("player-panel-hover")
+            .absolute()
+            .top_0()
+            // 热区右边界对齐侧栏左边缘；宽度 88，覆盖播放层右缘。
+            .right(px(INFO_PANEL_COLLAPSED))
+            // 高度固定到控制栏上沿：不随控制栏显隐变化，也不去抢控制栏区域的
+            // hover（否则控制栏隐藏 → 热区接管 → 控制栏浮出 → 热区被盖住 → 循环）。
+            .bottom(px(CTRL_H))
+            .w(px(PANEL_HOVER_WIDTH))
+            .bg(rgba(0x00000001))
+            .on_hover(cx.listener(|view, hovered: &bool, window, cx| {
+                if !*hovered {
+                    // 从热区移出：按正常面板移出规则延迟收起。
+                    view.set_panel_hover(false, cx);
+                    return;
+                }
+                if !window.is_window_active() {
+                    return;
+                }
+                view.note_activity(window, cx);
+                view.set_panel_hover(true, cx);
+            }))
+            .on_mouse_move(cx.listener(|view, _: &MouseMoveEvent, window, cx| {
+                view.note_activity(window, cx);
+            }))
+            .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                // 触控 / 点击兜底：hover 不可用时也能打开面板。
+                if !view.expanded {
+                    view.expanded = true;
+                    view.panel_generation = view.panel_generation.wrapping_add(1);
+                    cx.notify();
+                }
+            }))
+            .into_any_element()
+    }
+
+    /// 控制栏隐藏时的简略态：底部 3px 进度线（40px 热区负责把控制栏叫回来）。
+    fn mini_progress(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+        let progress = self.state.progress().clamp(0.0, 1.0) as f32;
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(40.))
+            .flex()
+            .items_end()
+            .bg(rgba(0x00000001))
+            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, cx| {
+                view.note_pointer_move(event.position, window, cx);
+            }))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(3.))
+                    .bg(rgba(0xFFFFFF2E))
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(progress))
+                            .bg(t.palette.theme_primary),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 画面左下角：在线人数 + 弹幕开关 + 弹幕设置。
+    fn watch_badge(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.source.is_none() {
+            return div().into_any_element();
+        }
+        let color = hsla(0.0, 0.0, 1.0, 0.88);
+        let eye = if self.danmaku_visible {
+            IconName::Eye
+        } else {
+            IconName::EyeOff
+        };
+        div()
+            .absolute()
+            .left(px(SPACE_4))
+            .bottom(px(CTRL_H + 10.))
+            .child(
+                div()
+                    .px(px(SPACE_2))
+                    .py(px(3.))
+                    .rounded(px(RADIUS_HALF))
+                    .bg(rgba(0x00000073))
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_3))
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .text_color(color)
+                    .child(div().child("1人正在看"))
+                    .child(overlay_icon(
+                        "player-danmaku-toggle",
+                        eye,
+                        color,
+                        cx.listener(|view, _: &ClickEvent, _window, cx| {
+                            view.danmaku_visible = !view.danmaku_visible;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(overlay_icon(
+                        "player-danmaku-settings",
+                        IconName::Captions,
+                        color,
+                        cx.listener(|view, _: &ClickEvent, _window, cx| {
+                            // 弹幕设置入口：展开面板并切到「弹幕」Tab。
+                            view.tab = 1;
+                            view.panel_collapse_generation =
+                                view.panel_collapse_generation.wrapping_add(1);
+                                    if !view.expanded {
+                                view.expanded = true;
+                                view.panel_generation = view.panel_generation.wrapping_add(1);
+                            }
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// 骑在面板左边界上的圆形按钮：展开态 ×、收起态 ‹。
+    fn panel_toggle(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+        // 骑在贴右边界的面板左边界上：right = 面板宽度 - 一半按钮。
+        let to_right = self.panel_width() - 16.;
+        let from_right = if self.panel_generation == 0 {
+            to_right
+        } else if self.expanded {
+            INFO_PANEL_COLLAPSED - 16.
+        } else {
+            INFO_PANEL_EXPANDED - 16.
+        };
+        div()
+            .id("player-panel-toggle")
+            .absolute()
+            .top(px(SPACE_2))
+            .right(px(to_right))
+            .w(px(32.))
+            .h(px(32.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(rgba(0x14161AB8))
+            .border_1()
+            .border_color(t.surfaces.border_popover)
+            .cursor_pointer()
+            .hover(|style| style.bg(palette().theme_primary))
+            // 按钮骑在边界上：展开时悬停它不要触发 220ms 收起；
+            // 收起时它只是点击入口，不靠 hover 自动展开（否则点击会被自己展开再关掉）。
+            .on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
+                if *hovered {
+                    if view.expanded {
+                        view.panel_collapse_generation =
+                            view.panel_collapse_generation.wrapping_add(1);
+                    }
+                } else if view.expanded {
+                    view.set_panel_hover(false, cx);
+                }
+            }))
+            .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                view.expanded = !view.expanded;
+                view.panel_collapse_generation =
+                    view.panel_collapse_generation.wrapping_add(1);
+                view.panel_generation = view.panel_generation.wrapping_add(1);
+                view.panel_hover_grace_until = if view.expanded {
+                    None
+                } else {
+                    Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_millis(400),
+                    )
+                };
+                cx.notify();
+            }))
+            .child(
+                Icon::new(if self.expanded {
+                    IconName::X
+                } else {
+                    IconName::ChevronLeft
+                })
+                .size(px(ICON_SIZE_SM))
+                .text_color(rgb(0xFFFFFF)),
+            )
+            .with_animation(
+                format!("player-panel-btn-{}", self.panel_generation),
+                Animation::new(std::time::Duration::from_millis(200)).with_easing(ease_standard()),
+                move |el, delta| el.right(px(from_right + (to_right - from_right) * delta)),
+            )
+            .into_any_element()
+    }
+
+    /// 面板 Tab：评论 / 弹幕 / 选集。「选集」只在多 P 时出现。
+    fn panel_tabs(&self) -> Vec<&'static str> {
+        let multi = self
+            .source
+            .as_ref()
+            .map(|source| source.pages.len() > 1)
+            .unwrap_or(false);
+        if multi {
+            vec!["评论", "弹幕", "选集"]
+        } else {
+            vec!["评论", "弹幕"]
+        }
+    }
+
+    /// 信息面板：标题 → 元信息 → UP 主 → 互动 → 标签 → Tab → 内容。
+    ///
+    /// 内容按 400px 排版，收起态只把右半裁掉（D-05：收起仍是 200px 半宽）。
+    fn info_panel(
+        &self,
+        t: &YkTheme,
+        scale_factor: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let s = &t.surfaces;
+        let p = &t.palette;
+        let source = self.source.as_ref();
+
+        let title = match source {
+            Some(source) if !source.title.is_empty() => source.title.clone(),
+            _ if self.loading_source => "正在获取播放地址…".to_string(),
+            _ if self.source_error.is_some() => "播放失败".to_string(),
+            _ => "视频信息".to_string(),
+        };
+
+        let head = div()
+            .flex()
+            .items_start()
+            .pt(px(SPACE_3))
+            .pb(px(SPACE_2))
+            .pl(px(28.))
+            .pr(px(SPACE_3))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .line_height(px(LINE_HEIGHT_TITLE))
+                    .text_size(px(FONT_SIZE_BODY))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(s.text_primary)
+                    .line_clamp(2)
+                    .child(title),
+            );
+
+        let meta = source.map(|source| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(SPACE_4))
+                .px(px(SPACE_4))
+                .pb(px(SPACE_3))
+                .text_size(px(FONT_SIZE_CAPTION))
+                .text_color(s.text_quaternary)
+                .child(meta_stat(IconName::Play, format::count(source.view_count)))
+                .child(meta_stat(
+                    IconName::MessageCircle,
+                    format::count(source.danmaku_count),
+                ))
+                .when(source.pubdate > 0, |el| {
+                    el.child(div().child(format::date_time(source.pubdate)))
+                })
+        });
+
+        let up = source.map(|source| {
+            let face_url = if source.owner_face.is_empty() {
+                String::new()
+            } else {
+                asset_url(&source.owner_face, fitted_width(46.0, scale_factor, 0))
+            };
+            let name = if source.owner_name.is_empty() {
+                "未知 UP 主".to_string()
+            } else {
+                source.owner_name.clone()
+            };
+            let desc = source.desc.clone();
+            div()
+                .px(px(SPACE_4))
+                .pb(px(SPACE_3))
+                .child(
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(px(SPACE_3))
+                        .child(
+                            div()
+                                .relative()
+                                .w(px(46.))
+                                .h(px(46.))
+                                .flex_shrink_0()
+                                .rounded_full()
+                                .overflow_hidden()
+                                .bg(linear_gradient(
+                                    135.,
+                                    linear_color_stop(p.bili_blue, 0.0),
+                                    linear_color_stop(p.bili_pink, 1.0),
+                                ))
+                                .when(!face_url.is_empty(), |el| {
+                                    el.child(
+                                        img(ImageSource::from(face_url.clone()))
+                                            .absolute()
+                                            .inset_0()
+                                            .w_full()
+                                            .h_full()
+                                            .object_fit(ObjectFit::Cover),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(SPACE_2))
+                                        .child(
+                                            div()
+                                                .min_w(px(0.))
+                                                .truncate()
+                                                .text_size(px(FONT_SIZE_CONTROL))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(s.text_primary)
+                                                .child(name),
+                                        )
+                                        .child(
+                                            div()
+                                                .px(px(6.))
+                                                .h(px(18.))
+                                                .flex()
+                                                .items_center()
+                                                .rounded(px(BADGE_RADIUS))
+                                                .border_1()
+                                                .border_color(s.border_strong)
+                                                .text_size(px(FONT_SIZE_MICRO))
+                                                .text_color(s.text_quaternary)
+                                                .child("发消息"),
+                                        ),
+                                )
+                                .when(!desc.is_empty(), |el| {
+                                    el.child(
+                                        div()
+                                            .line_height(px(18.))
+                                            .text_size(px(FONT_SIZE_CAPTION))
+                                            .text_color(s.text_tertiary)
+                                            .line_clamp(2)
+                                            .child(desc),
+                                    )
+                                }),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(SPACE_2))
+                        .mt(px(SPACE_3))
+                        .child(
+                            div()
+                                .id("player-charge")
+                                .flex_shrink_0()
+                                .h(px(30.))
+                                .px(px(SPACE_4))
+                                .flex()
+                                .items_center()
+                                .rounded(px(RADIUS_MD))
+                                .bg(p.theme_primary)
+                                .cursor_pointer()
+                                .hover(|style| style.opacity(0.9))
+                                .text_size(px(FONT_SIZE_CAPTION))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xFFFFFF))
+                                .child("充电"),
+                        )
+                        .child(
+                            div()
+                                .id("player-follow")
+                                .flex_1()
+                                .h(px(30.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .gap(px(5.))
+                                .rounded(px(RADIUS_MD))
+                                .bg(s.fill_2)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(s.fill_3))
+                                .text_size(px(FONT_SIZE_CAPTION))
+                                .text_color(s.text_secondary)
+                                .child(
+                                    Icon::new(IconName::List)
+                                        .size(px(ICON_SIZE_SM))
+                                        .text_color(s.text_secondary),
+                                )
+                                .child(if self.followed { "已关注" } else { "关注" })
+                                .on_click(cx.listener(
+                                    |view, _: &ClickEvent, _window, cx| {
+                                        view.followed = !view.followed;
+                                        cx.notify();
+                                    },
+                                )),
+                        ),
+                )
+        });
+
+        let actions = source.map(|source| {
+            div()
+                .flex()
+                .items_center()
+                .justify_around()
+                .px(px(SPACE_4))
+                .py(px(2.))
+                .border_t_1()
+                .border_color(s.border_subtle)
+                .child(panel_action(
+                    t,
+                    IconName::ThumbsUp,
+                    if source.like_count > 0 {
+                        format::count(source.like_count)
+                    } else {
+                        "点赞".to_string()
+                    },
+                ))
+                .child(panel_action(
+                    t,
+                    IconName::Coins,
+                    if source.coin_count > 0 {
+                        format::count(source.coin_count)
+                    } else {
+                        "投币".to_string()
+                    },
+                ))
+                .child(panel_action(
+                    t,
+                    IconName::Star,
+                    if source.favorite_count > 0 {
+                        format::count(source.favorite_count)
+                    } else {
+                        "收藏".to_string()
+                    },
+                ))
+                .child(panel_action(
+                    t,
+                    IconName::Share,
+                    if source.share_count > 0 {
+                        format::count(source.share_count)
+                    } else {
+                        "分享".to_string()
+                    },
+                ))
+        });
+
+        let mut tags: Vec<String> = if !self.tags.is_empty() {
+            self.tags.clone()
+        } else {
+            source
+                .map(|source| {
+                    if source.category.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![source.category.clone()]
+                    }
+                })
+                .unwrap_or_default()
+        };
+        tags.truncate(3);
+        let tags_row = (!tags.is_empty()).then(|| {
+            let mut row = div()
+                .flex()
+                .flex_wrap()
+                .gap(px(SPACE_2))
+                .px(px(SPACE_4))
+                .py(px(SPACE_2))
+                .border_t_1()
+                .border_color(s.border_subtle);
+            for tag in tags {
+                row = row.child(
+                    div()
+                        .px(px(10.))
+                        .h(px(22.))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .bg(s.fill_2)
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(s.text_tertiary)
+                        .child(tag),
+                );
+            }
+            row
+        });
+
+        let tabs = self.panel_tabs();
+        let active = self.tab.min(tabs.len().saturating_sub(1));
+        let mut tabs_row = div()
+            .flex()
+            .border_t_1()
+            .border_color(s.border_subtle)
+            .flex_shrink_0();
+        for (index, name) in tabs.iter().enumerate() {
+            let on = index == active;
+            tabs_row = tabs_row.child(
+                div()
+                    .id(("player-tab", index))
+                    .flex_1()
+                    .h(px(42.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(FONT_SIZE_CONTROL))
+                    .font_weight(if on {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .text_color(if on { p.theme_primary } else { s.text_tertiary })
+                    .child(*name)
+                    .child(
+                        div()
+                            .w(px(28.))
+                            .h(px(2.))
+                            .rounded_full()
+                            .bg(if on {
+                                p.theme_primary
+                            } else {
+                                hsla(0.0, 0.0, 0.0, 0.0)
+                            }),
+                    )
+                    .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                        view.tab = index;
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let body = div()
+            .w(px(PLAYER_INFO_PANEL_WIDTH))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(head)
+            .children(meta)
+            .children(up)
+            .children(actions)
+            .children(tags_row)
+            .child(tabs_row)
+            .child(self.tab_content(t, active, cx));
+
+        let to_width = self.panel_width();
+        let from_width = if self.panel_generation == 0 {
+            to_width
+        } else if self.expanded {
+            INFO_PANEL_COLLAPSED
+        } else {
+            INFO_PANEL_EXPANDED
+        };
+        div()
+            .id("info-panel")
+            .absolute()
+            .top(px(0.))
+            // 侧栏贴着窗口右边界；让出 88px 的是左侧的视频区，不是面板。
+            .right(px(0.))
+            // 高度通高：从播放页层顶部一直拉到底。
+            .bottom(px(0.))
+            .w(px(to_width))
+            .overflow_hidden()
+            // 浮在视频上的面板：GPUI 没有元素级 backdrop blur，用不透明表面。
+            .bg(s.surface_elevated_solid)
+            .when(self.expanded, |el| {
+                el.border_l_1().border_color(s.border_subtle)
+            })
+            // 面板本体即 hover 热区（D-05）：进入展开，移出延迟 220ms 收回。
+            .on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
+                view.set_panel_hover(*hovered, cx);
+            }))
+            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, cx| {
+                view.note_pointer_move(event.position, window, cx);
+            }))
+            .child(body)
+            .with_animation(
+                format!("player-panel-{}", self.panel_generation),
+                Animation::new(std::time::Duration::from_millis(200)).with_easing(ease_standard()),
+                move |el, delta| el.w(px(from_width + (to_width - from_width) * delta)),
+            )
+            .into_any_element()
+    }
+
+    /// 面板 Tab 内容：评论 / 弹幕 / 选集。
+    fn tab_content(&self, t: &YkTheme, active: usize, cx: &mut Context<Self>) -> AnyElement {
+        match active {
+            0 => self.comments_tab(t, cx),
+            1 => self.danmaku_tab(t),
+            _ => self.pages_tab(t),
+        }
+    }
+
+    fn comments_tab(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+        let s = &t.surfaces;
+        let p = &t.palette;
+        let total = self
+            .source
+            .as_ref()
+            .map(|source| source.reply_count)
+            .unwrap_or(0);
+        let retry = self
+            .source
+            .as_ref()
+            .map(|source| (source.aid, source.bvid.clone()));
+
+        let mut list = div()
+            .id("player-comments-scroll")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .px(px(SPACE_4))
+            .pb(px(SPACE_4));
+        match &self.comments {
+            CommentState::Idle => {}
+            CommentState::Loading => {
+                for _ in 0..3 {
+                    list = list.child(comment_skeleton(t));
+                }
+            }
+            CommentState::Error(error) => {
+                list = list
+                    .child(panel_empty_line(t, "评论加载失败"))
+                    .child(
+                        div()
+                            .w_full()
+                            .pb(px(SPACE_4))
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_size(px(FONT_SIZE_CAPTION))
+                                    .text_color(s.text_quaternary)
+                                    .line_clamp(2)
+                                    .child(error.clone()),
+                            ),
+                    );
+                if let Some((aid, bvid)) = retry {
+                    list = list.child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .id("player-comments-retry")
+                                    .px(px(SPACE_3))
+                                    .h(px(26.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded(px(RADIUS_MD))
+                                    .bg(s.fill_2)
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(s.fill_3))
+                                    .text_size(px(FONT_SIZE_CAPTION))
+                                    .text_color(p.theme_primary)
+                                    .child("重试")
+                                    .on_click(cx.listener(
+                                        move |view, _: &ClickEvent, _window, cx| {
+                                            view.spawn_video_meta(aid, bvid.clone(), cx);
+                                        },
+                                    )),
+                            ),
+                    );
+                }
+            }
+            CommentState::Ready(items) if items.is_empty() => {
+                list = list.child(panel_empty_line(t, "没有更多评论"));
+            }
+            CommentState::Ready(items) => {
+                for comment in items {
+                    list = list.child(comment_item(t, comment));
+                }
+                list = list.child(panel_empty_line(t, "没有更多评论"));
+            }
+        }
+
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .justify_between()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_4))
+                    .pb(px(SPACE_2))
+                    .flex_shrink_0()
+                    .child(
+                        div()
+                            .text_size(px(FONT_SIZE_CONTROL))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(s.text_primary)
+                            .child(format!("评论 {}", format::count(total))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(SPACE_2))
+                            .text_size(px(FONT_SIZE_CAPTION))
+                            .text_color(s.text_quaternary)
+                            .child(
+                                div()
+                                    .text_color(s.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("最热"),
+                            )
+                            .child(div().child("|"))
+                            .child(div().child("最新")),
+                    ),
+            )
+            .child(list)
+            .into_any_element()
+    }
+
+    fn danmaku_tab(&self, t: &YkTheme) -> AnyElement {
+        let s = &t.surfaces;
+        let mut list = div()
+            .id("player-danmaku-scroll")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .px(px(SPACE_4))
+            .pb(px(SPACE_4));
+        let mut any = false;
+        for (danmaku, _) in self.danmaku.iter().take(40) {
+            any = true;
+            list = list.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(SPACE_2))
+                    .py(px(5.))
+                    .border_b_1()
+                    .border_color(s.border_subtle)
+                    .child(
+                        div()
+                            .w(px(40.))
+                            .flex_shrink_0()
+                            .text_size(px(FONT_SIZE_CAPTION))
+                            .text_color(s.text_quaternary)
+                            .child(format::duration(danmaku.time.max(0.0) as u64)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_size(px(FONT_SIZE_CAPTION))
+                            .text_color(s.text_secondary)
+                            .line_clamp(2)
+                            .child(danmaku.text.clone()),
+                    ),
+            );
+        }
+        if !any {
+            list = list.child(panel_empty_line(t, "暂无弹幕"));
+        }
+        list.into_any_element()
+    }
+
+    fn pages_tab(&self, t: &YkTheme) -> AnyElement {
+        let s = &t.surfaces;
+        let p = &t.palette;
+        let source = self.source.as_ref();
+        let current = source.map(|source| source.current_page).unwrap_or(1);
+        let pages = source.map(|source| source.pages.as_slice()).unwrap_or(&[]);
+        let mut list = div()
+            .id("player-pages-scroll")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .px(px(SPACE_4))
+            .pb(px(SPACE_4))
+            .flex()
+            .flex_col()
+            .gap(px(4.));
+        if pages.is_empty() {
+            list = list.child(panel_empty_line(t, "暂无分 P 信息"));
+        } else {
+            for page in pages {
+                let on = page.page == current;
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(SPACE_2))
+                        .px(px(SPACE_2))
+                        .py(px(SPACE_2))
+                        .rounded(px(RADIUS_MD))
+                        .when(on, |el| el.bg(s.fill_2))
+                        .child(
+                            div()
+                                .w(px(16.))
+                                .flex_shrink_0()
+                                .text_color(p.theme_primary)
+                                .when(on, |el| {
+                                    el.child(
+                                        Icon::new(IconName::Check)
+                                            .size(px(14.))
+                                            .text_color(p.theme_primary),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate()
+                                .text_size(px(FONT_SIZE_CAPTION))
+                                .text_color(if on {
+                                    s.text_primary
+                                } else {
+                                    s.text_secondary
+                                })
+                                .child(format!("P{} · {}", page.page, page.part)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(FONT_SIZE_CAPTION))
+                                .text_color(s.text_quaternary)
+                                .child(if page.duration > 0 {
+                                    format::duration(page.duration)
+                                } else {
+                                    String::new()
+                                }),
+                        ),
+                );
+            }
+        }
+        list.into_any_element()
+    }
+}
+
+/// 左下角浮层的小图标按钮（24 热区，16 图标）。
+fn overlay_icon(
+    id: &'static str,
+    icon: IconName,
+    color: Hsla,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(24.))
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF24)))
+        .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color))
+        .on_click(on_click)
+}
+
+/// 元信息行的一项：12px 图标 + 计数。
+fn meta_stat(icon: IconName, text: String) -> impl IntoElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(3.))
+        .child(Icon::new(icon).size(px(12.)))
+        .child(text)
+}
+
+/// 互动行的一项：图标在上、计数/文案在下。
+fn panel_action(t: &YkTheme, icon: IconName, label: String) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(2.))
+        .px(px(SPACE_2))
+        .py(px(SPACE_1))
+        .rounded(px(RADIUS_MD))
+        .text_size(px(FONT_SIZE_MICRO))
+        .text_color(t.surfaces.text_tertiary)
+        .child(
+            Icon::new(icon)
+                .size(px(ICON_SIZE_SM))
+                .text_color(t.surfaces.text_tertiary),
+        )
+        .child(label)
+}
+
+/// 评论加载骨架：圆头像 + 三行灰条。
+fn comment_skeleton(t: &YkTheme) -> impl IntoElement {
+    let s = &t.surfaces;
+    div()
+        .flex()
+        .items_start()
+        .gap(px(SPACE_2))
+        .py(px(SPACE_2))
+        .border_b_1()
+        .border_color(s.border_subtle)
+        .child(
+            div()
+                .w(px(28.))
+                .h(px(28.))
+                .flex_shrink_0()
+                .rounded_full()
+                .bg(s.fill_2),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(div().w(relative(0.36)).h(px(10.)).rounded_full().bg(s.fill_2))
+                .child(div().w(relative(0.92)).h(px(12.)).rounded_full().bg(s.fill_1))
+                .child(div().w(relative(0.64)).h(px(12.)).rounded_full().bg(s.fill_1)),
+        )
+}
+
+/// 面板里的空态 / 加载文案。
+fn panel_empty_line(t: &YkTheme, text: &str) -> impl IntoElement {
+    div()
+        .w_full()
+        .py(px(SPACE_6))
+        .text_center()
+        .text_size(px(FONT_SIZE_CAPTION))
+        .text_color(t.surfaces.text_quaternary)
+        .child(text.to_string())
+}
+
+/// 信息面板的一条评论。
+fn comment_item(t: &YkTheme, comment: &DynamicComment) -> impl IntoElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    div()
+        .flex()
+        .items_start()
+        .gap(px(SPACE_2))
+        .py(px(SPACE_2))
+        .border_b_1()
+        .border_color(s.border_subtle)
+        .child(
+            div()
+                .w(px(28.))
+                .h(px(28.))
+                .flex_shrink_0()
+                .rounded_full()
+                .overflow_hidden()
+                .bg(linear_gradient(
+                    135.,
+                    linear_color_stop(p.bili_blue, 0.0),
+                    linear_color_stop(p.bili_pink, 1.0),
+                ))
+                .when(!comment.face.is_empty(), |el| {
+                    el.child(
+                        img(ImageSource::from(comment.face.clone()))
+                            .w(px(28.))
+                            .h(px(28.))
+                            .object_fit(ObjectFit::Cover),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(s.text_quaternary)
+                        .truncate()
+                        .child(comment.author.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CONTROL))
+                        .text_color(s.text_primary)
+                        .line_height(px(20.))
+                        .line_clamp(3)
+                        .child(comment.text.clone()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(SPACE_3))
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(s.text_quaternary)
+                        .child(comment.time.clone())
+                        .when(comment.like > 0, |el| {
+                            el.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(2.))
+                                    .child(
+                                        Icon::new(IconName::ThumbsUp).size(px(11.)),
+                                    )
+                                    .child(format::count(comment.like)),
+                            )
+                        }),
+                ),
+        )
 }
 
 /// 占位弹幕（真实数据要从 `/x/v1/dm/list.so` 拉 XML，属于后续）。
@@ -1342,13 +2921,15 @@ fn video_layer(
         Some(b) => b.clone(),
         None => frame.buffer(),
     };
+    // 等比 letterbox（L-2）：`surface()` 的 object_fit 默认就是 Contain。
+    // 注意 surface 自身带有 CVPixelBuffer 的固有尺寸，直接当普通 child 会贴在
+    // 左上角；这里用满尺寸 flex 容器把它居中，视频才真正落在播放器中心。
     div()
         .absolute()
         .inset_0()
-        // 等比 letterbox（L-2）：`surface()` 的 object_fit 默认就是 Contain，
-        // 按 CVPixelBuffer 的真实尺寸缩放并居中留黑边。这里显式写出来，
-        // 避免以后有人改默认值或误用 Fill 把画面拉变形。
-        // 实测：4:3 片源在 1280×820 窗口里保持 4:3，左右留黑边。
+        .flex()
+        .items_center()
+        .justify_center()
         .child(surface(buffer).object_fit(ObjectFit::Contain).size_full())
 }
 
@@ -1371,25 +2952,52 @@ fn video_layer(_frame: &TestFrame) -> impl IntoElement {
 
 // ================= 控制栏 =================
 
+/// 悬浮控制栏：弹幕输入 38 + 操作条 50 = 88。
+///
+/// 横向固定在 `left:0 / right:200px`（收起态面板宽度）——播放器宽度不随面板伸缩；
+/// 面板展开到 400 时允许盖住右端，这是用户主动展开换来的代价。
 fn control_bar(
     t: &YkTheme,
     state: &PlayerState,
     danmaku_input: Option<&Entity<InputState>>,
+    quality: &str,
     cx: &mut Context<PlayerView>,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let (time_now, time_total) = state.time_texts();
-    let progress = state.progress();
+    let progress = state.progress().clamp(0.0, 1.0) as f32;
     let s = &t.surfaces;
+    let p = &t.palette;
+    let icon_color = hsla(0.0, 0.0, 1.0, 0.86);
+    let rate_text = format!("倍速 {}x", trim_rate(state.rate));
+    let volume_icon = if state.muted || state.volume <= 0.001 {
+        IconName::VolumeX
+    } else {
+        IconName::Volume2
+    };
+    let quality_text = if quality.is_empty() {
+        "画质".to_string()
+    } else {
+        quality.to_string()
+    };
+
     div()
         .absolute()
         .left_0()
-        .right_0()
+        // 控制条宽度 = 播放层（红框/蓝框）宽度：右端直接贴到侧栏左边缘。
+        .right(px(INFO_PANEL_COLLAPSED))
         .bottom_0()
         .h(px(CTRL_H))
         .flex()
         .flex_col()
-        // ---- 上半：弹幕输入 38 ----
+        // 黑框只包住控制栏本体：88px 实底 + 1px 顶边，不再铺 208px 渐变遮罩。
+        .bg(rgba(0x0B0F14E6))
+        .border_t_1()
+        .border_color(rgba(0xFFFFFF14))
+        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, cx| {
+            view.note_pointer_move(event.position, window, cx);
+        }))
+        // ---- 上半：弹幕礼仪 + 输入 + 发送 38 ----
         .child(
             div()
                 .h(px(DANMAKU_INPUT_H))
@@ -1398,16 +3006,23 @@ fn control_bar(
                 .flex()
                 .items_center()
                 .gap(px(SPACE_2))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.45))
+                        .child("弹幕礼仪 ›"),
+                )
                 .child(match danmaku_input {
                     Some(st) => {
                         // Input 元素本身不 track_focus，键盘事件不会路由过去。
                         // 必须由外层接管焦点：track_focus 让元素参与焦点系统，
                         // 点击时显式 window.focus() 把输入焦点交给它。
                         let handle = st.read(cx).focus_handle(cx);
-                        // 记录聚焦状态需要在 PlayerView 上，这里通过回调设置
                         div()
                             .id("danmaku-input")
                             .flex_1()
+                            .min_w(px(0.))
                             .h(px(26.))
                             // Enter 的绑定是 `KeyBinding::new("enter", Enter, Some("Input"))`；
                             // 焦点落在这个外层 div 上，必须补 key_context 才能匹配到 Input 的 action。
@@ -1443,36 +3058,38 @@ fn control_bar(
                     }
                     None => div()
                         .flex_1()
+                        .min_w(px(0.))
                         .h(px(26.))
                         .px(px(SPACE_2))
                         .flex()
                         .items_center()
                         .rounded(px(RADIUS_SM))
                         .bg(rgba(0xFFFFFF1A))
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(hsla(1.0, 0.0, 1.0, 0.55))
-                        .child("发一条友善的弹幕吧")
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.55))
+                        .child("发个友善的弹幕见证当下")
                         .into_any_element(),
                 })
                 .child(
                     div()
                         .id("danmaku-send")
-                        .px(px(SPACE_2))
+                        .px(px(SPACE_3))
                         .h(px(26.))
                         .flex()
                         .items_center()
                         .rounded(px(RADIUS_SM))
-                        .bg(palette().theme_primary)
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(rgb(0xFFFFFF))
+                        .bg(p.theme_primary)
                         .cursor_pointer()
+                        .hover(|style| style.opacity(0.9))
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(rgb(0xFFFFFF))
                         .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
                             view.send_danmaku(window, cx);
                         }))
                         .child("发送"),
                 ),
         )
-        // ---- 下半：操作条 50 ----
+        // ---- 下半：播放 / 时间 / 进度 / 画质 / 倍速 / 图标 50 ----
         .child(
             div()
                 .h(px(50.))
@@ -1480,140 +3097,120 @@ fn control_bar(
                 .px(px(SPACE_4))
                 .flex()
                 .items_center()
-                .gap(px(SPACE_3))
+                .gap(px(SPACE_2))
                 .child(
                     div()
                         .id("play-toggle")
                         .w(px(32.))
                         .h(px(32.))
+                        .flex_shrink_0()
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(px(32. / 2.))
-                        .text_size(px(FONT_SIZE_CONTROL))
-                        .text_color(rgb(0xFFFFFF))
-                        .child(state.play_pause_glyph())
-                        .on_click(on_play),
-                )
-                .child(
-                    div()
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(hsla(1.0, 0.0, 1.0, 0.85))
-                        .child(time_now),
-                )
-                // 进度条
-                .child(
-                    div()
-                        .flex_1()
-                        .h(px(4.))
-                        .rounded(px(2.))
-                        .bg(rgba(0xFFFFFF33))
+                        .rounded_full()
+                        .cursor_pointer()
+                        .hover(|style| style.bg(rgba(0xFFFFFF1A)))
+                        .on_click(on_play)
                         .child(
-                            div()
-                                .h(px(4.))
-                                .w(px(((1280. - 400.) as f64 * progress) as f32))
-                                .rounded(px(2.))
-                                .bg(palette().theme_primary),
+                            Icon::new(if state.playing {
+                                IconName::Pause
+                            } else {
+                                IconName::Play
+                            })
+                            .size(px(ICON_SIZE_SM))
+                            .text_color(rgb(0xFFFFFF)),
                         ),
                 )
                 .child(
                     div()
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(hsla(1.0, 0.0, 1.0, 0.85))
-                        .child(time_total),
+                        .flex_shrink_0()
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.85))
+                        .child(format!("{time_now} / {time_total}")),
                 )
-                .child(bar_icon("弹"))
-                .child(bar_icon("1080P"))
-                .child(bar_icon(&state.rate_text()))
-                .child(bar_icon("全屏")),
+                // 进度条：左侧已播 + 右侧未播，滑块骑在交界处
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .h(px(12.))
+                        .flex()
+                        .items_center()
+                        .child(
+                            div()
+                                .relative()
+                                .flex_shrink_0()
+                                .h(px(4.))
+                                .w(relative(progress))
+                                .rounded_full()
+                                .bg(p.theme_primary)
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .right(px(-6.))
+                                        .top(px(-4.))
+                                        .w(px(12.))
+                                        .h(px(12.))
+                                        .rounded_full()
+                                        .bg(rgb(0xFFFFFF)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(4.))
+                                .rounded_full()
+                                .bg(rgba(0xFFFFFF33)),
+                        ),
+                )
+                .child(ctrl_pill(quality_text))
+                .child(ctrl_pill(rate_text))
+                .child(ctrl_icon(volume_icon, icon_color))
+                .child(ctrl_icon(IconName::Captions, icon_color))
+                .child(ctrl_icon(IconName::Settings, icon_color))
+                .child(ctrl_icon(IconName::Maximize, icon_color)),
         )
-        // 控制栏底边：靠遮罩承接，不加实线，避免在画面上出现硬边
         .text_color(s.text_on_accent)
 }
 
-fn bar_icon(label: &str) -> impl IntoElement {
-    div()
-        .px(px(SPACE_2))
-        .h(px(26.))
-        .flex()
-        .items_center()
-        .rounded(px(RADIUS_SM))
-        .text_size(px(FONT_SIZE_MICRO))
-        .text_color(hsla(1.0, 0.0, 1.0, 0.85))
-        .child(label.to_string())
+/// 倍速文案：整数也保留一位小数（`1.0x`），非整数按实际给出（`1.25x`）。
+fn trim_rate(rate: f64) -> String {
+    if (rate.fract()).abs() < 1e-6 {
+        format!("{rate:.1}")
+    } else {
+        let text = format!("{rate:.2}");
+        text.trim_end_matches('0').to_string()
+    }
 }
 
-// ================= 信息面板 =================
-
-const TABS: [&str; 3] = ["评论", "弹幕", "选集"];
-
-fn info_panel(
-    t: &YkTheme,
-    expanded: bool,
-    active_tab: usize,
-    width: f32,
-    cx: &mut Context<PlayerView>,
-) -> impl IntoElement {
-    let s = &t.surfaces;
-    let mut tab_row = div()
+/// 控制栏右侧胶囊（画质 / 倍速）。
+fn ctrl_pill(label: String) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .h(px(28.))
+        .px(px(SPACE_2))
         .flex()
         .items_center()
-        .gap(px(SPACE_4))
-        .px(px(SPACE_4))
-        .h(px(44.))
-        .border_b_1()
-        .border_color(s.border_subtle);
-    for (i, name) in TABS.iter().enumerate() {
-        let on = i == active_tab;
-        tab_row = tab_row.child(
-            div()
-                .text_size(px(FONT_SIZE_CONTROL))
-                .font_weight(if on {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::MEDIUM
-                })
-                .text_color(if on { s.text_primary } else { s.text_tertiary })
-                .child(*name),
-        );
-    }
+        .rounded(px(RADIUS_HALF))
+        .bg(rgba(0xFFFFFF1F))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF33)))
+        .text_size(px(FONT_SIZE_CAPTION))
+        .text_color(hsla(0.0, 0.0, 1.0, 0.90))
+        .child(label)
+}
 
+/// 控制栏右侧图标按钮（音量 / 字幕 / 设置 / 全屏）。
+fn ctrl_icon(icon: IconName, color: Hsla) -> impl IntoElement {
     div()
-        .id("info-panel")
-        .absolute()
-        .top(px(0.))
-        .right(px(0.))
-        .bottom(px(CTRL_H))
-        .w(px(width))
+        .w(px(32.))
+        .h(px(32.))
+        .flex_shrink_0()
         .flex()
-        .flex_col()
-        // 浮在视频上的面板：必须用 Strong 变体。
-        // GPUI 没有元素级 backdrop blur，所以不能靠模糊压暗背后的画面。
-        .bg(s.surface_elevated_strong)
-        .border_l_1()
-        .border_color(s.border_subtle)
-        // 面板本体即 hover 热区（D-05）：进入展开、离开收回
-        .on_hover(cx.listener(move |this, hovered: &bool, _window, cx| {
-            let next = *hovered;
-            if this.expanded != next {
-                this.expanded = next;
-                cx.notify();
-            }
-        }))
-        .child(tab_row)
-        .child(
-            div()
-                .flex_1()
-                .p(px(SPACE_4))
-                .flex()
-                .flex_col()
-                .gap(px(SPACE_3))
-                .text_size(px(FONT_SIZE_CONTROL))
-                .text_color(s.text_tertiary)
-                .child(if expanded {
-                    "展开态 400px：评论 / 弹幕 / 选集"
-                } else {
-                    "收起态 200px"
-                }),
-        )
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_HALF))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF1A)))
+        .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color))
 }

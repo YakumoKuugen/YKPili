@@ -100,8 +100,8 @@ pub const COVER_CELL_HEIGHT: f32 = 184.0;
 
 /// 展开态面板宽度。
 pub const PLAYER_INFO_PANEL_WIDTH: f32 = 400.0;
-/// 收起态半宽 —— 这是**用户调好的规格**：收起后仍留 200px，且面板本体即 hover 热区。
-/// 不要改成 0（曾经误改成完全隐藏，已回滚）。见设计文档第 06 节。
+/// 收起态面板宽度：面板收回到 200px 半宽，内容仍按 400px 排版、右半裁切。
+/// 见设计文档第 06 节。
 pub const PLAYER_INFO_PANEL_COLLAPSED_WIDTH: f32 = 200.0;
 
 // ================= 移动端（MOBILE_* 前缀，进同一令牌源） =================

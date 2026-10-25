@@ -77,6 +77,15 @@ pub fn video_info(bvid: &str, img_key: &str, sub_key: &str, cookie: &str, wts: u
     }
 }
 
+/// 视频标签（不需要 WBI 签名）。信息面板的标签行用它。
+pub fn video_tags(bvid: &str, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/tag/archive/tags?bvid={bvid}"),
+        cookie: cookie.to_string(),
+        name: "video_tags",
+    }
+}
+
 /// 播放地址（需要 WBI 签名）。
 ///
 /// `qn=127` 请求最高画质；`fnval=4048` 打开 DASH（含 4K/HDR/杜比等位域）。

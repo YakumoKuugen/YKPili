@@ -54,6 +54,8 @@ pub struct RecommendVideoItem {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct VideoOwner {
     #[serde(default)]
+    pub mid: i64,
+    #[serde(default)]
     pub name: String,
     #[serde(default)]
     pub face: String,
@@ -65,6 +67,16 @@ pub struct VideoStat {
     pub view: u64,
     #[serde(default)]
     pub danmaku: u64,
+    #[serde(default)]
+    pub reply: u64,
+    #[serde(default)]
+    pub like: u64,
+    #[serde(default)]
+    pub coin: u64,
+    #[serde(default)]
+    pub favorite: u64,
+    #[serde(default)]
+    pub share: u64,
 }
 
 // ================= 视频详情 =================
@@ -85,14 +97,30 @@ pub struct VideoInfoData {
     pub cid: i64,
     #[serde(default)]
     pub title: String,
+    /// 简介，信息面板的 UP 主签名区直接用它。
+    #[serde(default)]
+    pub desc: String,
+    /// 发布时间（Unix 秒）。
+    #[serde(default)]
+    pub pubdate: u64,
+    /// 封面（原始地址，视图侧按显示尺寸再取）。
+    #[serde(default)]
+    pub pic: String,
+    /// 分区名（如「游戏 · 射击游戏」）。
+    #[serde(default)]
+    pub tname: String,
     /// 视频时长（秒）。
     #[serde(default)]
     pub duration: u64,
     #[serde(default)]
+    pub owner: Option<VideoOwner>,
+    #[serde(default)]
+    pub stat: Option<VideoStat>,
+    #[serde(default)]
     pub pages: Vec<VideoPage>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 pub struct VideoPage {
     #[serde(default)]
     pub cid: i64,
@@ -100,6 +128,24 @@ pub struct VideoPage {
     pub page: i32,
     #[serde(default)]
     pub part: String,
+    /// 该 P 的时长（秒）。
+    #[serde(default)]
+    pub duration: u64,
+}
+
+// ================= 视频标签 =================
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoTagsResponse {
+    pub code: i64,
+    #[serde(default)]
+    pub data: Option<Vec<VideoTagItem>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct VideoTagItem {
+    #[serde(default)]
+    pub tag_name: String,
 }
 
 // ================= 播放地址 =================

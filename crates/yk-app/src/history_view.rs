@@ -1312,12 +1312,19 @@ fn card(
     } else if playable {
         let bvid_for_click = bvid.clone();
         let title_for_click = title.clone();
+        // 续播：这条历史记录本身就写着上次看到哪（秒）。
+        let progress_for_click = entry.progress_secs;
         card_el.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             if this.playing.is_some() || this.close_player_requested {
                 return;
             }
             eprintln!("[history] 打开：{title_for_click}（{bvid_for_click}）");
-            this.open_history_video(bvid_for_click.clone(), title_for_click.clone(), cx);
+            this.open_history_video(
+                bvid_for_click.clone(),
+                title_for_click.clone(),
+                progress_for_click,
+                cx,
+            );
             window.refresh();
             cx.notify();
         }))
@@ -1616,7 +1623,12 @@ fn rail(
                         .max_by_key(|e| e.view_at)
                         .cloned()
                     {
-                        this.open_history_video(entry.bvid, entry.title, cx);
+                        this.open_history_video(
+                            entry.bvid,
+                            entry.title,
+                            entry.progress_secs,
+                            cx,
+                        );
                         window.refresh();
                         cx.notify();
                     }
@@ -2215,10 +2227,14 @@ impl AppRoot {
     }
 
     /// 历史卡点击 → 与首页 / 动态共用同一个播放器实例。
+    ///
+    /// `progress_secs` = 这条历史记录的已观看秒数，直接作为起播位置
+    /// （续播）；没有有效进度时传 0，从头播。
     pub(crate) fn open_history_video(
         &mut self,
         bvid: String,
         title: String,
+        progress_secs: u64,
         cx: &mut Context<Self>,
     ) {
         if bvid.trim().is_empty() {
@@ -2226,8 +2242,14 @@ impl AppRoot {
         }
         eprintln!("[history] 进入播放浮窗：{title}（{bvid}）");
         self.ensure_player(cx);
+        // 已看完的条目从头播：续播位置由播放器的统一规则再判一次。
+        let seed = if progress_secs > 0 {
+            Some(progress_secs as f64)
+        } else {
+            None
+        };
         if let Some(player) = self.playing.clone() {
-            let _ = player.update(cx, |view, cx| view.open_bvid(bvid, cx));
+            let _ = player.update(cx, |view, cx| view.open_bvid_at(bvid, seed, cx));
         }
         cx.notify();
     }

@@ -116,6 +116,21 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// 发布时间 → 信息面板里的绝对时间：`2026-10-15 22:46:02`。
+///
+/// 用本地时区（与 B 站网页一致）；`ts == 0` 返回空串，视图不渲染。
+pub fn date_time(ts: u64) -> String {
+    if ts == 0 {
+        return String::new();
+    }
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(ts as i64, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
 /// 解码 B 站标题里的 HTML 实体。
 ///
 /// 对应旧实现里的 `System.Net.WebUtility.HtmlDecode(v.Title)`。

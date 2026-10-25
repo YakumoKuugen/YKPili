@@ -259,10 +259,12 @@ mod tests {
             owner: Some(VideoOwner {
                 name: "生肉烹饪师".into(),
                 face: "https://i1.hdslb.com/f.jpg".into(),
+                ..Default::default()
             }),
             stat: Some(VideoStat {
                 view: 124_000,
                 danmaku: 144,
+                ..Default::default()
             }),
         }
     }

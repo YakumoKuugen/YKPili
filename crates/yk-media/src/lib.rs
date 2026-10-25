@@ -110,6 +110,15 @@ unsafe impl Send for MpvPlayer {}
 impl MpvPlayer {
     /// 创建一个离屏播放器（无窗口、无音频输出），尺寸用于 SW 渲染目标。
     pub fn new(width: u32, height: u32) -> Result<Self, MpvError> {
+        Self::new_with_start(width, height, 0.0)
+    }
+
+    /// 同 [`MpvPlayer::new`]，但从 `start_secs` 开始播放（续播用）。
+    ///
+    /// 走 mpv 的 `start` 选项：**必须在 `mpv_initialize` 之前设置**，
+    /// mpv 会在打开文件时直接定位到该位置 —— 不会先播开头再跳。
+    /// `start_secs <= 0` 表示从头播。
+    pub fn new_with_start(width: u32, height: u32, start_secs: f64) -> Result<Self, MpvError> {
         let lib = Self::load_lib()?;
 
         // 把这个块单独隔离：`Symbol` 借用 `lib`，块结束即释放，
@@ -194,6 +203,14 @@ impl MpvPlayer {
                 let ck = CString::new(k).unwrap();
                 let cv = CString::new(v).unwrap();
                 set_opt(ctx, ck.as_ptr(), cv.as_ptr());
+            }
+
+            // 续播：起播位置用 mpv 的 `start` 选项（必须在 initialize 之前设置）。
+            // 选项生效后 mpv 打开文件就直接定位过去，不经过「先播开头再跳」。
+            if start_secs.is_finite() && start_secs > 0.0 {
+                let key = CString::new("start").unwrap();
+                let value = CString::new(format!("{start_secs:.3}")).unwrap();
+                set_opt(ctx, key.as_ptr(), value.as_ptr());
             }
 
             let rc = init(ctx);
@@ -346,6 +363,40 @@ impl MpvPlayer {
             }
         }
         Ok(())
+    }
+
+    /// 跳到指定位置（秒，绝对定位）。
+    ///
+    /// 主要给「起播位置没生效时补一刀」用；进度条拖动接上之后也会走这里。
+    pub fn seek(&mut self, position_secs: f64) -> Result<(), MpvError> {
+        if !position_secs.is_finite() || position_secs < 0.0 {
+            return Err(MpvError::Command(-1));
+        }
+        unsafe {
+            let cmd: unsafe extern "C" fn(*mut MpvHandle, *const *const c_char) -> c_int = *self
+                ._lib
+                .get(b"mpv_command")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
+            let c_cmd = CString::new("seek").unwrap();
+            let c_pos = CString::new(format!("{position_secs:.3}")).unwrap();
+            let c_mode = CString::new("absolute").unwrap();
+            let args = [
+                c_cmd.as_ptr(),
+                c_pos.as_ptr(),
+                c_mode.as_ptr(),
+                ptr::null(),
+            ];
+            let rc = cmd(self.ctx, args.as_ptr());
+            if rc < 0 {
+                return Err(MpvError::Command(rc));
+            }
+        }
+        Ok(())
+    }
+
+    /// 当前播放位置（秒）；读不到时返回 0。
+    pub fn position_secs(&self) -> f64 {
+        self.get_property_double("time-pos").unwrap_or(0.0)
     }
 
     /// 渲染当前帧到内部缓冲区。

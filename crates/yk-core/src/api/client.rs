@@ -11,6 +11,7 @@ use crate::api::bilibili::{self, HttpClient, Request};
 use crate::api::models::{
     DynamicFeedResponse, HistoryResponse, PlayUrlData, RecommendResponse, RecommendVideoItem,
     ReplyResponse, UserInfoResponse, VideoInfoData, VideoInfoResponse, VideoPlayUrlResponse,
+    VideoTagsResponse,
 };
 use crate::api::wbi;
 use crate::dynamic::{CommentTarget, DynamicComment, DynamicItem, DynamicPage};
@@ -202,6 +203,30 @@ where
     parsed.data.ok_or_else(|| "视频详情缺少 data".to_string())
 }
 
+/// 拉视频标签。标签接口是纯读、不需要 WBI；失败时由调用方退回分区名。
+pub fn fetch_video_tags<C>(client: &C, bvid: &str, cookie: &str) -> Result<Vec<String>, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if bvid.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let body = client.get(&bilibili::video_tags(bvid, cookie))?;
+    let parsed: VideoTagsResponse =
+        serde_json::from_str(&body).map_err(|e| format!("标签解析失败：{e}"))?;
+    if parsed.code != 0 {
+        return Err(format!("标签接口返回 code={}", parsed.code));
+    }
+    Ok(parsed
+        .data
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tag| tag.tag_name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .take(3)
+        .collect())
+}
+
 fn fetch_play_url_with_keys<C>(
     client: &C,
     bvid: &str,
@@ -252,6 +277,13 @@ where
     // 详情里 cid 有时是 0（分 P），播放地址用的是 pages 里的 cid；
     // 心跳上报必须用真正播放的那一 P。
     source.cid = cid;
+    // cid 被纠正后，面板「选集」的当前 P 也要跟着重算。
+    source.current_page = info
+        .pages
+        .iter()
+        .find(|page| page.cid == cid)
+        .map(|page| page.page)
+        .unwrap_or(source.current_page);
     if source.bvid.trim().is_empty() {
         source.bvid = bvid.to_string();
     }
@@ -301,6 +333,29 @@ where
         .map(HistoryEntry::from_raw)
         .collect::<Vec<_>>();
     Ok((items, next))
+}
+
+/// 在观看历史里找某个视频的「已观看秒数」（续播用）。
+///
+/// 取**最近一次**观看的那条（同 bvid 可能有多条历史）。
+/// 已看完 / 刚开始看的条目返回 `None` —— 前者从头播，后者不值得续。
+pub fn find_history_progress(entries: &[HistoryEntry], bvid: &str) -> Option<u64> {
+    let bvid = bvid.trim();
+    if bvid.is_empty() {
+        return None;
+    }
+    let entry = entries
+        .iter()
+        .filter(|e| e.bvid.trim() == bvid)
+        .max_by_key(|e| e.view_at)?;
+    if entry.is_finished() {
+        return None;
+    }
+    let progress = entry.progress_secs;
+    if progress < crate::resume::RESUME_MIN_SECS as u64 {
+        return None;
+    }
+    Some(progress)
 }
 
 /// 拉一页关注动态。

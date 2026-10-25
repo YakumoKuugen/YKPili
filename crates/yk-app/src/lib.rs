@@ -2981,10 +2981,12 @@ fn mock_recommend(n: usize) -> Vec<RecommendVideoItem> {
             owner: Some(VideoOwner {
                 name: UPS[i % UPS.len()].to_string(),
                 face: String::new(),
+                ..Default::default()
             }),
             stat: Some(VideoStat {
                 view: VIEWS[i % 6],
                 danmaku: DANMAKU[i % 6],
+                ..Default::default()
             }),
         })
         .collect()

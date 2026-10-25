@@ -21,6 +21,7 @@ pub mod login;
 pub mod models;
 pub mod playback;
 pub mod player;
+pub mod resume;
 pub mod session;
 
 pub use cache::CacheManager;
@@ -36,4 +37,5 @@ pub use login::{LoginFlow, PollAction, POLL_INTERVAL_MS};
 pub use models::{CoverItem, LoginState, UserSession};
 pub use playback::PlaybackSource;
 pub use player::{PlayerPrefs, PlayerState, RATE_OPTIONS};
+pub use resume::{ResumeRecord, ResumeStore};
 pub use session::{AppShell, Screen};
