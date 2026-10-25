@@ -1012,7 +1012,7 @@ impl AppRoot {
         .detach();
     }
 
-    /// 当前页面回到顶部后按页面类型刷新。
+    /// 当前页面回到顶部后按页面类型刷新（手势入口，带冷却防抖）。
     fn refresh_current_page(&mut self, cx: &mut Context<Self>) {
         // 一次回弹可能同时满足「回到顶部」和「下拉过阈值」，加一道冷却。
         if let Some(last) = self.last_refresh_at {
@@ -1021,11 +1021,58 @@ impl AppRoot {
             }
         }
         self.last_refresh_at = Some(std::time::Instant::now());
+        self.refresh_page_now(cx);
+    }
+
+    /// 按当前页面类型发起刷新：推荐流重拉第 0 页，关注流重拉第一页。
+    ///
+    /// 回顶手势与手动入口共用这一层；1.2s 冷却只加在手势入口上 —— 用户明确
+    /// 点了按钮，就该真的重新发一次请求，而不是被防抖吞掉。
+    ///
+    /// 返回是否发起了刷新：其它页面（热门 / 分区 / 排行 / 我的…）没有可重拉的数据，
+    /// 返回 `false`，调用方据此决定要不要把滚动位置拉回顶部。
+    fn refresh_page_now(&mut self, cx: &mut Context<Self>) -> bool {
         match self.page {
-            None => self.refresh_feed(cx),
-            Some(pages::PageKind::Following) => self.load_following_page(false, true, cx),
-            _ => {}
+            None => {
+                self.refresh_feed(cx);
+                true
+            }
+            Some(pages::PageKind::Following) => {
+                // 未登录没有关注流；登录卡片由入口负责带出，这里不重复弹。
+                if self.session.is_none() {
+                    return false;
+                }
+                self.load_following_page(false, true, cx);
+                true
+            }
+            _ => false,
         }
+    }
+
+    /// 手动刷新入口（Dock 的「刷新」按钮 / 再点一次当前一级入口）。
+    ///
+    /// 先清掉刷新手势的中间状态：刷新后会把内容区拉回顶部，而滚动看门狗
+    /// 如果还留着 `top_refresh_armed`，会把这次程序化回顶再判成一次「下拉刷新」。
+    /// 返回是否发起了刷新。
+    fn refresh_page_manually(&mut self, cx: &mut Context<Self>) -> bool {
+        eprintln!(
+            "[refresh] 手动刷新当前页：page={:?} signed_in={}",
+            self.page,
+            self.session.is_some()
+        );
+        self.top_refresh_armed = false;
+        self.pull_refresh_triggered = false;
+        let started = self.refresh_page_now(cx);
+        if started {
+            self.scroll_content_to_top();
+        }
+        started
+    }
+
+    /// 切页 / 刷新后把内容区拉回顶部。
+    fn scroll_content_to_top(&self) {
+        self.content_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.content_scroll.base_handle().scroll_to_top_of_item(0);
     }
 
     /// 滚到底部时按当前页面追加数据。
@@ -2607,18 +2654,25 @@ const DOCK_ENTRIES: [DockEntry; 3] = [
 ///
 /// 顶栏原来的四个图标移进来时只有图标，和左侧三个导航项不一致；
 /// 这里统一成「16 图标 + 12 文字」，消息保留未读红点。
+/// `enabled = false` 用来表示「当前页面没有这个动作可做的事」（如非首页点刷新）：
+/// 置灰、不给 hover 和手型，而不是点了没反应。
 fn dock_action(
     t: &YkTheme,
     icon: IconName,
     label: &'static str,
     unread: bool,
-) -> impl IntoElement {
+    enabled: bool,
+) -> Div {
     let s = &t.surfaces;
     let p = &t.palette;
     let hover_bg = s.fill_1;
     let hover_fg = s.text_primary;
-    let fg = s.text_secondary;
-    div()
+    let fg = if enabled {
+        s.text_secondary
+    } else {
+        s.text_quaternary
+    };
+    let mut action = div()
         .h(px(DOCK_ITEM_HEIGHT))
         .px(px(SPACE_3))
         .flex()
@@ -2628,8 +2682,6 @@ fn dock_action(
         .text_size(px(FONT_SIZE_CAPTION))
         .font_weight(FontWeight::MEDIUM)
         .text_color(fg)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover_bg).text_color(hover_fg))
         .child(
             div()
                 .relative()
@@ -2649,7 +2701,13 @@ fn dock_action(
                     )
                 }),
         )
-        .child(label)
+        .child(label);
+    if enabled {
+        action = action
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover_bg).text_color(hover_fg));
+    }
+    action
 }
 
 fn dock(
@@ -2712,6 +2770,19 @@ fn dock(
                 .child(Icon::new(entry.icon).size(px(16.)).text_color(fg))
                 .child(entry.label)
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    // 再点一次当前入口 = 刷新当前页（B 站习惯：点当前 tab 重拉数据）。
+                    if this.page == target {
+                        if target == Some(pages::PageKind::Following) && !signed_in {
+                            // 未登录：带出登录卡片，而不是刷新一个空页。
+                            this.ensure_login(cx);
+                        } else {
+                            this.refresh_page_manually(cx);
+                        }
+                        window.refresh();
+                        cx.notify();
+                        return;
+                    }
+
                     // 未登录点「正在关注」：直接把登录卡片带到前面，
                     // 而不是给一个只能干瞪眼的空页。
                     if target == Some(pages::PageKind::Following) {
@@ -2725,8 +2796,7 @@ fn dock(
                     this.top_refresh_armed = false;
                     this.pull_refresh_triggered = false;
                     // 切页回到顶部：滚动位置属于「上一页」，不该带到新页面。
-                    this.content_scroll.scroll_to_item(0, ScrollStrategy::Top);
-                    this.content_scroll.base_handle().scroll_to_top_of_item(0);
+                    this.scroll_content_to_top();
                     window.refresh();
                     cx.notify();
                 })),
@@ -2734,6 +2804,9 @@ fn dock(
     }
 
     // 顶栏原来的四个快捷动作挪进 Dock：导航与动作之间用 1px 分隔线。
+    // 刷新只在有数据的页面上可用：「个性推荐」与登录后的「正在关注」；
+    // 其余页面没有可重拉的数据，按钮置灰，不假装刷新。
+    let can_refresh = page.is_none() || (page == Some(pages::PageKind::Following) && signed_in);
     row = row
         .child(
             div()
@@ -2743,10 +2816,20 @@ fn dock(
                 .bg(s.border_subtle),
         )
         // 顺序：历史 / 收藏 / 消息 / 刷新；与导航项一样带文字
-        .child(dock_action(t, IconName::Clock, "历史", false))
-        .child(dock_action(t, IconName::Bookmark, "收藏", false))
-        .child(dock_action(t, IconName::Bell, "消息", true))
-        .child(dock_action(t, IconName::RefreshCw, "刷新", false));
+        .child(dock_action(t, IconName::Clock, "历史", false, true))
+        .child(dock_action(t, IconName::Bookmark, "收藏", false, true))
+        .child(dock_action(t, IconName::Bell, "消息", true, true))
+        .child(
+            dock_action(t, IconName::RefreshCw, "刷新", false, can_refresh)
+                .id("dock-refresh")
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    // 刷新是从第一页重拉，滚动位置留在旧内容中间没有意义。
+                    if this.refresh_page_manually(cx) {
+                        window.refresh();
+                        cx.notify();
+                    }
+                })),
+        );
 
     div()
         .absolute()
