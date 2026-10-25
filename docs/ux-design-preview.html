@@ -2329,9 +2329,9 @@ ul.clean li::marker { color: var(--theme-primary); }
       <div class="sec-head">
         <h2><span class="sec-num">04</span>封面卡片解剖</h2>
         <p>卡片是首页唯一的重复单元，也是当前实现与参考界面差距最大的组件。
-          现状只有<b>封面 + 两行标题</b>；目标态需要补齐信息层，同时保持 208×166 的单元格几何不变
-          —— <code>v_virtual_list</code> 的 item 尺寸（<code>item_sizes: Rc&lt;Vec&lt;Size&lt;Pixels&gt;&gt;&gt;</code>，
-          每行一项、只取行高）直接由它推出，改动会连带影响总行数与可视行范围。</p>
+          2026-10-25 已补齐信息层（数据层 / 悬停操作 / 署名行），单元格改为 208×184。
+          <code>v_virtual_list</code> 的 item 尺寸（<code>item_sizes: Rc&lt;Vec&lt;Size&lt;Pixels&gt;&gt;&gt;</code>，
+          每行一项、只取行高）直接由卡片几何推出，改动会连带影响总行数与可视行范围。</p>
       </div>
 
       <div class="grid-2">
@@ -2349,8 +2349,10 @@ ul.clean li::marker { color: var(--theme-primary); }
             </tbody>
           </table>
           <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
-            <div><b>数据层必须带文字阴影</b>（<code>0 1px 3px rgba(0,0,0,.8)</code>）。
-              封面图明暗不可控，纯白数字压在浅色封面上会直接消失——参考界面同样这么处理。</div></div>
+            <div><b>数据层必须保证可读</b>（设计口径 <code>0 1px 3px rgba(0,0,0,.8)</code>）。
+              封面图明暗不可控，纯白数字压在浅色封面上会直接消失。
+              <b>GPUI 没有 text-shadow</b>：实现改用封面下沿 40px 的「透明 → 黑 70%」渐变兜底，
+              数据层与时长都压在这条渐变上。</div></div>
         </div>
 
         <div class="panel">
@@ -2359,23 +2361,27 @@ ul.clean li::marker { color: var(--theme-primary); }
             <dt>ItemWidth</dt><dd class="mono">192（封面宽）· <code>COVER_ITEM_WIDTH</code></dd>
             <dt>ItemHeight</dt><dd class="mono">108（封面高，16:9）· <code>COVER_ITEM_HEIGHT</code></dd>
             <dt>CellWidth</dt><dd class="mono">208 = 192 + 16 边距 · <code>COVER_CELL_WIDTH</code></dd>
-            <dt>CellHeight</dt><dd class="mono">现状 166 = 108 + 6 + 36 + 16<br>
-              <b>目标 184</b> = 108 + 6 + 36 + <b>18 署名行</b> + 16<br>
+            <dt>CellHeight</dt><dd class="mono"><b>184</b> = 8 上 + 108 封面 + 4 间距 + 36 两行标题
+              + 2 行距 + 18 署名行 + 8 下<br>
               <code>COVER_CELL_HEIGHT</code>（<code>crates/yk-ui/src/theme/dimensions.rs</code>）</dd>
             <dt>列数推导</dt><dd>floor(视口宽 / 208) → 1920 得 9 列、2560 得 12、3840 得 18；<br>
               在 <code>impl Render</code> 里按当前视口宽现算，再按列数把数据切成行交给 <code>v_virtual_list</code></dd>
             <dt>行虚拟化</dt><dd><code>v_virtual_list</code> 只构建可见行，库自身多画 1 行 overdraw；
               <b>不需要</b>再手写「(可见行 + 2) × 列数」的容器池</dd>
           </dl>
-          <div class="callout warn" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
-            <div><b>已裁决：署名行需要 18px 预算，<code>COVER_CELL_HEIGHT</code> 目标值定为 184。</b>
-              现状 166 已被「108 封面 + 6 间距 + 36 两行标题 + 16 内边距」占满，
-              塞不进「UP 主头像 + 昵称 + 时间」这一行。
-              实施时有两处<b>必须同步改</b>：<code>crates/yk-ui/src/theme/dimensions.rs</code> 的
-              <code>COVER_CELL_HEIGHT</code> 与 <code>crates/yk-app/src/views/home.rs</code> 的卡片高度常量
-              ——两处都写着「保持同一来源」，改一半就是返工。
-              行高变了以后，列数必须在渲染路径里按当前视口宽现算：GPUI 侧没有可被外部抢先赋值的
-              <code>ColumnsPerRow</code> 缓存字段，缓存列数只会和实际宽度脱节、让行数据错位。</div></div>
+          <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+            <div><b>已落地（2026-10-25）：<code>COVER_CELL_HEIGHT</code> = 184。</b>
+              首页行高 = 184 + 16；卡片布局在 <code>crates/yk-app/src/lib.rs</code> 的 <code>card()</code> 里。
+              直播角标按推荐条目的 <code>goto == "live"</code> 显示。
+              列数仍在渲染路径里按当前视口宽现算：GPUI 侧没有可被外部抢先赋值的
+              <code>ColumnsPerRow</code> 缓存字段，缓存列数只会和实际宽度脱节、让行数据错位。
+              <br><b>封面兜底</b>：主题令牌只有单色，135° 双色渐变由占位色派生暗/亮两档自绘；
+              封面加载中 / 失败时显示「渐变 + 大标题」的卡面，加载完成后封面图盖在渐变上。
+              <br><b>封面取图</b>：B 站图床统一取 <code>@384w_216h_1c.webp</code> 缩略图
+              （对齐 <code>CoverDecodeWidth 384</code>）；<code>img()</code> 必须显式
+              <code>w_full() + h_full() + ObjectFit::Cover</code>，否则会按原图尺寸只露左上角。
+              <br><b>文本宽度</b>：标题/署名容器固定 192，卡片 hover 放大时只动视觉层，
+              不改变文本框宽度，避免标题来回重排。</div></div>
         </div>
       </div>
 
@@ -2390,16 +2396,20 @@ ul.clean li::marker { color: var(--theme-primary); }
           （契约 §1.7 / §2.3）—— Avalonia 时代「按当时 token 创建、切主题需重建控件」的结论<b>作废</b>。</p>
       </div>
       <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
-        <div><b>E-19 已核实：</b>1.03 / 1.04 用负 <code>inset</code> 近似，不是等比矩阵；
-          外层裁剪，进入/离开 150ms（F.3 L-10）。</div></div>
+        <div><b>E-19 已落地：</b>卡片 1.03 用内容层负 <code>inset</code>（150ms / EaseStandard）；
+          <b>封面 1.04 单独一层</b>，对 art 层做宽高 + 居中偏移插值（300ms / EaseStandard），
+          数据层/操作/进度条不跟着放大；操作按钮 150ms 浮出（opacity + 4px 位移）。
+          三条动画共用进入/离开状态，<code>reduce_motion</code> 时自动停在终态。
+          <br><b>热区固定</b>：hover / 点击挂在 208×184 的外框热区层上，动画内容不参与命中；
+          鼠标停在卡片边界时不会因为内容放大而反复触发进入/离开。</div></div>
     </section>
 
     <!-- ==================== 05 状态 ==================== -->
     <section id="states">
       <div class="sec-head">
         <h2><span class="sec-num">05</span>状态设计</h2>
-        <p>design_review 把「加载态 / 空态 / 错误态」列入交付前必查项。当前项目只有 happy path，
-          以下四态需要逐页补齐。</p>
+        <p>design_review 把「加载态 / 空态 / 错误态」列入交付前必查项。
+          首页首屏骨架已落地（见下）；其余页面的空 / 错误 / 离线态仍需逐页补齐。</p>
       </div>
       <div class="grid-2">
         <div class="panel">
@@ -2413,10 +2423,13 @@ ul.clean li::marker { color: var(--theme-primary); }
             高度直接取 <code>COVER_CELL_HEIGHT</code>），否则加载完成瞬间网格会跳。
             颜色走令牌 <code>SkeletonBrush</code>（映射到 gpui-component 的 <code>skeleton</code> 字段，契约 §3），
             脉冲 1.5s。
-            <br><b>实现侧（GPUI）</b>：几何骨架用 <code>gpui_component::skeleton</code>（契约 §1.6）；
-            但 <code>Skeleton</code> 把脉冲写死成 2s bounce、未暴露时长参数，
-            要保住 1.5s 就得用同样的 <code>div()</code> + <code>with_animation</code> 自绘
-            —— <b>已裁决：自绘 1.5s</b>（E-16 已核实）。
+            <br><b>实现侧（GPUI）</b>：自绘，不用组件库的 <code>Skeleton</code>
+            （其脉冲写死 2s bounce、未暴露时长参数），以保住 1.5s（E-16 已核实）。
+            骨架卡与真实卡同几何：208×184 / 封面 192×108 / 两行标题 / 18px 署名行。
+            颜色只用 <code>SkeletonBrush</code>，整块网格由**一条** <code>repeat</code> 动画
+            驱动 opacity <code>1 → 0.45 → 1</code>（1.5s），不在每张卡上各排一条。
+            <br><b>出现时机</b>：只在「没有缓存 + 在线启动」时显示；有缓存先把缓存铺上，
+            不为了骨架多等一次网络。缓存 / 占位数据回来时骨架直接替换，无网格跳动。
             <br>减少动效偏好：GPUI 没有 CSS 媒体查询；已接入系统辅助功能设置
             （E-20 已核实：启动读取 + 每 2s 轮询）。</p>
         </div>
@@ -2489,6 +2502,29 @@ ul.clean li::marker { color: var(--theme-primary); }
             进入元素树（<code>gpui-pre::elements::surface</code>，<code>spike-gpui-kit</code> 已验证），
             与 UI 控件在<b>同一条 GPUI 渲染管线</b>里合成，因此控件可以压在画面上、也可以做位移与透明过渡。
             旧的「控制栏必须让出独立高度」「面板只能走宽度变化」两条约束整体失效，已从本节移除。</div>
+        </div>
+        <div class="callout info" style="margin-top:12px"><svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+          <div><b>卡片点击播放已落地（2026-10-25）</b>：<code>bvid</code> →
+            <code>/x/web-interface/wbi/view</code>（cid / 标题 / 时长）→
+            <code>/x/player/wbi/playurl</code> → 最高 DASH 视频 + 最高音轨。
+            DASH 音视频是两条 m4s：先 <code>loadfile</code> 视频，再
+            <code>audio-add &lt;audio&gt;</code>（<code>audio-file</code> 不是 loadfile
+            的 per-file 选项，会报整数解析错误）。CDN 优先
+            <code>backupUrl</code> 里的 <code>upos-sz-mirror*</code>：<code>*.mcdn.bilivideo.cn</code>
+            实测可能只返回部分文件，表现为 <code>Stream ends prematurely at 0</code>。
+            mpv 统一带浏览器 UA 与 B 站 Referer。
+            登录 Cookie 从 <code>session.json</code> 读取（登录可到 1080P，未登录 480P）。
+            取流期间显示「正在获取播放地址…」，失败显示具体错误。
+            控制栏播放/暂停已通过渲染线程命令接 mpv（倍速/音量/拖动仍未接）。
+            验收可用 <code>YK_BVID=BV...</code> 直接走同一条链路。
+            <br><b>浮窗形态（2026-10-25）</b>：不再是全屏遮罩，而是顶栏下方 16px、
+            高 600 的圆角浮窗（<code>shadow_glass_modal</code>），播放时收起分类条，
+            默认信息面板收起 200；
+            点击浮窗外侧（顶栏下方）关闭，顶栏保持可用。Esc 第一次在顶栏右上角、
+            浮窗/视频之外显示「再次按 Esc 关闭」提示，5 秒自动收回；期间第二次
+            Esc 才关闭。收回后下次 Esc 重新从第一次算起；浮窗根 <code>track_focus</code>。
+            <br><b>首帧时序</b>：取帧循环在 worker 创建后的同一帧启动，不能等下一次 render；
+            否则窗口未激活/被遮挡时会只有声音，点一下播放器才出画。</div>
         </div>
       </div>
 
@@ -2895,11 +2931,14 @@ ul.clean li::marker { color: var(--theme-primary); }
           <thead><tr><th>交互</th><th>反馈</th><th>时长 / 曲线</th><th>GPUI 表达</th><th>注意</th></tr></thead>
           <tbody>
             <tr><td>卡片悬停</td><td>缩放 1.03 + 阴影抬升 + 操作按钮浮出 + 封面缓推 1.04</td>
-              <td class="mono">150ms / EaseStandard</td>
-              <td><code>on_hover</code> 切目标值 → <code>Animation::new(Duration::from_millis(150))</code>
-                + <code>.with_animation(id, anim, |el, t| …)</code> 插值内层 <code>inset</code>；
-                阴影抬升换成 <code>.shadow(vec![BoxShadow, …])</code></td>
-              <td>缩放不参与布局，不影响 Canvas 定位；GPUI 无元素级 transform，见下方说明 ⑤</td></tr>
+              <td class="mono">卡片 150ms / 封面 300ms / 操作 150ms，EaseStandard</td>
+              <td>三条独立 <code>with_animation</code>：
+                卡片内容层负 <code>inset</code>（1.03）；
+                封面 art 层宽高 + 居中偏移（1.04，300ms）；
+                操作层 <code>opacity</code> 0→1 + <code>top</code> 2→6。
+                阴影/描边/底色随 <code>hovered</code> 状态切；
+                hover/点击命中固定在 208×184 外框热区层，不跟随动画内容</td>
+              <td>封面放大不带动数据层/按钮；缩放不参与布局；热区不随动画变化，见下方说明 ⑤</td></tr>
             <tr><td>卡片按压</td><td>缩回 1.0，不改变布局边界</td>
               <td class="mono">150ms / EaseEmphasized</td>
               <td><code>on_mouse_down</code> / <code>on_mouse_up</code> 把目标值从 1.03 切回 1.0，
@@ -2921,12 +2960,25 @@ ul.clean li::marker { color: var(--theme-primary); }
               <td><code>EffectTransition::new(300ms).ease(…).fade(0., 1.).apply(el, id)</code>；
                 哪些行存在由 <code>v_virtual_list</code> 的 <code>visible_range</code> 决定</td>
               <td>跨行才重建——<code>v_virtual_list</code> 只渲染可见范围，不必自己比较行号（原「按行节流」逻辑删除）</td></tr>
-            <tr><td>浮窗入场</td><td>从下方滑入到顶栏下方</td>
-              <td class="mono">300ms / EaseEmphasized</td>
-              <td><code>EffectTransition::new(300ms).ease(…).slide_y(px(入场偏移量), px(0.)).fade(0., 1.)</code>；
-                位移量取设计稿给出的入场距离</td>
-              <td>原「叠层后可走 <code>translate</code>」改口径：GPUI 用 <code>top</code> 插值（<code>slide_y</code>），
-                没有 CSS transform；视频区尺寸不参与动画</td></tr>
+            <tr><td>浮窗入场</td><td>从卡片实际封面 bounds 展开到浮窗目标框</td>
+              <td class="mono">280ms / EaseEntrance</td>
+              <td>卡片内容层 <code>on_children_prepainted</code> 捕获封面 bounds（含 hover 缩放），
+                根 <code>canvas</code> 记录页面原点；点击时冻结快照并换算到页面坐标。
+                单段曲线 <code>cubic-bezier(0.22,0.61,0.36,1.08)</code>：起手与
+                <code>EaseStandard</code> 一致，尾部约 0.9% 过冲后回到 100%，
+                不会在两段缓动交界处出现速度断点。动画走稳定 id 的 raw 进度，
+                过渡期只画封面海报，<code>progress == 1</code> 才挂播放器内容</td>
+              <td>GPUI 没有 CSS transform，直接插值 <code>left/top/width/height</code>；
+                不用 <code>slide_y</code>，因为起点是用户点击的那张封面而不是屏幕底边。
+                deferred 面板按钮在过渡期不挂树，避免越出小窗口；视频区尺寸到终点才生效</td></tr>
+            <tr><td>浮窗退场</td><td>从当前浮窗目标框缩回同一张封面</td>
+              <td class="mono">260ms / EaseEntrance 反向</td>
+              <td>关闭先从 <code>player_closing</code> 恢复分类条/网格，让卡片回到打开前坐标；
+                再用同一曲线把 <code>left/top/width/height</code> 插回封面快照。
+                缩回期只保留当前视频帧（无帧用封面海报），不挂控制栏/面板；
+                260ms + 30ms 收尾宽限后才移除 PlayerView，避免最后一帧被提前裁掉</td>
+              <td>不能先移除播放器再动画：播放器实体消失后视频帧/布局都没了；也不能在分类条仍收起时缩回，
+                否则终点会对到上移后的卡片。缩回动画期间保持遮罩，关闭请求去重</td></tr>
             <tr><td>面板收起</td><td>宽度 400→200，右半内容被裁掉；<b>视频区尺寸完全不变</b></td>
               <td class="mono">200ms / EaseStandard</td>
               <td>宽度由 <code>with_animation</code> 插值 <code>w()</code>；220ms 延迟用
@@ -3066,7 +3118,7 @@ ul.clean li::marker { color: var(--theme-primary); }
         </div>
 
         <div class="panel">
-          <h3>性能（GPUI 落地方式）</h3>
+          <h3 id="e12-image">性能（GPUI 落地方式）</h3>
           <ul class="checklist">
             <li><span class="box done"><svg class="icon" style="width:11px;height:11px"><use href="#i-check"/></svg></span>
               <div><b>虚拟列表</b>：只保留 (可见行+2)×列数 个元素，200 条数据不全量渲染。
@@ -3089,9 +3141,20 @@ ul.clean li::marker { color: var(--theme-primary); }
               <div><b>解码尺寸受限</b>：CoverDecodeWidth <b>384</b>（2× 屏），不按原图解码。
                 <b>保留</b>——解码尺寸是设计约束、不是框架特性，跟底座无关；
                 落地点在解码前把位图缩到 384 宽再交给 GPUI（<code>img()</code> 吃的是位图，不会替你缩）</div></li>
-            <li><span class="box"></span><div>图片内存缓存需设上限，长滚动后应淘汰远端的封面位图。
-              <b>GPUI 侧待核实</b>：GPUI 的 asset cache 没有公开淘汰接口（<code>asset_cache.rs</code>
-              只有内部 <code>CachedLoad</code>），需要在 <code>yk-media</code> 自建 LRU 或自己持有解码后的位图</div></li>
+            <li><span class="box"></span>
+              <div><b>图片内存缓存上限（待实现）</b>：长滚动后淘汰远端封面位图。
+              <b>E-12 已核实</b>：公开的 <code>ImageCache</code> trait 就是淘汰接口——
+              实现 <code>load()</code>，用 <code>ImageCacheItem::new(resource, cx)</code> +
+              <code>use_image(window)</code>；超容量时 <code>cx.drop_image(image, Some(window))</code>。
+              用 <code>img(...).image_cache(&amp;cache)</code> 给封面挂缓存，或用
+              <code>image_cache(entity)</code> 包裹封面网格。容量必须大于同屏封面数
+              （5 列约 25–30 张，建议 64），否则可见图会被淘汰、每帧重载。
+              页面级也可先用 <code>image_cache(retain_all("feed"))</code>，离开页面即释放；
+              但它不设上限，长滚动仍应换 LRU。
+              默认 App 缓存用 <code>ImageSource::remove_asset(cx)</code> 删条目；
+              加载失败的结果也会缓存，重试前先删。官方示例见
+              <a href="https://gpui-kit.com/zh-CN/docs/image/#%E8%A7%A3%E7%A0%81%E5%90%8E%E5%9B%BE%E7%89%87%E7%9A%84%E7%BC%93%E5%AD%98">解码后图片的缓存</a>。
+              <b>不需要在 <code>yk-media</code> 自建 LRU 或自持位图。</b></div></li>
             <li><span class="box"></span><div>搜索输入防抖 250ms，避免瀑布式请求。
               <b>GPUI 写法</b>：<code>cx.spawn</code> + <code>cx.background_executor().timer(Duration::from_millis(250))</code>，
               新输入先替换掉旧 <code>Task</code>（<code>Task</code> 一 drop 就取消）</div></li>
@@ -4880,7 +4943,8 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td><span class="tag err">缺失</span> 仅 <code>SwitchBg</code> 令牌存在，无控件消费</td>
           <td><code>switch::Switch</code> / <code>slider::Slider</code> /
             <code>checkbox::Checkbox</code> / <code>radio::{Radio, RadioGroup}</code>
-            → 覆盖 <code>primary</code>（开态 / 选中）/ <code>border</code>（轨道描边）/ <code>ring</code></td></tr>
+            → 覆盖 <code>primary</code>（开态 / 选中）/ <code>switch</code>（关态轨道）/
+            <code>switch_thumb</code>（滑块）/ <code>border</code> / <code>ring</code></td></tr>
         <tr><td>导航</td><td>滚动条</td>
           <td class="mono">宽 6</td>
           <td><span class="tag ok">已有</span> 宽度与胶囊滑块已落地，颜色仍是硬编码</td>
@@ -5095,7 +5159,10 @@ ul.clean li::marker { color: var(--theme-primary); }
           <code>ButtonBackgroundDisabled</code> 在令牌层没有对应值——
           迁移后它们由 disabled 计算派生；若要独立取值，只能作为
           <b>项目扩展字段</b>（<code>YkSurfaces</code>）补，<b>不要</b>去改组件库的
-          <code>ThemeColor</code> 语义。<b>该字段在 <code>gpui-component</code> 里是否有对应项：待核实（E-10）。</b></div></div>
+          <code>ThemeColor</code> 语义。<b>该字段在 <code>gpui-component</code> 里没有独立对应项</b>：
+          disabled 由组件从 variant 色（<code>button_*</code> / <code>muted_foreground</code>）
+          叠加透明度派生，要精确复刻就用 <code>YkSurfaces</code> 或 <code>.opacity()</code>，
+          不新增主题字段。</div></div>
     </div>
   </div>
 
@@ -5328,8 +5395,11 @@ ul.clean li::marker { color: var(--theme-primary); }
           <br><b>触发方式</b>：① 按钮点击（<code>menu::PopupMenu</code>）② 右键（<code>menu::ContextMenu</code>，
           锚点由光标给）③ <code>Shift+F10</code> / <code>菜单键</code>（键盘唤出，右键菜单必须有此路径；
           GPUI 侧的键位绑定方式<b>暂缓（第 10 节，E-7）</b>）。
-          <br><b>贴边翻转</b>：<code>gpui-component</code> 的 popover / menu 走 <code>Placement</code>，
-          翻转是否自动处理<b>未核实（E-8）</b>；若不自动，则由项目侧按可用空间选 <code>Placement</code>。
+          <br><b>实现现状（E-8，已核实 2026-10-25）</b>：<code>tooltip</code> / <code>select</code> /
+          <code>combobox</code> 走 <code>gpui_base::Positioner::side</code>，空间不足会<b>自动翻到对侧</b>；
+          <code>Popover</code> 的 <code>anchor()</code>（corner 路径，按钮下拉菜单也走它）和
+          <code>ContextMenu</code> / 子菜单（gpui <code>anchored()</code> + <code>snap_to_window_with_margin</code>）
+          <b>只贴边夹住、不翻转</b>，菜单必须按 13.3.1 自建定位。
           <br><b>以上是组件级键盘模型；全局键位总表（各键的全局绑定）由第 14 节统一收口</b>，
           本节不另立一份全局键位清单。菜单项尾标的快捷键文案同样由第 14 节分配，
           本节只规定「有快捷键的项在右侧留出尾标槽位」这一组件形态。</div></div>
@@ -5347,6 +5417,75 @@ ul.clean li::marker { color: var(--theme-primary); }
           <code>menu::PopupMenu</code> / <code>ContextMenu</code> 内部的 <code>deferred()</code> 绘制；
           模态打开时由「关闭所有浮层」这条红线强制收起菜单，
           而不是靠「菜单层号低于遮罩」这种几何关系。</div></div>
+    </div>
+
+    <h3 id="e8-flip" style="margin-top:20px">13.3.1 贴边翻转（E-8 结论与落地方案）</h3>
+    <div class="callout info">
+      <svg class="icon icon-sm ti"><use href="#i-check"/></svg>
+      <div><b>核实结论：库只自动处理了一部分。</b>结论来自 <code>gpui-component</code> 0.8.0、
+        <code>gpui-base</code> 0.8.0 与 <code>vendor/gpui-pre</code> 源码（2026-10-25）。
+        <table style="margin-top:8px">
+          <thead><tr><th>组件</th><th>定位路径</th><th>贴边行为</th></tr></thead>
+          <tbody>
+            <tr><td>Tooltip</td><td class="mono">Positioner::side</td>
+              <td><b>自动翻</b>：首选边放不下就换对侧，再夹进视口</td></tr>
+            <tr><td>Select / Combobox / DatePicker</td><td class="mono">Positioner::side</td>
+              <td><b>自动翻</b>：同上，<code>offset</code> 间距在翻转后保留</td></tr>
+            <tr><td>Popover / 按钮下拉菜单</td><td class="mono">Popover → Positioner::corner</td>
+              <td><b>不翻</b>：只 clamp；源码注释为 “Legacy anchoring clamps without flipping”</td></tr>
+            <tr><td>ContextMenu / 子菜单</td><td class="mono">gpui anchored() + snap_to_window_with_margin</td>
+              <td><b>不翻</b>：贴边夹住，会盖住触发元素</td></tr>
+          </tbody>
+        </table>
+        <b>结论</b>：tooltip 与下拉类可直接用；popover / 菜单若要满足本文档
+        「右缘右对齐、下缘向上弹、保持 4px」，必须由项目侧定位。
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:12px">
+      <h3 style="font-size:var(--fs-control)">落地方案：yk-ui 统一实现一次</h3>
+      <p class="note" style="margin:0 0 8px">不要在业务代码里直接用
+        <code>Popover::anchor()</code> 或 <code>ContextMenu</code> 的默认锚点：前者是 corner
+        路径只 clamp；后者的 <code>anchor</code> 字段私有、内部固定
+        <code>snap_to_window_with_margin</code>，配置不出翻转。</p>
+      <p class="note" style="margin:0 0 8px"><b>① 用 <code>Positioner::side</code> 承载浮层</b>。
+        它按实际测量出的浮层尺寸决定翻不翻，不需要提前知道菜单宽高；
+        <code>offset</code> 表示触发元素到浮层的间距，翻到对侧后仍然是 4px。</p>
+<pre style="margin:8px 0;padding:10px 12px;background:var(--fill-1);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;line-height:1.6;color:var(--text-2)">// crates/yk-ui/src/overlay.rs
+use gpui::{deferred, prelude::*, px, Bounds};
+use gpui::base::{Align, Placement, Positioner, POPUP_PRIORITY};
+
+/// 所有菜单/气泡共用的锚定浮层：贴边自动翻转 + 4px 间距 + 8px 视口边距。
+pub fn anchored_surface(
+    trigger_bounds: Bounds&lt;Pixels&gt;,
+    surface: impl IntoElement + 'static,
+) -> impl IntoElement {
+    deferred(
+        Positioner::side(trigger_bounds)
+            .placement(Placement::Bottom) // 首选向下，放不下自动翻上
+            .align(Align::Start)          // 默认与触发元素左对齐
+            .offset(px(4.))               // 4px 间距，翻转后依然生效
+            .margin(px(8.))               // 视口安全边距
+            .occlude()                    // 浮层区域拦截鼠标
+            .child(surface),
+    )
+    .with_priority(POPUP_PRIORITY)
+}</pre>
+      <p class="note" style="margin:8px 0 0"><b>② 触发 bounds 从哪来</b>：按钮触发在
+        <code>on_prepaint</code> 里记录 <code>Bounds&lt;Pixels&gt;</code>；右键菜单用
+        <code>Bounds::new(cursor_position, size(px(0.), px(0.)))</code>，把光标点当成零尺寸触发区。</p>
+      <p class="note" style="margin:8px 0 0"><b>③ 右缘严格右对齐（可选）</b>：
+        <code>Positioner</code> 只翻「边」不翻「对齐」，宽度不够时由 <code>clamp</code>
+        保证不出界，但菜单可能不贴触发元素右缘。要严格右对齐就分两帧：首帧
+        <code>Align::Start</code>，在 <code>on_position</code> 里记下实际宽度，
+        若 <code>trigger.right() + 4 + width &gt; viewport.width - 8</code>，下一帧切
+        <code>Align::End</code>。只要求「不出界」时，<code>clamp</code> 已经够用。</p>
+      <p class="note" style="margin:8px 0 0"><b>④ 子菜单</b>：<code>PopupMenu</code> 内部的二级菜单
+        固定走 <code>snap_to_window_with_margin</code>，不会左右翻；需要严格翻转时按 NOTES
+        第 14 条自建子菜单或 patch 组件。</p>
+      <p class="note" style="margin:8px 0 0"><b>验收</b>：1280×820 窗口，触发点分别贴右下角、
+        左上角；菜单完整可见、与触发元素间距 4px、翻到上方时不盖住触发元素。
+        <code>Positioner</code> 无动画，<code>reduce_motion</code> 不影响。</p>
     </div>
   </div>
 
@@ -5709,7 +5848,9 @@ ul.clean li::marker { color: var(--theme-primary); }
           <code>px_2().py_0p5()</code> 近似；<b>箭头 8×8 组件未内建</b>，需自绘。
           键盘聚焦即时显示可用 <code>show_delay(Duration::ZERO)</code>；
           <code>aria-describedby</code> 没有按 ID 关联的能力，退化为
-          <code>aria_description</code> 文本。</div></div>
+          <code>aria_description</code> 文本。
+          <br><b>E-8 已核实</b>：Tooltip 走 <code>Positioner::side</code>，贴边自动翻到对侧，
+          项目侧无需自建定位（结论与菜单方案见 13.3.1）。</div></div>
     </div>
   </div>
 
@@ -5717,7 +5858,7 @@ ul.clean li::marker { color: var(--theme-primary); }
   <!-- 13.7 开关 / 滑块 / 复选框 / 单选                                      -->
   <!-- ================================================================== -->
   <div class="panel">
-    <h3>13.7 开关 / 滑块 / 复选框 / 单选</h3>
+    <h3 id="e10-switch">13.7 开关 / 滑块 / 复选框 / 单选</h3>
     <p class="note">参考 <b>YouTube 桌面版设置页</b>（左标题右开关的两列布局，
       开关本体约 44×26）与 <b>B 站网页版</b>（复选框为方框 + 主题色勾）。
       取舍：YKPili 采用 <b>左标签右控件</b>的两列设置行，而不是 B 站的「勾选框在文字右侧」——
@@ -5730,8 +5871,8 @@ ul.clean li::marker { color: var(--theme-primary); }
           <thead><tr><th>控件</th><th>几何</th><th>轨道 / 描边</th><th>滑块 / 标记</th><th>焦点环</th></tr></thead>
           <tbody>
             <tr><td>开关</td><td class="mono">44×24</td>
-              <td class="mono">关：switch-bg；开：theme-primary</td>
-              <td class="mono">20 圆钮，surface-solid</td>
+              <td class="mono">关：ThemeColor.switch；开：ThemeColor.primary</td>
+              <td class="mono">20 圆钮，ThemeColor.switch_thumb</td>
               <td class="mono">theme-30 外圈 + theme-60 内圈</td></tr>
             <tr><td>滑块</td><td class="mono">轨道 h 4；thumb ⌀14</td>
               <td class="mono">未播放：fill-3</td>
@@ -5832,8 +5973,15 @@ ul.clean li::marker { color: var(--theme-primary); }
         <br>· 令牌层<b>已经有</b> <code>SwitchBg</code>（亮暗两套各一个浅灰值，
         注释与变量名均写作「控件专用」），但<b>没有任何控件消费它</b>——
         这是一个「先有令牌、后有控件」的孤儿键。<b>迁移后直接废除该孤儿键</b>：
-        关态轨道颜色读 <code>ThemeColor</code> 的对应字段（<b>具体字段名待核实（E-10）</b>），
+        关态轨道读 <code>ThemeColor.switch</code>（项目已映射成 <code>fill_3</code>），
+        滑块读 <code>ThemeColor.switch_thumb</code>（映射成白），
         开态读 <code>ThemeColor.primary</code>。
+        <b>E-10 已核实</b>：<code>Switch</code> 实际读 <code>theme.tokens.switch</code> /
+        <code>tokens.switch_thumb</code>，而 <code>Theme::update</code> 改 <code>colors</code>
+        会经 <code>reconcile</code> 同步到 tokens，所以只改 <code>ThemeColor</code> 即可，
+        <b>不需要 <code>yk.switch_track</code> 扩展字段</b>。API 见
+        <a href="https://gpui-kit.com/zh-CN/component/switch/">Switch 组件文档</a>；
+        该页只列 API 与尺寸，字段名以 0.8.0 源码 <code>switch.rs</code> 为准。
         <br>· 第 04 节规划的<b>观看进度条</b>（卡片第 3 层）与<b>播放器进度条</b>是同一套滑块几何，
         但目前 <code>VideoPlayerView.axaml</code> 的进度条是手写的 <code>Border</code> 叠放
         （第 649–661 行附近），<b>没有使用 <code>Slider</code> 控件</b>，因此不可键盘操作、也没有 ARIA 语义。
@@ -5963,7 +6111,7 @@ ul.clean li::marker { color: var(--theme-primary); }
             <tr><td>翻页箭头</td><td class="mono">i-chevron-left / i-chevron-right</td><td class="mono">既有</td></tr>
             <tr><td>「加载更多」按钮</td><td class="mono">通栏 × 34，1px 虚线 border-strong</td>
               <td class="mono">--control-h / --border-strong</td></tr>
-            <tr><td>加载中占位</td><td class="mono">一行骨架，单元格 208×166</td>
+            <tr><td>加载中占位</td><td class="mono">一行骨架，单元格 208×184</td>
               <td class="mono">--cover-cell-w / --cover-cell-h</td></tr>
             <tr><td>到底提示</td><td class="mono">caption 12 / text-4</td><td class="mono">--fs-caption</td></tr>
           </tbody>
@@ -6000,7 +6148,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           ——两者混用会导致滚动位置错乱（第 08 节已写明的红线）。
           <br>② <b>加载更多不能改变视口高度</b>：追加的内容只影响 <code>Canvas</code> 的总高，
           <code>FirstVisibleRowIndex</code> 不变，因此用户不会「被弹下去」。
-          <br>③ <b>底部骨架必须复刻真实单元格几何</b>（208×166），
+          <br>③ <b>底部骨架必须复刻真实单元格几何</b>（208×184），
           否则加载完成瞬间网格会跳——这与第 05 节骨架屏的要求同源。</div></div>
       <div class="callout err"><svg class="icon icon-sm ti"><use href="#i-alert"/></svg>
         <div><b>与项目现状的差距。</b>
@@ -6319,7 +6467,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       每一行只回答三件事：<b>用哪个 <code>gpui-component</code> 模块</b>、
       <b>覆盖哪些主题字段</b>、<b>哪些部分必须自建</b>。
       模块名全部来自 <code>gpui-component-0.7.3/src/lib.rs</code> 的 <code>pub mod</code>；
-      标「待核实」的只剩附录 E 的 6 条；其余组件结论已归档在下方「组件能力核实结论」。</p>
+      标「待核实」的只剩附录 E 的 3 条；其余组件结论已归档在下方「组件能力核实结论」。</p>
     <table>
       <thead><tr><th>组件</th><th><code>gpui-component</code> 模块</th><th>需覆盖的主题字段</th><th>需自建的部分</th></tr></thead>
       <tbody>
@@ -6339,7 +6487,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td class="mono">menu::{PopupMenu, ContextMenu}<br />（另 <code>native_menu::NativeMenu</code> 可接系统菜单）</td>
           <td><code>popover</code>（面板底，配成 Strong 0.92）/ <code>border</code> / <code>foreground</code></td>
           <td>行高 32 / 最小宽 160 / 图标槽 16+20 / 分隔线上下 4；
-            「禁用项仍可聚焦」的键盘行为</td></tr>
+            「禁用项仍可聚焦」的键盘行为；贴边翻转定位（E-8，见 13.3.1）</td></tr>
         <tr><td>对话框</td>
           <td class="mono">dialog::{Dialog, DialogButtonProps, DialogFooter}<br />+
             <code>WindowExt::{open_dialog, open_alert_dialog}</code></td>
@@ -6360,7 +6508,8 @@ ul.clean li::marker { color: var(--theme-primary); }
             键盘聚焦时立即显示（不等 500ms）</td></tr>
         <tr><td>开关</td>
           <td class="mono">switch::Switch</td>
-          <td><code>primary</code>（开态）；关态轨道色字段名<b>待核实（E-10）</b>；<code>ring</code></td>
+          <td><code>primary</code>（开态）/ <code>switch</code>（关态轨道）/
+            <code>switch_thumb</code>（滑块）；<code>ring</code></td>
           <td>文档仅 small 28×16 / medium 36×20，<b>44×24 未提供</b>（E-5）</td></tr>
         <tr><td>滑块</td>
           <td class="mono">slider::Slider</td>
@@ -6389,7 +6538,7 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td class="mono">skeleton::Skeleton<br />empty::{Empty, EmptyHeader, EmptyMedia,
             EmptyTitle, EmptyDescription, EmptyContent}</td>
           <td><code>skeleton</code> / <code>muted_foreground</code> / <code>foreground</code></td>
-          <td>骨架必须复刻真实单元格几何（208×166）；四类空态文案</td></tr>
+          <td>骨架必须复刻真实单元格几何（208×184）；四类空态文案</td></tr>
         <tr><td>图标</td>
           <td class="mono"><code>svg()</code> + <code>Icon</code><br />（<code>Icon::path</code> /
             <code>Icon::data</code> / <code>icon_named!</code> / <code>gpui_kit_assets::IconName</code>）</td>
@@ -6536,6 +6685,20 @@ ul.clean li::marker { color: var(--theme-primary); }
           <td>avatar 可用 <code>.with_size(px(n))</code> 精确设 18/34/46；tooltip 可用
             <code>.max_w(240)</code>。switch 文档只有 small 28×16 / medium 36×20；
             slider/checkbox/radio/tag/badge 目标几何未提供，按各自退路走。</td></tr>
+        <tr><td class="mono">E-8</td><td>popover / menu / tooltip 贴边翻转</td>
+          <td>tooltip / select / combobox 走 <code>Positioner::side</code>，<b>自动翻</b>到对侧；
+            <code>Popover</code>（corner，含按钮下拉菜单）与 <code>ContextMenu</code> / 子菜单
+            （<code>anchored()</code> + snap）<b>只 clamp 不翻</b>。
+            菜单/气泡统一改用 <code>Positioner::side</code> 承载，方案与验收见
+            <a href="#e8-flip">13.3.1</a>。</td></tr>
+        <tr><td class="mono">E-10</td><td>开关关态轨道色字段</td>
+          <td>关态 <code>ThemeColor.switch</code>、滑块 <code>switch_thumb</code>、开态
+            <code>primary</code>；<code>Switch</code> 读 <code>tokens.switch</code>，
+            改 <code>colors</code> 会同步。项目已映射，见 <a href="#e10-switch">13.7</a>。</td></tr>
+        <tr><td class="mono">E-12</td><td>图片缓存淘汰</td>
+          <td>公开 <code>ImageCache</code> + <code>ImageCacheItem</code> +
+            <code>cx.drop_image</code>；默认缓存用 <code>ImageSource::remove_asset</code>
+            删条目。方案见 <a href="#e12-image">第 10 节性能</a>。</td></tr>
       </tbody>
     </table>
   </div>
@@ -6712,7 +6875,8 @@ ul.clean li::marker { color: var(--theme-primary); }
        —— 原 StatusError70Brush / StatusError80Brush 不再需要：
           <code>ButtonVariant::Danger</code> 的 hover / active 由主题计算。
        —— 原 FillDisabledBrush / TextOnAccentDisabledBrush 若要独立取值，
-          作为第二层扩展字段补；组件内是否已有对应项<b>待核实（E-10）</b>。
+          作为第二层扩展字段补；组件内没有独立对应项，disabled 由
+           <code>button_*</code> / <code>muted_foreground</code> 派生（见 13.1 ⑤）。
        （补充记录：StatusError70/80Brush 由主题计算；FillDisabledBrush 与 TextOnAccentDisabledBrush 若需独立取值，归第二层扩展字段。）
 
 【五、存疑点 / 需要 Lead 拍板】
@@ -6800,7 +6964,9 @@ ul.clean li::marker { color: var(--theme-primary); }
          箭头 8×8 未内建，需自绘。
     [V8] <b>暂缓（第 10 节）</b>：<code>ContextMenu</code> 的键盘唤出路径
          （Shift+F10 / 菜单键）与 <code>native_menu::NativeMenu</code> 的职责待验。
-    [V9] <b>未核实（附录 E · E-8）</b>：popover / menu / tooltip 的贴边翻转是否自动处理。
+    [V9] <b>已核实（部分，E-8）</b>：tooltip / select / combobox 的 <code>Positioner::side</code>
+         自动翻到对侧；<code>Popover</code>（corner，含按钮下拉菜单）与
+         <code>ContextMenu</code> / 子菜单只 clamp、不翻。落地方案见 13.3.1。
     [V10] <b>暂缓（第 10 节）</b>：GPUI 的无障碍桥接细节——<code>accessibility_label</code> /
           <code>aria_label</code> / <code>Role</code> 到 macOS / Windows 无障碍树的映射
           （本节 aria-* 表按语义对齐，具体 API 名以源码为准）。
@@ -10102,9 +10268,11 @@ ul.clean li::marker { color: var(--theme-primary); }
             <b>「浮在内容上的面板必须用 Strong 变体（0.92）」这条铁律成立</b>，理由从「Avalonia 无 BlurEffect」改为这条。</td></tr>
         <tr><td class="mono">5</td><td><b>没有元素级 transform / scale</b><br>
           <code>Style</code> 只有 <code>opacity</code>；<code>Transformation</code> 仅作用于 <code>svg()</code> 与字形/位图</td>
-          <td>卡片悬停 1.03、封面缓推 1.04 <b>不能用样式表达</b>。等效做法：内层 <code>.absolute()</code> + 负 <code>inset</code>
-            （208×3%÷2 = 3.12、184×3%÷2 = 2.76）+ 外层 <code>overflow_hidden()</code>。
-            <b>这是近似，不是等比矩阵</b>，观感需真机验收。</td></tr>
+          <td>卡片悬停 1.03、封面缓推 1.04 <b>不能用样式表达</b>。等效做法：
+            卡片内容层 <code>.absolute()</code> + 负 <code>inset</code>（208×3%÷2 = 3.12）近似 1.03；
+            封面 art 层用 <code>w/h</code> + <code>left/top</code> 居中偏移插值，得到精确的 1.04。
+            两层都必须由外层 <code>overflow_hidden()</code> 裁剪，且不带动数据层与操作按钮。
+            <b>卡片 1.03 仍是近似，不是等比矩阵</b>，观感需真机验收。</td></tr>
         <tr><td class="mono">6</td><td><b><code>EaseEmphasized</code> 的回弹会被裁掉</b><br>
           <code>gpui_base::animation::cubic_bezier</code> 把输出 clamp 到 [0,1]</td>
           <td>项目第二条曲线 <code>cubic-bezier(0.34, 1.3, 0.64, 1)</code> 的 y = 1.3 &gt; 1，<b>回弹会被抹平</b>。
@@ -10367,7 +10535,7 @@ ul.clean li::marker { color: var(--theme-primary); }
       <tr><td class="mono">L-5</td><td>Android 接入</td><td>未开始</td><td>需 <code>gpui-pre-mobile</code>，与 0.8.0 的 <code>gpui-pre</code> 版本需对齐</td></tr>
       <tr><td class="mono">L-7</td><td>构造闭包里做副作用</td><td>线程/文件句柄等会跟着创建次数一起放大；<code>cx.new</code> 只调一次闭包，问题在创建被重复触发，不是重试</td><td>构造保持纯赋值，副作用移到首次 <code>render</code></td></tr>
       <tr><td class="mono">L-9</td><td>离线态 <span class="tag ok">已修</span></td><td>断网时展示上次缓存的推荐流 + 顶部离线条；无缓存时展示占位内容并标注</td><td><code>FeedCache</code>（<code>CacheManager</code> 包）落盘最近 30 条；启动失败自动回退；<code>YK_OFFLINE=1</code> / <code>YK_CACHE_DIR</code> 可验收。<b>重试按钮未接</b></td></tr>
-      <tr><td class="mono">L-10</td><td>卡片 hover <span class="tag ok">已修</span></td><td>悬停有背景、描边、阴影与 ~3px 放大，观感接近 1.03；进入/离开各 150ms</td><td>外层 <code>.hover</code>（<code>surface_content_hover</code> + <code>shadow_card_hover</code> + <code>border_popover</code>）+ 内层负 <code>inset</code> 近似放大；<code>with_animation</code> 按 0→1 / 1→0 插值，只对当前 / 刚离开的卡生效。<code>reduce_motion</code> 时自动退化为静态</td></tr>
+      <tr><td class="mono">L-10</td><td>卡片 hover <span class="tag ok">已修</span></td><td>悬停有背景、描边、阴影与 ~3px 放大，观感接近 1.03；卡片 150ms / 封面 300ms / 操作 150ms</td><td><b>2026-10-25 分层重做</b>：卡片内容层负 <code>inset</code> 近似 1.03（150ms）；封面 art 层宽高 + 居中偏移做精确 1.04（300ms）；操作层 opacity + 4px 位移（150ms）。三层共用 <code>hovered</code> / <code>leaving</code> 状态，<code>reduce_motion</code> 时自动停在终态</td></tr>
       <tr><td class="mono">L-11</td><td>reduce_motion 运行期跟随 <span class="tag ok">已修</span></td><td>系统开关切换后动画不会自动降级</td><td>AppRoot 每 2s 调 <code>gpui::base::apply_system_reduce_motion</code>；值变化时 <code>cx.notify()</code>，<code>AnimationExt</code> 自动渲染静态端值。Linux 由 gpui-base 跟随 portal</td></tr>
       <tr><td class="mono">L-12</td><td>弹幕描边 / 投影 <span class="tag ok">已修</span></td><td>白字在亮画面上发糊</td><td>每条可见弹幕 shape 两次：深色描边（8 方向 1px + 右下 1,2px 投影）再画原色字身；无模糊投影。性能上每条每帧 2 次 shape，量大时可缓存</td></tr>
       <tr><td class="mono">L-13</td><td>离线态重试 <span class="tag ok">已修</span></td><td>断网恢复后只能重启应用</td><td>离线条右侧「重试」：后台重新拉取，成功清离线标记 / 写缓存 / 回顶；失败保留缓存并显示「重试失败」。<code>YK_OFFLINE=1</code> 下也可重试</td></tr>
@@ -10389,29 +10557,11 @@ ul.clean li::marker { color: var(--theme-primary); }
     <p><b>这里只收还没核实的项。</b>已核实的结论已经回到正文对应章节——
       组件能力见 <a href="#components">第 13 节</a>，布局/状态/卡片见第 01 / 04 / 05 节，
       播放器见第 14 节，无障碍见 <a href="#a11y">第 10 节</a>（暂缓），移动端见第 15 节。
-      当前只剩 <b>6 条</b>。</p>
+      当前只剩 <b>3 条</b>。</p>
   </div>
 
   <div class="panel">
-    <h3>E.1 组件与框架</h3>
-    <table>
-      <thead><tr><th>#</th><th>待核实</th><th>未核实前的退路</th></tr></thead>
-      <tbody>
-        <tr><td class="mono">E-8</td><td>popover / menu / tooltip 的贴边翻转是否自动
-          （<code>Placement</code>）</td>
-          <td>按可用空间自己选 <code>Placement</code></td></tr>
-        <tr><td class="mono">E-10</td><td>开关关态的轨道色对应哪个 <code>ThemeColor</code> 字段
-          （字段名未核实）</td>
-          <td>用项目扩展字段 <code>yk.switch_track</code> 补</td></tr>
-        <tr><td class="mono">E-12</td><td>图片内存缓存无公开淘汰接口
-          （<code>asset_cache.rs</code> 只有内部 <code>CachedLoad</code>）</td>
-          <td>在 <code>yk-media</code> 自建 LRU 或自持位图</td></tr>
-      </tbody>
-    </table>
-  </div>
-
-  <div class="panel">
-    <h3>E.2 平台 / 数据</h3>
+    <h3>E.1 平台 / 数据</h3>
     <table>
       <thead><tr><th>#</th><th>待核实</th><th>未核实前的退路</th></tr></thead>
       <tbody>
