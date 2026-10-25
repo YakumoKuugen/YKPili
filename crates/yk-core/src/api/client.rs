@@ -9,11 +9,12 @@
 
 use crate::api::bilibili::{self, HttpClient, Request};
 use crate::api::models::{
-    DynamicFeedResponse, PlayUrlData, RecommendResponse, RecommendVideoItem, ReplyResponse,
-    UserInfoResponse, VideoInfoData, VideoInfoResponse, VideoPlayUrlResponse,
+    DynamicFeedResponse, HistoryResponse, PlayUrlData, RecommendResponse, RecommendVideoItem,
+    ReplyResponse, UserInfoResponse, VideoInfoData, VideoInfoResponse, VideoPlayUrlResponse,
 };
 use crate::api::wbi;
 use crate::dynamic::{CommentTarget, DynamicComment, DynamicItem, DynamicPage};
+use crate::history::{HistoryCursor, HistoryEntry};
 use crate::playback::{select_playback, PlaybackSource};
 
 /// 伪装成桌面浏览器 —— 与旧实现的 UA 策略一致。
@@ -41,6 +42,41 @@ impl ReqwestClient {
 impl Default for ReqwestClient {
     fn default() -> Self {
         Self::new().expect("HTTP 客户端初始化失败")
+    }
+}
+
+impl ReqwestClient {
+    /// 提交表单（写操作统一走这里）。
+    ///
+    /// 只给删除历史这类必须 POST 的接口用；读接口仍走 `HttpClient::get`，
+    /// 这样测试替身不需要实现写能力。
+    pub fn post_form(
+        &self,
+        url: &str,
+        form: &[(&str, String)],
+        cookie: &str,
+    ) -> Result<String, String> {
+        let mut rb = self
+            .inner
+            .post(url)
+            .header("User-Agent", UA)
+            .header("Referer", "https://www.bilibili.com/")
+            .header("Accept", "application/json, text/plain, */*");
+        if !cookie.is_empty() {
+            rb = rb.header("Cookie", cookie);
+        }
+        let resp = rb
+            .form(form)
+            .send()
+            .map_err(|e| format!("写操作请求失败：{e}"))?;
+        let status = resp.status();
+        let body = resp
+            .text()
+            .map_err(|e| format!("写操作读取响应失败：{e}"))?;
+        if !status.is_success() {
+            return Err(format!("写操作返回 HTTP {status}"));
+        }
+        Ok(body)
     }
 }
 
@@ -212,7 +248,59 @@ where
         return Err("视频详情没有 cid，无法取播放地址".into());
     }
     let play = fetch_play_url_with_keys(client, bvid, cid, cookie, &img, &sub)?;
-    select_playback(&info, &play)
+    let mut source = select_playback(&info, &play)?;
+    // 详情里 cid 有时是 0（分 P），播放地址用的是 pages 里的 cid；
+    // 心跳上报必须用真正播放的那一 P。
+    source.cid = cid;
+    if source.bvid.trim().is_empty() {
+        source.bvid = bvid.to_string();
+    }
+    Ok(source)
+}
+
+/// 拉一页观看历史。
+///
+/// `cursor = None` 表示第一页；返回值里的第二个元素是下一页游标
+/// （接口不再给游标 / 列表为空时为 `None`）。未登录直接返回错误，
+/// 避免页面把「空历史」和「未登录」混成同一种状态。
+pub fn fetch_history<C>(
+    client: &C,
+    cookie: &str,
+    cursor: Option<HistoryCursor>,
+    business: &str,
+) -> Result<(Vec<HistoryEntry>, Option<HistoryCursor>), String>
+where
+    C: HttpClient<Error = String>,
+{
+    if cookie.trim().is_empty() {
+        return Err("未登录，无法读取观看历史".into());
+    }
+    let cursor = cursor.unwrap_or_default();
+    let req = bilibili::history_cursor(cursor.max, cursor.view_at, business, cookie);
+    let body = client.get(&req)?;
+    let parsed: HistoryResponse =
+        serde_json::from_str(&body).map_err(|e| format!("历史响应解析失败：{e}"))?;
+    if parsed.code != 0 {
+        return Err(format!(
+            "历史接口返回 code={}（{}）",
+            parsed.code,
+            parsed.message.trim()
+        ));
+    }
+    let data = parsed.data.ok_or_else(|| "历史响应缺少 data".to_string())?;
+    let next = data
+        .cursor
+        .filter(|c| c.max != 0 || c.view_at != 0)
+        .map(|c| HistoryCursor {
+            max: c.max,
+            view_at: c.view_at,
+        });
+    let items = data
+        .list
+        .into_iter()
+        .map(HistoryEntry::from_raw)
+        .collect::<Vec<_>>();
+    Ok((items, next))
 }
 
 /// 拉一页关注动态。
@@ -300,6 +388,98 @@ pub fn sign_for_debug(
     wts: u64,
 ) -> String {
     wbi::signed_url(base, params, img, sub, wts)
+}
+
+/// 一次观看历史上报的数据。
+///
+/// 用 `/x/v2/history/report`：打开 / 关闭各调一次，写进度但不做周期心跳。
+#[derive(Debug, Clone, Default)]
+pub struct HistoryProgress {
+    pub aid: i64,
+    pub cid: i64,
+    /// 观看进度（秒）；0 = 刚打开。
+    pub progress: u64,
+}
+
+/// 上报一次观看历史进度。
+///
+/// 这是 B 站「上报观看进度」的专用接口，`progress` 单位秒；
+/// 打开时传 0、关闭时传当前播放位置即可，不需要周期调用。
+/// 需要 `bili_jct` 作为 CSRF token。
+pub fn report_history(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    history: &HistoryProgress,
+) -> Result<(), String> {
+    if csrf.trim().is_empty() {
+        return Err("登录会话缺少 bili_jct，无法上报观看历史".into());
+    }
+    if history.aid <= 0 || history.cid <= 0 {
+        return Err("缺少 aid / cid，无法上报观看历史".into());
+    }
+    let form = vec![
+        ("aid", history.aid.to_string()),
+        ("cid", history.cid.to_string()),
+        ("progress", history.progress.to_string()),
+        ("csrf", csrf.to_string()),
+    ];
+    let body = client.post_form(
+        &format!("{}/x/v2/history/report", bilibili::API_BASE),
+        &form,
+        cookie,
+    )?;
+    check_write_code(&body, "观看历史上报")?;
+    Ok(())
+}
+
+/// 删除若干条观看历史。
+///
+/// B 站一次只收一个 `kid`，逐条提交；任何一条失败就立刻返回错误，
+/// 调用方保留本地条目，避免出现「界面删了、服务端没删」的假成功。
+/// 需要 `bili_jct`（`UserSession::bili_jct`）作为 CSRF token。
+pub fn delete_history_entries(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    kids: &[i64],
+) -> Result<(), String> {
+    if csrf.trim().is_empty() {
+        return Err("登录会话缺少 bili_jct，无法删除历史".into());
+    }
+    for kid in kids {
+        let body = client.post_form(
+            &format!("{}/x/v2/history/delete", bilibili::API_BASE),
+            &[("kid", kid.to_string()), ("csrf", csrf.to_string())],
+            cookie,
+        )?;
+        check_write_code(&body, "删除历史")?;
+    }
+    Ok(())
+}
+
+/// 清空当前账号的全部观看历史。
+pub fn clear_history(client: &ReqwestClient, cookie: &str, csrf: &str) -> Result<(), String> {
+    if csrf.trim().is_empty() {
+        return Err("登录会话缺少 bili_jct，无法清空历史".into());
+    }
+    let body = client.post_form(
+        &format!("{}/x/v2/history/clear", bilibili::API_BASE),
+        &[("csrf", csrf.to_string())],
+        cookie,
+    )?;
+    check_write_code(&body, "清空历史")
+}
+
+fn check_write_code(body: &str, action: &str) -> Result<(), String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("{action}响应解析失败：{e}"))?;
+    let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != 0 {
+        let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        return Err(format!("{action}失败：code={code} {message}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

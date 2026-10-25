@@ -17,6 +17,12 @@ pub struct PlaybackSource {
     pub title: String,
     /// 时长（秒）。
     pub duration_secs: u64,
+    /// 视频 aid；观看历史心跳上报用。
+    pub aid: i64,
+    /// 视频 bvid；观看历史心跳上报用。
+    pub bvid: String,
+    /// 当前分 P 的 cid；观看历史心跳上报用。
+    pub cid: i64,
 }
 
 impl DashStream {
@@ -87,6 +93,13 @@ pub fn select_playback(info: &VideoInfoData, play: &PlayUrlData) -> Result<Playb
                 audio_url: audio.map(|a| a.play_url().to_string()),
                 title: info.title.clone(),
                 duration_secs,
+                aid: info.aid,
+                bvid: if info.bvid.is_empty() {
+                    String::new()
+                } else {
+                    info.bvid.clone()
+                },
+                cid: info.cid.max(0),
             });
         }
     }
@@ -97,6 +110,9 @@ pub fn select_playback(info: &VideoInfoData, play: &PlayUrlData) -> Result<Playb
             audio_url: None,
             title: info.title.clone(),
             duration_secs,
+            aid: info.aid,
+            bvid: info.bvid.clone(),
+            cid: info.cid.max(0),
         });
     }
 

@@ -247,6 +247,88 @@ pub struct WbiImg {
     pub sub_url: String,
 }
 
+// ================= 观看历史（history/cursor） =================
+//
+// 接口：`GET /x/web-interface/history/cursor?max=&view_at=&business=`
+// 只认 Cookie，不需要 WBI 签名。响应里的 `progress` 是「已观看秒数」，
+// 不是百分比；`duration` 为 0 的条目（直播）不能拿来做百分比。
+//
+// 这里的字段只保留 UI 用得到的那部分；`covers` / `current` / `total`
+// 等字段对列表没有帮助，故意不声明。
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HistoryResponse {
+    #[serde(default)]
+    pub code: i64,
+    #[serde(default)]
+    pub message: String,
+    pub data: Option<HistoryData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct HistoryData {
+    pub cursor: Option<HistoryCursorRaw>,
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub list: Vec<HistoryItemRaw>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct HistoryCursorRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub max: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub view_at: i64,
+    pub business: String,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub ps: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct HistoryItemRaw {
+    pub title: String,
+    pub long_title: String,
+    pub cover: String,
+    pub uri: String,
+    #[serde(deserialize_with = "de_u64_or_string")]
+    pub videos: u64,
+    pub author_name: String,
+    pub author_face: String,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub author_mid: i64,
+    #[serde(deserialize_with = "de_u64_or_string")]
+    pub view_at: u64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub progress: i64,
+    pub badge: String,
+    pub show_title: String,
+    #[serde(deserialize_with = "de_u64_or_string")]
+    pub duration: u64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub is_finish: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub kid: i64,
+    pub tag_name: String,
+    pub history: HistoryInnerRaw,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct HistoryInnerRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub oid: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub epid: i64,
+    pub bvid: String,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub page: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub cid: i64,
+    pub business: String,
+}
+
 // ================= 关注动态（web-dynamic） =================
 //
 // 动态接口是**模块化**的：每一条的 `modules` 下按需出现 author / dynamic / stat。
@@ -509,6 +591,30 @@ where
     #[serde(untagged)]
     enum NumOrStr {
         Num(u64),
+        Str(String),
+    }
+
+    Ok(match NumOrStr::deserialize(deserializer)? {
+        NumOrStr::Num(n) => n,
+        NumOrStr::Str(s) => s.trim().parse().unwrap_or(0),
+    })
+}
+
+
+/// 兼容「整数或数字字符串」的 i64 反序列化器。
+///
+/// 历史接口的 `kid` / `max` / `progress` 在不同版本里给过数字与字符串，
+/// 与 `de_u64_or_string` 同理；`-1` 是合法值（未开始观看），不能当 0 吞掉。
+fn de_i64_or_string<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumOrStr {
+        Num(i64),
         Str(String),
     }
 

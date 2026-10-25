@@ -137,6 +137,7 @@ fn main() {
                                 "hot" => Some(yk_app::pages::PageKind::Hot),
                                 "rank" => Some(yk_app::pages::PageKind::Rank),
                                 "live" => Some(yk_app::pages::PageKind::Live),
+                                "history" => Some(yk_app::pages::PageKind::History),
                                 _ => None,
                             });
                     if let Some(page) = start_page {

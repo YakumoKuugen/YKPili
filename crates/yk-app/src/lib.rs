@@ -33,6 +33,7 @@ pub mod account_view;
 pub mod components;
 pub mod dynamic_feed;
 pub mod dynamic_view;
+pub mod history_view;
 pub mod http;
 pub mod login_view;
 pub mod page_image_cache;
@@ -110,6 +111,8 @@ pub struct AppRoot {
     following_has_more: bool,
     /// 关注流请求代际：登录 / 退出 / 刷新时只接受最后一次结果。
     following_generation: u64,
+    /// 观看历史页状态（数据、筛选、批量选择、搜索框）。
+    history: history_view::HistoryState,
     /// 启动后是否已经自动弹过一次登录；取消后不再打扰。
     login_prompted: bool,
     /// 推荐流请求代际：登录后的带 Cookie 请求必须覆盖启动时的匿名请求。
@@ -189,10 +192,12 @@ impl AppRoot {
 
     /// 首帧后补齐「当前页面所需的异步数据」。
     ///
-    /// 目前只有关注页需要：`with_page` 只切路由，数据仍要等窗口建好后拉。
+    /// 关注页与历史页都需要：`with_page` 只切路由，数据仍要等窗口建好后拉。
     pub fn load_current_page(&mut self, cx: &mut Context<Self>) {
-        if self.page == Some(pages::PageKind::Following) {
-            self.ensure_following(cx);
+        match self.page {
+            Some(pages::PageKind::Following) => self.ensure_following(cx),
+            Some(pages::PageKind::History) => self.ensure_history(cx),
+            _ => {}
         }
     }
 
@@ -354,6 +359,7 @@ impl AppRoot {
         self.dynamic_detail = None;
         self.dynamic_detail_close_requested = false;
         self.reset_following();
+        self.history.reset();
         self.login_prompted = true;
         if let Err(e) = yk_core::session::clear(&yk_core::session::session_path()) {
             eprintln!("[login] 清除 session.json 失败：{e}");
@@ -428,6 +434,9 @@ impl AppRoot {
         self.refresh_feed_authenticated(cx);
         if self.page == Some(pages::PageKind::Following) {
             self.load_following_page(false, false, cx);
+        }
+        if self.page == Some(pages::PageKind::History) {
+            self.load_history(cx);
         }
         cx.notify();
     }
@@ -1024,7 +1033,8 @@ impl AppRoot {
         self.refresh_page_now(cx);
     }
 
-    /// 按当前页面类型发起刷新：推荐流重拉第 0 页，关注流重拉第一页。
+    /// 按当前页面类型发起刷新：推荐流重拉第 0 页，关注流重拉第一页，
+    /// 历史页重拉 cursor 第一页。
     ///
     /// 回顶手势与手动入口共用这一层；1.2s 冷却只加在手势入口上 —— 用户明确
     /// 点了按钮，就该真的重新发一次请求，而不是被防抖吞掉。
@@ -1043,6 +1053,13 @@ impl AppRoot {
                     return false;
                 }
                 self.load_following_page(false, true, cx);
+                true
+            }
+            Some(pages::PageKind::History) => {
+                if self.session.is_none() {
+                    return false;
+                }
+                self.load_history(cx);
                 true
             }
             _ => false,
@@ -1119,6 +1136,7 @@ impl AppRoot {
             following_offset: String::new(),
             following_has_more: false,
             following_generation: 0,
+            history: history_view::HistoryState::new(),
             login_prompted: false,
             feed_generation: 0,
             feed_page: 0,
@@ -1261,6 +1279,11 @@ impl Render for AppRoot {
             cx.defer_in(window, |view, _window, cx| view.ensure_login(cx));
         }
 
+        // 历史页的搜索框必须在首帧 render 里懒建（InputState 需要 Window）。
+        if self.page == Some(pages::PageKind::History) {
+            self.ensure_history_search_input(window, cx);
+        }
+
         let t = &self.theme;
 
         let layout_bounds = self.layout_bounds.clone();
@@ -1326,6 +1349,7 @@ impl Render for AppRoot {
                             self.page,
                             self.page_state,
                             self.session.is_some(),
+                            &self.history,
                             dynamic_feed::FeedState {
                                 items: &self.following,
                                 loading: self.following_loading,
@@ -1358,6 +1382,16 @@ impl Render for AppRoot {
             )
             // Dock 是「页面场景内的浮层」，挂在内容之后，横向浮在所有封面之上
             .child(dock(t, self.page, self.session.is_some(), cx))
+            // 历史页的删除确认：盖住内容与 Dock，但仍在播放浮窗之下。
+            .children(self.history.confirm.as_ref().map(|kind| {
+                history_view::confirm_overlay(
+                    t,
+                    kind,
+                    self.history.delete_busy,
+                    self.history.action_error.as_deref(),
+                    cx,
+                )
+            }))
             // 刷新 / 触底加载的浮层提示
             .children(
                 (self.feed_refreshing || self.following_refreshing)
@@ -1745,6 +1779,7 @@ fn content_area(
     page: Option<pages::PageKind>,
     state: pages::PageState,
     signed_in: bool,
+    history: &history_view::HistoryState,
     following: dynamic_feed::FeedState<'_>,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
@@ -1755,6 +1790,25 @@ fn content_area(
     // Dock 现在是底部横向浮层：横向不再占位，内容区左右各留 24；
     // 底部留出 `DOCK_RESERVED`，否则最后一行封面会被 Dock 压住 ——
     // 浮层「在上」不等于内容可以钻到它背后。
+
+    // 历史页自带左右分栏 + 左栏独立滚动，不接外壳的 `content-scroll`：
+    // 右栏必须固定，跟着整页滚就失去「日期导航」的意义。
+    if page == Some(pages::PageKind::History) {
+        return div()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .bg(t.surfaces.bg_base)
+            .child(history_view::page(
+                t,
+                history,
+                signed_in,
+                active_images,
+                window,
+                cx,
+            ))
+            .into_any_element();
+    }
 
     if let Some(kind) = page {
         // 「正在关注」是瀑布流，需要窗口宽度和 AppRoot 的加载回调；
@@ -2804,9 +2858,13 @@ fn dock(
     }
 
     // 顶栏原来的四个快捷动作挪进 Dock：导航与动作之间用 1px 分隔线。
-    // 刷新只在有数据的页面上可用：「个性推荐」与登录后的「正在关注」；
+    // 刷新只在有数据的页面上可用：「个性推荐」、登录后的「正在关注」与「历史」；
     // 其余页面没有可重拉的数据，按钮置灰，不假装刷新。
-    let can_refresh = page.is_none() || (page == Some(pages::PageKind::Following) && signed_in);
+    let can_refresh = page.is_none()
+        || (matches!(
+            page,
+            Some(pages::PageKind::Following) | Some(pages::PageKind::History)
+        ) && signed_in);
     row = row
         .child(
             div()
@@ -2816,7 +2874,29 @@ fn dock(
                 .bg(s.border_subtle),
         )
         // 顺序：历史 / 收藏 / 消息 / 刷新；与导航项一样带文字
-        .child(dock_action(t, IconName::Clock, "历史", false, true))
+        .child(
+            dock_action(t, IconName::Clock, "历史", false, true)
+                .id("dock-history")
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    // 再点一次「历史」= 刷新第一页（与一级入口的习惯一致）。
+                    if this.page == Some(pages::PageKind::History) {
+                        this.refresh_page_manually(cx);
+                        window.refresh();
+                        cx.notify();
+                        return;
+                    }
+                    this.page = Some(pages::PageKind::History);
+                    this.top_refresh_armed = false;
+                    this.pull_refresh_triggered = false;
+                    if this.session.is_none() {
+                        this.ensure_login(cx);
+                    }
+                    this.ensure_history(cx);
+                    this.history.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                    window.refresh();
+                    cx.notify();
+                })),
+        )
         .child(dock_action(t, IconName::Bookmark, "收藏", false, true))
         .child(dock_action(t, IconName::Bell, "消息", true, true))
         .child(

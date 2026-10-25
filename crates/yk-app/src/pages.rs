@@ -19,6 +19,8 @@ pub enum PageKind {
     Live,
     /// 关注动态：底部 Dock 的「正在关注」入口。
     Following,
+    /// 观看历史：底部 Dock 的「历史」动作。
+    History,
     Mine,
     Settings,
     Search,
@@ -32,6 +34,7 @@ impl PageKind {
             Self::Rank => "排行",
             Self::Live => "直播",
             Self::Following => "正在关注",
+            Self::History => "观看历史",
             Self::Mine => "我的",
             Self::Settings => "设置",
             Self::Search => "搜索",
@@ -106,6 +109,9 @@ fn body(theme: &YkTheme, page: PageKind, signed_in: bool) -> AnyElement {
         PageKind::Rank => rank(theme).into_any_element(),
         PageKind::Live => live(theme).into_any_element(),
         PageKind::Following => following(theme, signed_in),
+        // 历史页是独立的两栏视图，由 AppRoot 在 content_area 里特判，
+        // 不会走到这里；保留分支只为让 match 穷尽。
+        PageKind::History => status::empty(theme, "观看历史", "由历史页独立渲染").into_any_element(),
         PageKind::Mine => mine(theme).into_any_element(),
         PageKind::Settings => settings(theme).into_any_element(),
         PageKind::Search => search(theme).into_any_element(),

@@ -118,6 +118,21 @@ pub struct CoverSource {
     pub placeholder_color: String,
 }
 
+/// 一次播放的观看历史上报上下文。
+///
+/// 只在登录态下创建；`cookie` / `csrf` 在开始时冻结，避免中途退出登录
+/// 把上报发到空会话上。
+#[derive(Clone)]
+struct HistoryReport {
+    aid: i64,
+    bvid: String,
+    cid: i64,
+    cookie: String,
+    csrf: String,
+    /// 本轮打开时刻（单调时钟，用于 5 秒冷却）。
+    opened_at: std::time::Instant,
+}
+
 pub struct PlayerView {
     theme: YkTheme,
     frame: TestFrame,
@@ -154,6 +169,8 @@ pub struct PlayerView {
     loading_source: bool,
     /// 取流失败原因（卡片没有 bvid / 需要登录 / 视频受限）。
     source_error: Option<String>,
+    /// 当前视频的上报上下文；未登录或非投稿视频为 None。
+    history_report: Option<HistoryReport>,
     /// 取流代次：连续点不同卡片时只接受最后一次结果。
     load_generation: u64,
     /// 输入框是否处于聚焦。聚焦时暂停渲染循环 ——
@@ -193,6 +210,14 @@ static EXIT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 
 impl Drop for PlayerView {
     fn drop(&mut self) {
+        // 兜底：正常关闭 / 换源已经在 begin_close / open_bvid 里补过上报；
+        // 直接 drop（退出登录、窗口销毁）时这里再补最后一拍。
+        if let Some(mut report) = self.history_report.take() {
+            if report.opened_at.elapsed() >= std::time::Duration::from_secs(5) {
+                let position = self.play_time.max(0.0) as u64;
+                dispatch_history_report(&report, position);
+            }
+        }
         LIVE_PLAYERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -219,6 +244,7 @@ impl PlayerView {
             source: None,
             loading_source: false,
             source_error: None,
+            history_report: None,
             load_generation: 0,
             #[cfg(target_os = "macos")]
             current: None,
@@ -282,6 +308,9 @@ impl PlayerView {
     /// 请求在后台 executor 跑；用 `load_generation` 丢弃过期结果，
     /// 连续点两张卡时不会出现旧视频覆盖新视频。
     pub fn open_bvid(&mut self, bvid: String, cx: &mut Context<Self>) {
+        // 换源前先把上一条的关闭上报补掉，否则连续点两个视频时
+        // 第一个只留下打开时的 0s 那一拍。
+        self.flush_history_report();
         self.load_generation = self.load_generation.wrapping_add(1);
         let generation = self.load_generation;
         self.loading_source = true;
@@ -333,7 +362,9 @@ impl PlayerView {
                         view.state.duration_secs = src.duration_secs as f64;
                         view.state.position_secs = 0.0;
                         view.state.playing = true;
+                        let (aid, bvid, cid) = (src.aid, src.bvid.clone(), src.cid);
                         view.source = Some(src);
+                        view.begin_history_report(aid, bvid, cid);
                     }
                     Err(e) => {
                         eprintln!("[player] 取流失败：{e}");
@@ -344,6 +375,51 @@ impl PlayerView {
             });
         })
         .detach();
+    }
+
+    /// 打开视频时上报一次历史（进度 0，状态「已观看」）。
+    ///
+    /// 不做周期心跳：只在打开 / 关闭两个时机各报一次。关闭时是否再报，
+    /// 由 [`Self::flush_history_report`] 判断「打开是否已满 5 秒」。
+    fn begin_history_report(&mut self, aid: i64, bvid: String, cid: i64) {
+        let Some(session) = current_session() else {
+            self.history_report = None;
+            return;
+        };
+        if aid <= 0 || cid <= 0 || bvid.trim().is_empty() {
+            self.history_report = None;
+            eprintln!("[history-report] 缺少 aid/cid/bvid，跳过：aid={aid} cid={cid} bvid={bvid}");
+            return;
+        }
+        let report = HistoryReport {
+            aid,
+            bvid: bvid.clone(),
+            cid,
+            cookie: session.cookie_header(),
+            csrf: session.bili_jct.clone(),
+            opened_at: std::time::Instant::now(),
+        };
+        eprintln!("[history-report] 打开上报：{bvid}（aid={aid} cid={cid}）");
+        dispatch_history_report(&report, 0);
+        self.history_report = Some(report);
+    }
+
+    /// 关闭 / 换源时补报一次；打开不足 5 秒则只保留打开时的那一次。
+    fn flush_history_report(&mut self) {
+        let Some(mut report) = self.history_report.take() else {
+            return;
+        };
+        if report.opened_at.elapsed() < std::time::Duration::from_secs(5) {
+            eprintln!(
+                "[history-report] 打开不足 5s，跳过关闭上报：{}（{:.1}s）",
+                report.bvid,
+                report.opened_at.elapsed().as_secs_f32()
+            );
+            return;
+        }
+        let position = self.play_time.max(0.0) as u64;
+        eprintln!("[history-report] 关闭上报：{} @ {position}s", report.bvid);
+        dispatch_history_report(&report, position);
     }
 
     /// AppRoot 注入：关闭时把自己的 `playing` 置空。
@@ -442,6 +518,8 @@ impl PlayerView {
         if self.closing {
             return;
         }
+        // 关闭前补最后一拍；打开不足 5s 的会在 flush 里被冷却拦掉。
+        self.flush_history_report();
         self.escape_hint = false;
         self.escape_hint_generation = self.escape_hint_generation.wrapping_add(1);
 
@@ -667,13 +745,48 @@ impl RenderOnce for PlayerExit {
     }
 }
 
+/// 当前登录会话；未登录/旧文件损坏返回 None。
+fn current_session() -> Option<yk_core::models::UserSession> {
+    let path = yk_core::session::session_path();
+    yk_core::session::load(&path).filter(|s| s.is_valid())
+}
+
 /// 登录会话的 Cookie 头；未登录/旧文件损坏返回空串（仍可取 480P）。
 fn current_session_cookie() -> String {
-    let path = yk_core::session::session_path();
-    yk_core::session::load(&path)
-        .filter(|s| s.is_valid())
+    current_session()
         .map(|s| s.cookie_header())
         .unwrap_or_default()
+}
+
+/// 把一次历史上报快照丢到后台线程发送。
+///
+/// 不挂在 `cx.spawn` 上：关闭动画结束时 `PlayerView` 会被回收，
+/// 挂在实体上的任务可能一起被取消；最后一次上报必须独立于实体生命周期。
+fn dispatch_history_report(report: &HistoryReport, progress: u64) {
+    let payload = yk_core::api::client::HistoryProgress {
+        aid: report.aid,
+        cid: report.cid,
+        progress,
+    };
+    let cookie = report.cookie.clone();
+    let csrf = report.csrf.clone();
+    eprintln!(
+        "[history-report] 上报 {}：progress={}s",
+        report.bvid, payload.progress
+    );
+    std::thread::spawn(move || {
+        let client = match yk_core::api::client::ReqwestClient::new() {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("[history-report] 创建客户端失败：{error}");
+                return;
+            }
+        };
+        if let Err(error) = yk_core::api::client::report_history(&client, &cookie, &csrf, &payload)
+        {
+            eprintln!("[history-report] 上报失败：{error}");
+        }
+    });
 }
 
 impl Render for PlayerView {

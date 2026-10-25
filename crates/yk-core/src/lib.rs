@@ -15,6 +15,7 @@ pub mod dynamic;
 pub mod feed;
 pub mod feed_cache;
 pub mod format;
+pub mod history;
 pub mod image_cache;
 pub mod login;
 pub mod models;
@@ -29,6 +30,7 @@ pub use dynamic::{
     DynamicPage, DynamicStats, DynamicVideo,
 };
 pub use feed::{Feed, MAX_ITEMS};
+pub use history::{HistoryCursor, HistoryDay, HistoryEntry};
 pub use image_cache::ImageDiskCache;
 pub use login::{LoginFlow, PollAction, POLL_INTERVAL_MS};
 pub use models::{CoverItem, LoginState, UserSession};

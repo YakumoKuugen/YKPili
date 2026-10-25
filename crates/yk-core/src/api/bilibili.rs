@@ -166,6 +166,31 @@ pub fn following_dynamics(offset: &str, cookie: &str) -> Request {
     }
 }
 
+/// 观看历史一页（`GET /x/web-interface/history/cursor`）。
+///
+/// 只认 Cookie，不需要 WBI 签名。`max` / `view_at` 是第一页响应里
+/// `data.cursor` 回传的两个游标；首次请求都传 0。
+pub fn history_cursor(
+    max: i64,
+    view_at: i64,
+    business: &str,
+    cookie: &str,
+) -> Request {
+    let business = business.trim();
+    let business = if business.is_empty() {
+        String::new()
+    } else {
+        format!("&business={business}")
+    };
+    Request {
+        url: format!(
+            "{API_BASE}/x/web-interface/history/cursor?max={max}&view_at={view_at}{business}"
+        ),
+        cookie: cookie.to_string(),
+        name: "history_cursor",
+    }
+}
+
 /// 动态评论第一页。
 ///
 /// `kind` 来自动态条目的 `basic.comment_type`（图文 11、纯文字 17、视频 1）；
