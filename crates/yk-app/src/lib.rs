@@ -1416,7 +1416,15 @@ fn top_bar(
     let s = &t.surfaces;
     let p = &t.palette;
     div()
+        .id("topbar-drag")
         .relative()
+        // 整条顶栏都能按住拖动窗口。原生透明标题栏只让顶部那条 titlebar
+        // 高度参与拖动，顶栏下半部分实测按不住 —— 在用户眼里就是 bug。
+        // 这里显式接管：按下即发起系统窗口拖拽，顶栏里的控件用自己的
+        // `occlude()` 把事件截住，所以点输入框 / 图标 / 头像不会误拖窗口。
+        .on_mouse_down(MouseButton::Left, |_, window, _| {
+            window.start_window_move()
+        })
         .flex()
         .items_center()
         .w_full()
@@ -1497,6 +1505,8 @@ fn search_bar(t: &YkTheme) -> impl IntoElement {
         .border_1()
         .border_color(s.border_popover)
         .shadow(shadow)
+        // 搜索框整体是控件，不参与顶栏拖动：挡住顶栏的拖拽 hitbox。
+        .occlude()
         .child(
             Icon::new(IconName::Search)
                 .size(px(18.))
@@ -1544,6 +1554,8 @@ fn top_icon_button(t: &YkTheme, icon: IconName, unread: bool) -> impl IntoElemen
         .text_color(s.text_secondary)
         .cursor_pointer()
         .hover(move |style| style.bg(bg).text_color(fg))
+        // 图标按钮是控件，不能把按下事件冒泡给顶栏的拖拽层。
+        .occlude()
         .child(Icon::new(icon).size(px(18.)));
     if unread {
         button = button.child(
@@ -1582,6 +1594,8 @@ fn avatar(
             linear_color_stop(p.bili_pink, 1.),
         ))
         .cursor_pointer()
+        // 头像点击是真实交互，必须挡住顶栏拖拽，否则一点就变成拖窗口。
+        .occlude()
         .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
             if view.session.is_some() {
                 view.ensure_account(cx);
@@ -2566,11 +2580,14 @@ struct DockEntry {
     page: Option<pages::PageKind>,
 }
 
-/// 底部横向 Dock：三个一级入口 + 原来的目录页。
+/// 底部横向 Dock：三个一级入口。
 ///
 /// 左侧竖排 Dock（首/热/区/排/直/我）已整体删除，功能收敛到这里：
-/// 目录页不再占用内容区左边距，改为底部浮层，横向浮在所有封面之上。
-const DOCK_ENTRIES: [DockEntry; 7] = [
+/// 一级入口不再占用内容区左边距，改为底部浮层，横向浮在所有封面之上。
+///
+/// 「热门 / 分区 / 直播 / 我的」不在这里处理，已从 Dock 移除；
+/// 对应 `PageKind` 仍保留，深链等入口还能打开。
+const DOCK_ENTRIES: [DockEntry; 3] = [
     DockEntry {
         label: "个性推荐",
         icon: IconName::Sparkles,
@@ -2585,26 +2602,6 @@ const DOCK_ENTRIES: [DockEntry; 7] = [
         label: "视频排行榜",
         icon: IconName::Trophy,
         page: Some(pages::PageKind::Rank),
-    },
-    DockEntry {
-        label: "热门",
-        icon: IconName::Flame,
-        page: Some(pages::PageKind::Hot),
-    },
-    DockEntry {
-        label: "分区",
-        icon: IconName::LayoutGrid,
-        page: Some(pages::PageKind::Category),
-    },
-    DockEntry {
-        label: "直播",
-        icon: IconName::Radio,
-        page: Some(pages::PageKind::Live),
-    },
-    DockEntry {
-        label: "我的",
-        icon: IconName::CircleUser,
-        page: Some(pages::PageKind::Mine),
     },
 ];
 
@@ -2633,17 +2630,6 @@ fn dock(
         .shadow(t.shadows.shadow_3.clone());
 
     for (i, entry) in DOCK_ENTRIES.iter().enumerate() {
-        // 一级入口（个性推荐 / 正在关注 / 视频排行榜）与其余目录页之间
-        // 加一条 1px 分隔，视觉上分成「常去」与「目录」两组。
-        if i == 3 {
-            row = row.child(
-                div()
-                    .w(px(1.))
-                    .h(px(18.))
-                    .mx(px(SPACE_1))
-                    .bg(s.border_strong),
-            );
-        }
         let active = page == entry.page;
         let fg = if active {
             s.text_on_accent

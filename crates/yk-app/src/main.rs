@@ -68,6 +68,10 @@ fn main() {
                         appears_transparent: true,
                         traffic_light_position: Some(point(px(20.), px(18.))),
                     }),
+                    // 顶栏自己接管拖动（见 lib.rs `top_bar`）：不交出这一项，
+                    // AppKit 只让原生 titlebar 那条窄带可拖，顶栏下半部分按不住，
+                    // 而且内容区也会跟系统拖拽争同一串鼠标事件。
+                    app_owns_titlebar_drag: true,
                     ..Default::default()
                 },
                 cx,
