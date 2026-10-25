@@ -8,8 +8,13 @@
 //! B 站对默认 UA（`reqwest/x.y`）会直接 403，缺 Referer 有概率被风控拦。
 
 use crate::api::bilibili::{self, HttpClient, Request};
-use crate::api::models::{RecommendResponse, RecommendVideoItem, UserInfoResponse};
+use crate::api::models::{
+    DynamicFeedResponse, PlayUrlData, RecommendResponse, RecommendVideoItem, ReplyResponse,
+    UserInfoResponse, VideoInfoData, VideoInfoResponse, VideoPlayUrlResponse,
+};
 use crate::api::wbi;
+use crate::dynamic::{CommentTarget, DynamicComment, DynamicItem, DynamicPage};
+use crate::playback::{select_playback, PlaybackSource};
 
 /// 伪装成桌面浏览器 —— 与旧实现的 UA 策略一致。
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
@@ -56,7 +61,9 @@ impl HttpClient for ReqwestClient {
             .send()
             .map_err(|e| format!("{} 请求失败：{e}", req.name))?;
         let status = resp.status();
-        let body = resp.text().map_err(|e| format!("{} 读取响应失败：{e}", req.name))?;
+        let body = resp
+            .text()
+            .map_err(|e| format!("{} 读取响应失败：{e}", req.name))?;
         if !status.is_success() {
             return Err(format!("{} 返回 HTTP {status}", req.name));
         }
@@ -81,10 +88,12 @@ where
     C: HttpClient<Error = String>,
 {
     let body = client.get(&bilibili::user_info(cookie))?;
-    let parsed: UserInfoResponse = serde_json::from_str(&body)
-        .map_err(|e| format!("nav 响应解析失败：{e}"))?;
+    let parsed: UserInfoResponse =
+        serde_json::from_str(&body).map_err(|e| format!("nav 响应解析失败：{e}"))?;
     let data = parsed.data.ok_or_else(|| "nav 响应缺少 data".to_string())?;
-    let wbi = data.wbi_img.ok_or_else(|| "nav 响应缺少 wbi_img".to_string())?;
+    let wbi = data
+        .wbi_img
+        .ok_or_else(|| "nav 响应缺少 wbi_img".to_string())?;
     let img = bilibili::extract_wbi_key(&wbi.img_url);
     let sub = bilibili::extract_wbi_key(&wbi.sub_url);
     if img.is_empty() || sub.is_empty() {
@@ -103,8 +112,22 @@ pub fn fetch_recommend<C>(
 where
     C: HttpClient<Error = String>,
 {
+    fetch_recommend_page(client, cookie, ps, wts, 0)
+}
+
+/// 拉推荐流的第 `fresh_idx` 页；首页首次用 0，触底加载依次 1、2…
+pub fn fetch_recommend_page<C>(
+    client: &C,
+    cookie: &str,
+    ps: u32,
+    wts: u64,
+    fresh_idx: u32,
+) -> Result<Vec<RecommendVideoItem>, String>
+where
+    C: HttpClient<Error = String>,
+{
     let (img, sub) = fetch_wbi_keys(client, cookie)?;
-    let req = bilibili::recommend(&img, &sub, cookie, wts, ps);
+    let req = bilibili::recommend_page(&img, &sub, cookie, wts, ps, fresh_idx);
     let body = client.get(&req)?;
     let parsed: RecommendResponse =
         serde_json::from_str(&body).map_err(|e| format!("推荐响应解析失败：{e}"))?;
@@ -112,6 +135,160 @@ where
         return Err(format!("推荐接口返回 code={}", parsed.code));
     }
     Ok(parsed.data.map(|d| d.item).unwrap_or_default())
+}
+
+/// 取视频详情（含 cid）。
+pub fn fetch_video_info<C>(client: &C, bvid: &str, cookie: &str) -> Result<VideoInfoData, String>
+where
+    C: HttpClient<Error = String>,
+{
+    let (img, sub) = fetch_wbi_keys(client, cookie)?;
+    fetch_video_info_with_keys(client, bvid, cookie, &img, &sub)
+}
+
+fn fetch_video_info_with_keys<C>(
+    client: &C,
+    bvid: &str,
+    cookie: &str,
+    img: &str,
+    sub: &str,
+) -> Result<VideoInfoData, String>
+where
+    C: HttpClient<Error = String>,
+{
+    let req = bilibili::video_info(bvid, img, sub, cookie, now_wts());
+    let body = client.get(&req)?;
+    let parsed: VideoInfoResponse =
+        serde_json::from_str(&body).map_err(|e| format!("视频详情解析失败：{e}"))?;
+    if parsed.code != 0 {
+        return Err(format!("视频详情返回 code={}", parsed.code));
+    }
+    parsed.data.ok_or_else(|| "视频详情缺少 data".to_string())
+}
+
+fn fetch_play_url_with_keys<C>(
+    client: &C,
+    bvid: &str,
+    cid: i64,
+    cookie: &str,
+    img: &str,
+    sub: &str,
+) -> Result<PlayUrlData, String>
+where
+    C: HttpClient<Error = String>,
+{
+    let req = bilibili::play_url(bvid, cid, img, sub, cookie, now_wts());
+    let body = client.get(&req)?;
+    let parsed: VideoPlayUrlResponse =
+        serde_json::from_str(&body).map_err(|e| format!("播放地址解析失败：{e}"))?;
+    if parsed.code != 0 {
+        return Err(format!("播放地址返回 code={}", parsed.code));
+    }
+    parsed.data.ok_or_else(|| "播放地址缺少 data".to_string())
+}
+
+/// 点击卡片后的完整取流：详情取 cid → playurl → 选一条视频 + 可选音频。
+///
+/// 只取一次 WBI keys，两次接口复用；cookie 从登录会话传入（未登录也能拿 480P）。
+pub fn fetch_playback<C>(client: &C, bvid: &str, cookie: &str) -> Result<PlaybackSource, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if bvid.trim().is_empty() {
+        return Err("卡片没有 bvid，无法播放".into());
+    }
+    let (img, sub) = fetch_wbi_keys(client, cookie)?;
+    let info = fetch_video_info_with_keys(client, bvid, cookie, &img, &sub)?;
+    let cid = if info.cid > 0 {
+        info.cid
+    } else {
+        info.pages
+            .iter()
+            .find(|p| p.cid > 0)
+            .map(|p| p.cid)
+            .unwrap_or(0)
+    };
+    if cid == 0 {
+        return Err("视频详情没有 cid，无法取播放地址".into());
+    }
+    let play = fetch_play_url_with_keys(client, bvid, cid, cookie, &img, &sub)?;
+    select_playback(&info, &play)
+}
+
+/// 拉一页关注动态。
+///
+/// 不带 WBI 签名（该接口只认 Cookie）。未登录直接返回错误，避免把
+/// 「-101 账号未登录」包装成空列表，页面上分不清「没关注」和「没登录」。
+pub fn fetch_following_dynamics<C>(
+    client: &C,
+    cookie: &str,
+    offset: &str,
+) -> Result<DynamicPage, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if cookie.trim().is_empty() {
+        return Err("未登录，无法获取关注动态".into());
+    }
+    let req = bilibili::following_dynamics(offset, cookie);
+    let body = client.get(&req)?;
+    let parsed: DynamicFeedResponse =
+        serde_json::from_str(&body).map_err(|e| format!("动态流响应解析失败：{e}"))?;
+    if parsed.code != 0 {
+        let message = if parsed.message.is_empty() {
+            String::new()
+        } else {
+            format!("：{}", parsed.message)
+        };
+        return Err(format!("动态流返回 code={}{message}", parsed.code));
+    }
+    let data = parsed
+        .data
+        .ok_or_else(|| "动态流响应缺少 data".to_string())?;
+    let mut items: Vec<DynamicItem> = data
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, raw)| DynamicItem::from_raw(raw, index))
+        .collect();
+    // 原始条目里可能夹着已删除 / 纯直播推荐等被过滤掉的项，序号会断档。
+    // 重新编号，保证瀑布流的卡片 id 连续、稳定。
+    for (index, item) in items.iter_mut().enumerate() {
+        item.index = index;
+    }
+    Ok(DynamicPage {
+        items,
+        offset: data.offset,
+        has_more: data.has_more,
+    })
+}
+
+/// 拉动态评论第一页。
+///
+/// 评论失败不应该影响详情浮层本身，因此调用方会把它当成「评论加载失败」而不是
+/// 整个浮层错误；这里仍然返回 `Result`，把具体原因带出去。
+pub fn fetch_dynamic_comments<C>(
+    client: &C,
+    cookie: &str,
+    target: &CommentTarget,
+) -> Result<Vec<DynamicComment>, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if target.oid.is_empty() || target.kind <= 0 {
+        return Ok(Vec::new());
+    }
+    let req = bilibili::dynamic_comments(&target.oid, target.kind, cookie, 1, 20);
+    let body = client.get(&req)?;
+    let parsed: ReplyResponse =
+        serde_json::from_str(&body).map_err(|e| format!("评论响应解析失败：{e}"))?;
+    if parsed.code != 0 {
+        return Err(format!("评论接口返回 code={}", parsed.code));
+    }
+    Ok(parsed
+        .data
+        .map(|data| data.replies.iter().map(DynamicComment::from_raw).collect())
+        .unwrap_or_default())
 }
 
 /// 计算签名（给需要手工验证的场合用）。
@@ -179,6 +356,26 @@ mod tests {
         assert_eq!(items[0].duration, 60);
         // HTML 实体在 CoverItem::from_recommend 里解码，这里应保持原文
         assert_eq!(items[0].title, "A &amp; B");
+    }
+
+    #[test]
+    fn playback_pipeline_selects_video_and_audio() {
+        struct PlayClient;
+        impl HttpClient for PlayClient {
+            type Error = String;
+            fn get(&self, req: &Request) -> Result<String, String> {
+                match req.name {
+                    "user_info" => Ok(r#"{"code":0,"data":{"wbi_img":{"img_url":"a.png","sub_url":"b.png"}}}"#.into()),
+                    "video_info" => Ok(r#"{"code":0,"data":{"bvid":"BV1","cid":42,"title":"T","duration":100}}"#.into()),
+                    "play_url" => Ok(r#"{"code":0,"data":{"timelength":107000,"dash":{"video":[{"id":80,"baseUrl":"v80","codecs":"avc1","width":1920,"height":1080},{"id":32,"baseUrl":"v32","codecs":"avc1","width":640,"height":360}],"audio":[{"id":30280,"baseUrl":"a80","codecs":"mp4a"}]}}}"#.into()),
+                    other => Err(format!("未预期请求：{other}")),
+                }
+            }
+        }
+        let src = fetch_playback(&PlayClient, "BV1", "").unwrap();
+        assert_eq!(src.video_url, "v80");
+        assert_eq!(src.audio_url.as_deref(), Some("a80"));
+        assert_eq!(src.duration_secs, 107);
     }
 
     #[test]

@@ -30,7 +30,10 @@ impl Default for AppShell {
 impl AppShell {
     /// 未登录时停在登录页。启动后若 `restore` 成功会自动切到首页。
     pub fn new() -> Self {
-        Self { screen: Screen::Login, session: None }
+        Self {
+            screen: Screen::Login,
+            session: None,
+        }
     }
 
     pub fn screen(&self) -> Screen {
@@ -79,11 +82,16 @@ impl AppShell {
 /// macOS：`~/Library/Application Support/YKPili/session.json`
 /// 其它平台：系统临时目录下的 `YKPili/session.json`（够用，且不污染用户目录）
 pub fn session_path() -> PathBuf {
+    // 测试/便携启动可显式指定；正常桌面端仍走 Application Support。
+    if let Ok(path) = std::env::var("YK_SESSION_PATH") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
     #[cfg(target_os = "macos")]
     {
         if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home)
-                .join("Library/Application Support/YKPili/session.json");
+            return PathBuf::from(home).join("Library/Application Support/YKPili/session.json");
         }
     }
     std::env::temp_dir().join("YKPili").join("session.json")
@@ -97,6 +105,15 @@ pub fn save(path: &std::path::Path, session: &UserSession) -> std::io::Result<()
     let json = serde_json::to_string_pretty(session)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(path, json)
+}
+
+/// 清除本地会话（退出登录）。
+pub fn clear(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 /// 读取会话。文件缺失或损坏都返回 `None`。
@@ -141,7 +158,11 @@ mod tests {
     #[test]
     fn invalid_session_does_not_enter_home() {
         let mut app = AppShell::new();
-        app.restore(UserSession { sess_data: "x".into(), is_logged_in: false, ..Default::default() });
+        app.restore(UserSession {
+            sess_data: "x".into(),
+            is_logged_in: false,
+            ..Default::default()
+        });
         assert_eq!(app.screen(), Screen::Login, "无效会话不应进入首页");
     }
 
@@ -199,6 +220,44 @@ mod tests {
         let path = dir.join("session.json");
         std::fs::write(&path, b"{ broken").unwrap();
         assert!(load(&path).is_none(), "损坏的文件不应导致 panic");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn account_snapshot_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("yk-account-{}", std::process::id()));
+        let path = dir.join("session.json");
+        let mut s = valid_session();
+        s.coins = 3411.5;
+        s.bcoin = 0.0;
+        s.level = 6;
+        s.following = 445;
+        s.followers = 16;
+        s.dynamics = Some(31);
+        s.last_login_time = "2026-10-25 00:08:24".into();
+        s.last_login_geo = "中国四川成都电信".into();
+        s.account_updated_at = 1_792_858_104;
+        save(&path, &s).unwrap();
+        let back = load(&path).unwrap();
+        assert_eq!(back.coins, 3411.5);
+        assert_eq!(back.level, 6);
+        assert_eq!(back.following, 445);
+        assert_eq!(back.followers, 16);
+        assert_eq!(back.dynamics, Some(31));
+        assert_eq!(back.account_updated_at, 1_792_858_104);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_removes_session_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("yk-clear-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.json");
+        save(&path, &valid_session()).unwrap();
+        assert!(path.exists());
+        clear(&path).unwrap();
+        assert!(!path.exists());
+        clear(&path).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -25,17 +25,28 @@ pub struct Request {
 /// 推荐流（需要 WBI 签名）。
 ///
 /// `fresh_type=3` 是 APP 推荐流，`ps=30` 是每页数量 —— 与旧实现一致。
-pub fn recommend(
+pub fn recommend(img_key: &str, sub_key: &str, cookie: &str, wts: u64, ps: u32) -> Request {
+    recommend_page(img_key, sub_key, cookie, wts, ps, 0)
+}
+
+/// 推荐流分页：`fresh_idx` / `fresh_idx_1h` / `brush` 一起递增，
+/// 否则服务端可能反复返回同一批内容。
+pub fn recommend_page(
     img_key: &str,
     sub_key: &str,
     cookie: &str,
     wts: u64,
     ps: u32,
+    fresh_idx: u32,
 ) -> Request {
     let params = vec![
         ("fresh_type".to_string(), "3".to_string()),
         ("version".to_string(), "1".to_string()),
         ("ps".to_string(), ps.to_string()),
+        ("fresh_idx".to_string(), fresh_idx.to_string()),
+        ("fresh_idx_1h".to_string(), fresh_idx.to_string()),
+        ("brush".to_string(), fresh_idx.to_string()),
+        ("homepage_ver".to_string(), "1".to_string()),
     ];
     Request {
         url: wbi::signed_url(
@@ -109,9 +120,7 @@ pub fn qrcode_generate() -> Request {
 /// 扫码登录：轮询状态（需要 `qrcode_key`）。
 pub fn qrcode_poll(qrcode_key: &str) -> Request {
     Request {
-        url: format!(
-            "{PASSPORT_BASE}/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}"
-        ),
+        url: format!("{PASSPORT_BASE}/x/passport-login/web/qrcode/poll?qrcode_key={qrcode_key}"),
         cookie: String::new(),
         name: "qrcode_poll",
     }
@@ -136,6 +145,39 @@ pub fn extract_wbi_key(url: &str) -> String {
     last.split('.').next().unwrap_or(last).to_string()
 }
 
+/// 关注动态流（`web-dynamic/feed/all`）。
+///
+/// 需要 SESSDATA；`features` 打开 Opus 大图与完整装饰卡，否则新版图文动态会
+/// 退回成只有文字的旧版结构。`offset` 为空表示第一页。
+pub fn following_dynamics(offset: &str, cookie: &str) -> Request {
+    const FEATURES: &str =
+        "itemOpusStyle,listOnlyfans,opusBigCover,onlyfansVote,decorationCard,commentsNewVersion";
+    let offset = if offset.trim().is_empty() {
+        String::new()
+    } else {
+        format!("&offset={}", offset.trim())
+    };
+    Request {
+        url: format!(
+            "{API_BASE}/x/polymer/web-dynamic/v1/feed/all?timezone_offset=-480&type=all&page=1{offset}&features={FEATURES}&platform=web"
+        ),
+        cookie: cookie.to_string(),
+        name: "following_dynamics",
+    }
+}
+
+/// 动态评论第一页。
+///
+/// `kind` 来自动态条目的 `basic.comment_type`（图文 11、纯文字 17、视频 1）；
+/// `oid` 是 `basic.comment_id_str`。
+pub fn dynamic_comments(oid: &str, kind: i64, cookie: &str, pn: u32, ps: u32) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/v2/reply?type={kind}&oid={oid}&sort=2&nohot=0&pn={pn}&ps={ps}"),
+        cookie: cookie.to_string(),
+        name: "dynamic_comments",
+    }
+}
+
 /// 发送请求的能力抽象。
 ///
 /// 目前没有接具体实现：离线环境里没有可用的 HTTP crate。
@@ -157,12 +199,24 @@ mod tests {
     fn recommend_is_signed_and_has_expected_params() {
         let r = recommend(IMG, SUB, "SESSDATA=x", WTS, 30);
         assert_eq!(r.name, "recommend");
-        assert!(r.url.starts_with("https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?"));
+        assert!(r
+            .url
+            .starts_with("https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?"));
         assert!(r.url.contains("fresh_type=3"));
         assert!(r.url.contains("ps=30"));
         assert!(r.url.contains("wts=1702204169"));
         assert!(r.url.contains("w_rid="));
         assert_eq!(r.cookie, "SESSDATA=x");
+    }
+
+    #[test]
+    fn recommend_pages_change_fresh_idx() {
+        let p0 = recommend_page(IMG, SUB, "", WTS, 30, 0);
+        let p2 = recommend_page(IMG, SUB, "", WTS, 30, 2);
+        assert!(p0.url.contains("fresh_idx=0"));
+        assert!(p2.url.contains("fresh_idx=2"));
+        assert!(p2.url.contains("brush=2"));
+        assert_ne!(p0.url, p2.url);
     }
 
     #[test]

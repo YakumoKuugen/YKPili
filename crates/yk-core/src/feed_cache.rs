@@ -74,6 +74,19 @@ impl FeedCache {
     pub fn clear(&self) -> io::Result<()> {
         self.manager.remove_package(PACKAGE)
     }
+
+    /// 缓存占用与更新时间，供设置页展示。
+    ///
+    /// 返回 `(字节数, 更新时间)`；文件不存在时返回 `(0, None)`。
+    pub fn stats(&self) -> (u64, Option<u64>) {
+        let Some(dir) = self.manager.package_path(PACKAGE) else {
+            return (0, None);
+        };
+        let path = dir.join(FILE);
+        let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let updated_at = self.load().map(|cached| cached.updated_at);
+        (bytes, updated_at)
+    }
 }
 
 fn now_secs() -> u64 {

@@ -76,6 +76,46 @@ pub fn duration(seconds: u64) -> String {
     }
 }
 
+/// 发布时间 → 卡片署名行的相对时间文案（设计文档第 04 节）。
+///
+/// 口径与 B 站一致：1 分钟内「刚刚」、1 小时内「N分钟前」、
+/// 24 小时内「N小时前」、48 小时内「昨天」、再早「N天前」。
+/// `ts == 0`（接口没给发布时间）返回空串，视图不渲染这一段。
+pub fn relative_time(ts: u64) -> String {
+    relative_time_at(ts, now_secs())
+}
+
+/// 相对时间的可测试版本：显式传入「现在」。
+pub fn relative_time_at(ts: u64, now: u64) -> String {
+    if ts == 0 {
+        return String::new();
+    }
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+
+    // 时钟回拨 / 未来时间按「刚刚」处理，不出现负数。
+    let delta = now.saturating_sub(ts);
+    if delta < MINUTE {
+        "刚刚".into()
+    } else if delta < HOUR {
+        format!("{}分钟前", delta / MINUTE)
+    } else if delta < DAY {
+        format!("{}小时前", delta / HOUR)
+    } else if delta < 2 * DAY {
+        "昨天".into()
+    } else {
+        format!("{}天前", delta / DAY)
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// 解码 B 站标题里的 HTML 实体。
 ///
 /// 对应旧实现里的 `System.Net.WebUtility.HtmlDecode(v.Title)`。
@@ -112,7 +152,10 @@ pub fn html_decode(s: &str) -> String {
             "apos" => Some('\''),
             "nbsp" => Some('\u{00A0}'),
             _ => {
-                if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+                if let Some(hex) = entity
+                    .strip_prefix("#x")
+                    .or_else(|| entity.strip_prefix("#X"))
+                {
                     u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
                 } else if let Some(dec) = entity.strip_prefix('#') {
                     dec.parse::<u32>().ok().and_then(char::from_u32)
@@ -175,7 +218,10 @@ mod tests {
     fn counts_never_use_latin_units() {
         for n in [10_000u64, 1_500_000, 300_000_000] {
             let s = count(n);
-            assert!(!s.contains('w') && !s.contains('M') && !s.contains('k'), "{s}");
+            assert!(
+                !s.contains('w') && !s.contains('M') && !s.contains('k'),
+                "{s}"
+            );
         }
     }
 
@@ -187,6 +233,19 @@ mod tests {
         assert_eq!(duration(599), "09:59");
         assert_eq!(duration(3600), "1:00:00");
         assert_eq!(duration(3725), "1:02:05");
+    }
+
+    #[test]
+    fn relative_time_matches_card_byline() {
+        let now = 1_700_000_000u64;
+        assert_eq!(relative_time_at(0, now), "", "未知发布时间不显示");
+        assert_eq!(relative_time_at(now - 30, now), "刚刚");
+        assert_eq!(relative_time_at(now - 5 * 60, now), "5分钟前");
+        assert_eq!(relative_time_at(now - 3 * 3600, now), "3小时前");
+        assert_eq!(relative_time_at(now - 30 * 3600, now), "昨天");
+        assert_eq!(relative_time_at(now - 3 * 86400, now), "3天前");
+        // 未来时间（时钟回拨）不应出现负数
+        assert_eq!(relative_time_at(now + 60, now), "刚刚");
     }
 
     #[test]

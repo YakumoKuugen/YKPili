@@ -11,6 +11,22 @@
 use crate::api::models::RecommendVideoItem;
 use crate::format;
 
+/// 封面缩略图目标宽度（2× 屏 384，设计文档封面解码约束）。
+///
+/// 卡片只占 192px，没必要下载/解码原图；B 站图床支持在 URL 后加
+/// `@384w_216h_1c.webp` 直接取缩略图。
+pub const COVER_THUMB_WIDTH: u32 = 384;
+/// 16:9 缩略图高度。
+pub const COVER_THUMB_HEIGHT: u32 = 216;
+
+/// 把 B 站封面 URL 换成 384×216 的缩略图地址；非 B 站 / 已带后缀的 URL 原样返回。
+pub fn cover_thumb_url(url: &str) -> String {
+    if url.is_empty() || url.contains('@') || !url.contains("hdslb.com") || url.contains('?') {
+        return url.to_string();
+    }
+    format!("{url}@{COVER_THUMB_WIDTH}w_{COVER_THUMB_HEIGHT}h_1c.webp")
+}
+
 /// 首页推荐视频的封面卡片数据。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoverItem {
@@ -38,6 +54,10 @@ pub struct CoverItem {
     pub danmaku_count: u64,
     /// 时长（秒，原始值，显示时走 `format::duration`）。
     pub duration_secs: u64,
+    /// 发布时间（Unix 秒，显示时走 `format::relative_time`）。
+    pub pubdate: u64,
+    /// 是否为直播卡（推荐接口 `goto == "live"`）。
+    pub is_live: bool,
     /// 本地播放进度（秒）。0 表示未看过。
     pub progress_secs: u64,
 }
@@ -56,6 +76,8 @@ impl Default for CoverItem {
             view_count: 0,
             danmaku_count: 0,
             duration_secs: 0,
+            pubdate: 0,
+            is_live: false,
             progress_secs: 0,
         }
     }
@@ -79,6 +101,8 @@ impl CoverItem {
             view_count: v.stat.as_ref().map(|s| s.view).unwrap_or(0),
             danmaku_count: v.stat.as_ref().map(|s| s.danmaku).unwrap_or(0),
             duration_secs: v.duration,
+            pubdate: v.pubdate,
+            is_live: v.goto == "live",
             progress_secs: 0,
         }
     }
@@ -88,12 +112,19 @@ impl CoverItem {
     /// 旧实现 `CloneTo` 只复制 4 个字段，注释里还专门警告「漏掉图址与 BVID
     /// 会整屏空占位」—— 这里直接把整份数据带过去，不再逐字段手抄。
     pub fn clone_to(&self, index: usize) -> Self {
-        Self { index, ..self.clone() }
+        Self {
+            index,
+            ..self.clone()
+        }
     }
 
     /// 空位（透明占位）。
     pub fn empty(index: usize) -> Self {
-        Self { index, placeholder_color: "#00000000".into(), ..Self::default() }
+        Self {
+            index,
+            placeholder_color: "#00000000".into(),
+            ..Self::default()
+        }
     }
 
     /// 卡片第二行文案：「UP 主 · 12.4万 · 144弹幕」的信息片段。
@@ -115,6 +146,16 @@ impl CoverItem {
     /// 时长显示形态。
     pub fn duration_text(&self) -> String {
         format::duration(self.duration_secs)
+    }
+
+    /// 署名行右侧的相对时间；发布时间未知时返回空串（由视图决定是否显示）。
+    pub fn published_text(&self) -> String {
+        format::relative_time(self.pubdate)
+    }
+
+    /// 卡片实际加载的封面地址：B 站图床走 384×216 缩略图，平衡内存与清晰度。
+    pub fn cover_thumb_url(&self) -> String {
+        cover_thumb_url(&self.image_url)
     }
 }
 
@@ -138,7 +179,7 @@ pub enum LoginState {
 ///
 /// 序列化键沿用 C# 版的 **PascalCase**（`DedeUserId` / `SessData` …），
 /// 这样旧版本写下的 `session.json` 能直接被读出来，不用做迁移。
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct UserSession {
     /// B 站用户 ID（`DedeUserID`）。
@@ -154,6 +195,27 @@ pub struct UserSession {
     pub img_key: Option<String>,
     /// WBI 签名用 sub_key。
     pub sub_key: Option<String>,
+
+    // ---- 账号面板缓存（避免每次点头像都重新请求） ----
+    #[serde(default)]
+    pub coins: f64,
+    #[serde(default)]
+    pub bcoin: f64,
+    #[serde(default)]
+    pub level: u8,
+    #[serde(default)]
+    pub following: u64,
+    #[serde(default)]
+    pub followers: u64,
+    #[serde(default)]
+    pub dynamics: Option<u64>,
+    #[serde(default)]
+    pub last_login_time: String,
+    #[serde(default)]
+    pub last_login_geo: String,
+    /// 账号面板数据的写入时间（Unix 秒）；0 = 从未拉取过。
+    #[serde(default)]
+    pub account_updated_at: u64,
 }
 
 impl UserSession {
@@ -192,11 +254,16 @@ mod tests {
             pic: "https://i0.hdslb.com/a.jpg".into(),
             desc: "简介".into(),
             duration: 754,
+            pubdate: 1_700_000_000,
+            goto: "av".into(),
             owner: Some(VideoOwner {
                 name: "生肉烹饪师".into(),
                 face: "https://i1.hdslb.com/f.jpg".into(),
             }),
-            stat: Some(VideoStat { view: 124_000, danmaku: 144 }),
+            stat: Some(VideoStat {
+                view: 124_000,
+                danmaku: 144,
+            }),
         }
     }
 
@@ -218,6 +285,30 @@ mod tests {
         assert_eq!(c.view_count, 124_000, "播放量被丢了");
         assert_eq!(c.danmaku_count, 144, "弹幕数被丢了");
         assert_eq!(c.duration_secs, 754, "时长被丢了");
+        assert_eq!(c.pubdate, 1_700_000_000, "发布时间被丢了");
+        assert!(!c.is_live, "普通视频不应带直播标记");
+    }
+
+    #[test]
+    fn live_flag_comes_from_goto() {
+        let mut v = sample_item();
+        v.goto = "live".into();
+        let c = CoverItem::from_recommend(&v, 0, "#000");
+        assert!(c.is_live, "goto=live 必须映射成直播卡");
+    }
+
+    #[test]
+    fn cover_thumb_url_uses_low_res_variant() {
+        assert_eq!(
+            cover_thumb_url("https://i0.hdslb.com/bfs/archive/a.jpg"),
+            "https://i0.hdslb.com/bfs/archive/a.jpg@384w_216h_1c.webp"
+        );
+        // 已带缩放后缀 / 非 B 站 / 空地址都不重复追加
+        let already = "https://i0.hdslb.com/bfs/archive/a.jpg@100w.webp";
+        assert_eq!(cover_thumb_url(already), already);
+        let other = "https://example.com/a.jpg";
+        assert_eq!(cover_thumb_url(other), other);
+        assert_eq!(cover_thumb_url(""), "");
     }
 
     #[test]
@@ -239,6 +330,7 @@ mod tests {
         assert_eq!(cloned.up_name, c.up_name);
         assert_eq!(cloned.view_count, c.view_count);
         assert_eq!(cloned.duration_secs, c.duration_secs);
+        assert_eq!(cloned.pubdate, c.pubdate);
         assert_eq!(cloned.image_url, c.image_url);
         assert_eq!(cloned.bvid, c.bvid);
     }
@@ -272,13 +364,19 @@ mod tests {
             is_logged_in: true,
             ..Default::default()
         };
-        assert_eq!(s.cookie_header(), "SESSDATA=abc; bili_jct=def; DedeUserID=42");
+        assert_eq!(
+            s.cookie_header(),
+            "SESSDATA=abc; bili_jct=def; DedeUserID=42"
+        );
         assert!(s.is_valid());
     }
 
     #[test]
     fn cookie_header_skips_zero_uid() {
-        let s = UserSession { sess_data: "x".into(), ..Default::default() };
+        let s = UserSession {
+            sess_data: "x".into(),
+            ..Default::default()
+        };
         assert_eq!(s.cookie_header(), "SESSDATA=x");
     }
 }

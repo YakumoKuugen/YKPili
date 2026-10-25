@@ -8,20 +8,30 @@
 //! 也能被未来的移动端壳/CLI 复用。
 
 pub mod api;
+pub mod auth;
 pub mod cache;
 pub mod danmaku;
+pub mod dynamic;
 pub mod feed;
 pub mod feed_cache;
 pub mod format;
+pub mod image_cache;
 pub mod login;
 pub mod models;
+pub mod playback;
 pub mod player;
 pub mod session;
 
 pub use cache::CacheManager;
 pub use danmaku::{Danmaku, DanmakuMode, DanmakuSet, LaneAllocator};
+pub use dynamic::{
+    CommentTarget, DynamicAuthor, DynamicComment, DynamicImage, DynamicItem, DynamicKind,
+    DynamicPage, DynamicStats, DynamicVideo,
+};
 pub use feed::{Feed, MAX_ITEMS};
+pub use image_cache::ImageDiskCache;
 pub use login::{LoginFlow, PollAction, POLL_INTERVAL_MS};
-pub use session::{AppShell, Screen};
-pub use player::{PlayerPrefs, PlayerState, RATE_OPTIONS};
 pub use models::{CoverItem, LoginState, UserSession};
+pub use playback::PlaybackSource;
+pub use player::{PlayerPrefs, PlayerState, RATE_OPTIONS};
+pub use session::{AppShell, Screen};
