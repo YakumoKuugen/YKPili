@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!--
-  iOS 应用权限声明(Entitlements)
-  当前为空,后续如需启用 iCloud / 推送 / App Groups 等能力时,在此文件中加入相应键值。
--->
-<plist version="1.0">
-<dict/>
-</plist>

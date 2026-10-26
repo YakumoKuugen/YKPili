@@ -5,7 +5,7 @@
 > 目标是做一个**自己完全掌控渲染管线**的播放器内核 —— 不依赖系统播放器控件，
 > 也不依赖 libmpv 的窗口系统。
 >
-> **验证工程**：`spike-mpv-wgpu/`（约 1300 行 Rust，可运行）
+> **验证工程**：`demos/spike-mpv-wgpu/`（约 1300 行 Rust，可运行）
 > **测试素材**：4K H.264，3840×2160 @ 25.000 fps，时长 1174.9s
 >
 > **配套文档**：libmpv 本身的跨平台可用性见 [`libmpv-跨平台调研.md`](./libmpv-跨平台调研.md)
@@ -565,7 +565,7 @@ objc2-core-video  = { version = "0.3.2", features = [
 ## 10. 怎么跑起来
 
 ```bash
-cd spike-mpv-wgpu
+cd demos/spike-mpv-wgpu
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 export CARGO_HOME="$(pwd)/.cargo-home"
 

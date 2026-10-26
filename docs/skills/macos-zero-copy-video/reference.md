@@ -399,7 +399,7 @@ let content = ns_window.contentRectForFrameRect(NSRect {
 | `error messaging the mach port for IMKCFRunLoopWakeUpReliable` | macOS 输入法在非标准事件循环下的噪音，无害 |
 | 磁盘占用暴涨 | `target/` 与 `.cargo-home/` 可安全删除（4K spike 约 1.9G；gpui 类 spike 可达 6G+） |
 
-复现命令（本工程 `spike-mpv-wgpu/`）：
+复现命令（本工程 `demos/spike-mpv-wgpu/`）：
 
 ```bash
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
