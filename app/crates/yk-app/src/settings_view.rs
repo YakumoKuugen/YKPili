@@ -1,6 +1,7 @@
-//! 设置浮层：从个人面板的「设置」进入，负责缓存查看与清理。
+//! 设置浮层：从个人面板的「设置」进入，负责播放行为开关与缓存查看 / 清理。
 //!
-//! 目前管理两类缓存：
+//! 目前管理：
+//! - 播放设置：播放结束是否自动关闭播放器（存 `settings.json`，立即生效）；
 //! - 图片磁盘缓存：`~/Library/Caches/YKPili/images`，存压缩图，清掉后滚动会重新下载；
 //! - 推荐流缓存：首页离线用的 `recommend.json`。
 //!
@@ -15,7 +16,7 @@ use yk_ui::theme::*;
 use crate::http::shared_image_cache;
 
 const SETTINGS_W: f32 = 560.0;
-const SETTINGS_H: f32 = 380.0;
+const SETTINGS_H: f32 = 460.0;
 const SETTINGS_OPEN_MS: u64 = 180;
 
 pub struct SettingsView {
@@ -23,6 +24,8 @@ pub struct SettingsView {
     disk_stats: (usize, u64),
     disk_max: u64,
     feed_stats: (u64, Option<u64>),
+    /// 播放结束自动关闭播放器（镜像 `settings.json`，渲染用）。
+    close_on_finish: bool,
     message: Option<(String, bool)>,
     close_handler: Option<Box<dyn Fn(&mut App)>>,
     focus_handle: FocusHandle,
@@ -37,6 +40,7 @@ impl SettingsView {
             disk_stats: cache.stats(),
             disk_max: cache.max_bytes(),
             feed_stats: FeedCache::new().stats(),
+            close_on_finish: yk_core::settings::current().close_player_on_finish,
             message: None,
             close_handler: None,
             focus_handle: cx.focus_handle().tab_stop(true),
@@ -92,6 +96,20 @@ impl SettingsView {
         self.refresh_stats();
         cx.notify();
     }
+
+    /// 切换「播放结束自动关闭播放器」。
+    ///
+    /// 立刻写盘并更新内存态，正在播放的播放器下一拍就能读到新值。
+    fn toggle_close_on_finish(&mut self, cx: &mut Context<Self>) {
+        let enabled = !yk_core::settings::current().close_player_on_finish;
+        yk_core::settings::update(|settings| settings.close_player_on_finish = enabled);
+        self.close_on_finish = enabled;
+        eprintln!(
+            "[settings] 播放结束自动关闭：{}",
+            if enabled { "开" } else { "关" }
+        );
+        cx.notify();
+    }
 }
 
 impl Render for SettingsView {
@@ -130,6 +148,9 @@ impl Render for SettingsView {
         });
         let clear_all = cx.listener(|view, _: &ClickEvent, _window, cx| {
             view.clear_all(cx);
+        });
+        let toggle_close_on_finish = cx.listener(|view, _: &ClickEvent, _window, cx| {
+            view.toggle_close_on_finish(cx);
         });
         let escape = cx.listener(|view, event: &KeyDownEvent, _window, cx| {
             if event.keystroke.key == "escape" {
@@ -183,7 +204,7 @@ impl Render for SettingsView {
                                 div()
                                     .text_size(px(FONT_SIZE_CAPTION))
                                     .text_color(s.text_tertiary)
-                                    .child("缓存管理"),
+                                    .child("播放与缓存"),
                             ),
                     )
                     .child(
@@ -205,6 +226,18 @@ impl Render for SettingsView {
                     ),
             )
             .child(div().mx(px(SPACE_6)).h(px(1.)).bg(s.border_subtle))
+            // 播放设置：播放结束之后是否自动收起播放浮窗
+            .child(setting_row(
+                &t,
+                "播放结束后自动关闭播放器",
+                "视频播完时自动收起播放浮窗；关闭后停在最后一帧，手动关闭。",
+                toggle_switch(
+                    &t,
+                    self.close_on_finish,
+                    "settings-close-on-finish",
+                    toggle_close_on_finish,
+                ),
+            ))
             // 图片缓存
             .child(cache_row(
                 &t,
@@ -324,6 +357,83 @@ fn size_text(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+/// 一行设置：左边标题 + 说明，右边放控件（开关 / 按钮）。
+fn setting_row(
+    t: &YkTheme,
+    title: &str,
+    desc: &str,
+    control: impl IntoElement,
+) -> impl IntoElement {
+    let s = &t.surfaces;
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(SPACE_4))
+        .px(px(SPACE_6))
+        .py(px(SPACE_4))
+        .border_b_1()
+        .border_color(s.border_subtle)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CONTROL))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(s.text_primary)
+                        .child(title.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .line_height(px(15.))
+                        .text_color(s.text_tertiary)
+                        .child(desc.to_string()),
+                ),
+        )
+        .child(control)
+}
+
+/// 自绘开关：42×24 轨道 + 18 圆点，开 = 品牌蓝、点靠右；关 = 灰底、点靠左。
+///
+/// 项目里还没有通用 Switch 组件，这里按同一套表面令牌画一个；
+/// 点击热区就是整条轨道，比只用圆点好点。
+fn toggle_switch(
+    t: &YkTheme,
+    on: bool,
+    id: &'static str,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let p = &t.palette;
+    let s = &t.surfaces;
+    div()
+        .id(id)
+        .w(px(42.))
+        .h(px(24.))
+        .flex()
+        .items_center()
+        .when(on, |el| el.justify_end().bg(p.theme_primary))
+        .when(!on, |el| el.justify_start().bg(s.switch_bg))
+        .rounded_full()
+        .p(px(3.))
+        .cursor_pointer()
+        .hover(|style| style.opacity(0.88))
+        .child(
+            div()
+                .w(px(18.))
+                .h(px(18.))
+                .rounded_full()
+                .bg(rgb(0xFFFFFF))
+                .shadow(t.shadows.shadow_1.clone()),
+        )
+        .on_click(on_click)
 }
 
 fn cache_row(

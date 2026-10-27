@@ -25,6 +25,7 @@ pub mod player;
 pub mod resume;
 pub mod search;
 pub mod session;
+pub mod settings;
 
 pub use cache::CacheManager;
 pub use danmaku::{Danmaku, DanmakuMode, DanmakuSet, LaneAllocator};
@@ -49,3 +50,4 @@ pub use search::{
     SearchSort, SearchTab, SearchUser, SearchVideo, SuggestItem,
 };
 pub use session::{AppShell, Screen};
+pub use settings::AppSettings;

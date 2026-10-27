@@ -46,6 +46,11 @@ pub struct FrameWorker {
     rx: Receiver<SendBuffer>,
     commands: mpsc::Sender<WorkerCommand>,
     stop: Arc<AtomicBool>,
+    /// 播放是否已到结尾（mpv `eof-reached`，或 time-pos 贴近 duration）。
+    ///
+    /// 不塞进帧数据里：播到结尾后解码器可能不再产出新帧，
+    /// 只靠「收到帧」的路径会漏掉结束信号。
+    eof: Arc<AtomicBool>,
     pub video: String,
 }
 
@@ -74,6 +79,8 @@ impl FrameWorker {
         let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_in_thread = stop.clone();
+        let eof = Arc::new(AtomicBool::new(false));
+        let eof_in_thread = eof.clone();
         let path = video.clone();
 
         std::thread::Builder::new()
@@ -123,6 +130,14 @@ impl FrameWorker {
                     }
                     player.drain_events();
                     let t = player.get_property_double("time-pos").unwrap_or(0.0);
+                    // 结束信号每轮都算：播到结尾后可能没有新帧，
+                    // 不能等 `latest()` 被取走才知道放完了。
+                    let eof_reached = player.get_property_flag("eof-reached").unwrap_or(false);
+                    let duration = player.get_property_double("duration").unwrap_or(0.0);
+                    eof_in_thread.store(
+                        yk_core::player::is_playback_finished(t, duration, eof_reached),
+                        Ordering::Relaxed,
+                    );
                     match player.render_frame() {
                         Ok(rgba) => {
                             if frames_sent == 0 {
@@ -171,6 +186,7 @@ impl FrameWorker {
             rx,
             commands: command_tx,
             stop,
+            eof,
             video,
         })
     }
@@ -183,6 +199,11 @@ impl FrameWorker {
     /// 跳转到指定秒数；进度条拖动走这里，UI 线程不直接碰 mpv。
     pub fn seek(&self, position_secs: f64) {
         let _ = self.commands.send(WorkerCommand::Seek(position_secs));
+    }
+
+    /// 播放是否已到结尾（UI 侧据此自动关闭播放器）。
+    pub fn finished(&self) -> bool {
+        self.eof.load(Ordering::Relaxed)
     }
 
     /// 取最新一帧（丢弃中间积压的）。没新帧时返回 `None`。

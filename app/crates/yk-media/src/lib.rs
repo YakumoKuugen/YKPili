@@ -447,6 +447,30 @@ impl MpvPlayer {
         }
     }
 
+    /// 读一个 flag 属性（`eof-reached` 这类布尔值）。`MPV_FORMAT_FLAG = 3`。
+    ///
+    /// 属性不存在 / 类型不匹配时返回 `None`，调用方据此决定是否退回别的判据。
+    pub fn get_property_flag(&self, name: &str) -> Option<bool> {
+        unsafe {
+            let get: libloading::Symbol<
+                unsafe extern "C" fn(*mut MpvHandle, *const c_char, c_int, *mut c_void) -> c_int,
+            > = self._lib.get(b"mpv_get_property").ok()?;
+            let c_name = CString::new(name).ok()?;
+            let mut out: c_int = 0;
+            let rc = get(
+                self.ctx,
+                c_name.as_ptr(),
+                MPV_FORMAT_FLAG,
+                &mut out as *mut c_int as *mut c_void,
+            );
+            if rc < 0 {
+                None
+            } else {
+                Some(out != 0)
+            }
+        }
+    }
+
     /// 排空 mpv 的事件队列。
     ///
     /// **必须定期调用**：mpv 的客户端 API 是「拉模式」，不取事件它会认为

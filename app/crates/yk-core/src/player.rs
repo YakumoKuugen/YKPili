@@ -249,6 +249,32 @@ impl PlayerPrefs {
     }
 }
 
+/// 播放是否已经到达结尾。
+///
+/// 两个信号取「或」：
+/// - `eof_reached`：mpv 的 `eof-reached`，最准确；
+/// - `position_secs >= duration_secs - PLAYBACK_END_TOLERANCE_SECS`：
+///   `eof-reached` 读不到（老版本 / 文件被提前卸载）时的兜底。
+///
+/// 时长未知（0）且没有 eof 时**绝不**判定结束 —— 否则刚起播就会被当成播完。
+pub fn is_playback_finished(position_secs: f64, duration_secs: f64, eof_reached: bool) -> bool {
+    if eof_reached {
+        return true;
+    }
+    if !position_secs.is_finite() || !duration_secs.is_finite() {
+        return false;
+    }
+    duration_secs > 0.0
+        && position_secs > 0.0
+        && position_secs >= duration_secs - PLAYBACK_END_TOLERANCE_SECS
+}
+
+/// 距结尾小于这个秒数视为「已播完」。
+///
+/// 0.25s 是为了吸收 mpv 的 `time-pos` 与 `duration` 在最后一帧的抖动，
+/// 再大就会明显提前掐掉片尾。
+pub const PLAYBACK_END_TOLERANCE_SECS: f64 = 0.25;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -399,5 +425,28 @@ mod tests {
     #[test]
     fn hud_duration_matches_legacy() {
         assert_eq!(HUD_DURATION_MS, 1100, "旧实现是 1100ms");
+    }
+
+    #[test]
+    fn playback_finished_by_eof() {
+        assert!(is_playback_finished(0.0, 0.0, true), "eof 单独就够");
+    }
+
+    #[test]
+    fn playback_finished_by_position() {
+        // 距结尾 0.25s 内算播完
+        assert!(is_playback_finished(100.0, 100.0, false));
+        assert!(is_playback_finished(99.8, 100.0, false));
+        // 还差得多：不能提前收
+        assert!(!is_playback_finished(99.0, 100.0, false));
+        assert!(!is_playback_finished(0.0, 100.0, false));
+    }
+
+    #[test]
+    fn unknown_duration_never_finishes_without_eof() {
+        assert!(!is_playback_finished(30.0, 0.0, false));
+        assert!(!is_playback_finished(0.0, 0.0, false));
+        assert!(!is_playback_finished(f64::NAN, 100.0, false));
+        assert!(!is_playback_finished(100.0, f64::INFINITY, false));
     }
 }

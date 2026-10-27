@@ -279,6 +279,11 @@ pub struct PlayerView {
     closing: bool,
     /// 关闭动画代际：旧定时器不能结束新一次关闭。
     closing_generation: u64,
+    /// 播放结束是否已经处理过。
+    ///
+    /// 播放循环每 16ms 跑一次，而结束信号会一直为真；没有这道闸门，
+    /// 关闭请求会被重复提交。换源时复位。
+    finish_handled: bool,
     /// 关闭回调：`false` = 开始缩回，`true` = 缩回结束可移除实体。
     /// AppRoot 在开始时先恢复分类条/网格，让卡片回到封面快照的坐标。
     close_handler: Option<Box<dyn Fn(&mut App, bool)>>,
@@ -412,6 +417,7 @@ impl PlayerView {
             entrance_generation: 0,
             closing: false,
             closing_generation: 0,
+            finish_handled: false,
             close_handler: None,
             resume: yk_core::resume::ResumeStore::load_default(),
             resume_seed: None,
@@ -500,6 +506,7 @@ impl PlayerView {
         self.needs_focus = true;
         self.escape_hint = false;
         self.escape_hint_generation = self.escape_hint_generation.wrapping_add(1);
+        self.finish_handled = false;
         // 续播上下文重置：起播位置要等取流成功（拿到时长）才能定。
         self.resume_seed = seed;
         self.start_position = 0.0;
@@ -1364,6 +1371,34 @@ impl PlayerView {
         .detach();
     }
 
+    /// 播放到结尾：按设置决定是否自动收起播放器。
+    ///
+    /// 关闭走的是和 Esc / 点浮窗外侧同一条 [`Self::begin_close`] 路径，
+    /// 所以退出动画、历史上报、续播落盘都不会漏。
+    /// 设置项关闭时只停在最后一帧并叫出控制栏，交给用户自己关。
+    fn on_playback_finished(&mut self, cx: &mut Context<Self>) {
+        if self.finish_handled {
+            return;
+        }
+        self.finish_handled = true;
+        self.state.playing = false;
+        // 位置对齐到结尾：续播记录据此判定「已看完」并清掉，下次从头播。
+        if self.state.duration_secs > 0.0 {
+            self.play_time = self.state.duration_secs;
+            self.state.position_secs = self.play_time;
+        }
+        self.save_resume_position();
+        if !yk_core::settings::current().close_player_on_finish {
+            eprintln!("[player] 播放结束：自动关闭已在设置里关闭，保留浮窗");
+            self.controls_visible = true;
+            self.last_activity = std::time::Instant::now();
+            cx.notify();
+            return;
+        }
+        eprintln!("[player] 播放结束：自动关闭播放器");
+        self.begin_close(cx);
+    }
+
     fn panel_width(&self) -> f32 {
         if self.expanded {
             INFO_PANEL_EXPANDED
@@ -1755,7 +1790,11 @@ impl Render for PlayerView {
                     // 渲染线程照常出帧，UI 也只是轻量地更新一下。
                     let alive = this.update(cx, |view, cx| {
                         let mut got = false;
+                        let mut finished = false;
                         if let Some(w) = view.worker.as_ref() {
+                            // 结束信号独立于「有没有新帧」读取：
+                            // 播到结尾后渲染线程可能不再产出帧。
+                            finished = w.finished();
                             if let Some((buf, t)) = w.latest() {
                                 view.current = Some(buf);
                                 // 拖动 / seek 稳定期内不要让旧帧的 time-pos 把滑块顶回去。
@@ -1774,6 +1813,10 @@ impl Render for PlayerView {
                                 }
                                 got = true;
                             }
+                        }
+                        // 播完自动收起：开关关掉时只停在最后一帧，等用户自己关。
+                        if finished && !view.finish_handled && !view.closing && !view.scrubbing {
+                            view.on_playback_finished(cx);
                         }
                         if got {
                             received += 1;
