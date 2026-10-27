@@ -29,7 +29,7 @@ use yk_ui::theme::*;
 use crate::{player, AppRoot, ImageResidency, DOCK_RESERVED};
 
 /// 右侧日期栏宽度。参考稿是 320，这里取 300：1280 窗口下左栏还能放下 3 列。
-const RAIL_W: f32 = 300.0;
+pub(crate) const RAIL_W: f32 = 300.0;
 /// 左栏卡片间距。与首页封面网格同口径（208 单元格 + 16 间距）。
 const GRID_GAP: f32 = SPACE_4;
 /// 行间距。

@@ -84,6 +84,12 @@ pub struct AppRoot {
     initial_load_started: bool,
     /// PlayerView 请求关闭：下一次 render 再移除实体，避免在它自己的回调里析构。
     close_player_requested: bool,
+    /// 播放器入场完成后，把被它完全遮住的内容区停绘。
+    ///
+    /// 不移除布局（保滚动位置/网格几何），只跳过首页网格与其中图片的绘制，
+    /// 避免视频每帧重绘时连带为背后不可见的页面付 Layout / Paint 成本。
+    /// 打开时先 false（入场动画需要真实页面背景），关闭缩回开始时立刻恢复 false。
+    player_page_hidden: bool,
     /// 当前登录会话（启动时从 session.json 恢复）。
     session: Option<yk_core::models::UserSession>,
     /// 登录卡片；None = 未打开。
@@ -141,6 +147,16 @@ pub struct AppRoot {
     last_refresh_at: Option<std::time::Instant>,
     /// 内容区滚动句柄：首页虚拟列表用它，页面容器复用它的 base handle
     content_scroll: VirtualListScrollHandle,
+    /// 离散滚轮平滑滚动：当前目标区域（1 = 内容区，2 = 历史左栏）。
+    smooth_scroll_key: Option<u8>,
+    /// 平滑滚动要驱动的句柄。
+    smooth_scroll_handle: Option<ScrollHandle>,
+    /// 平滑滚动的目标偏移（负数向下）。
+    smooth_scroll_target: f32,
+    /// 平滑滚动代际：新目标/取消时递增，旧动画循环自行退出。
+    smooth_scroll_generation: u64,
+    /// 是否已有平滑滚动循环在跑。
+    smooth_scroll_animating: bool,
     /// 窗口坐标 → 页面坐标；点击封面时在播放浮窗展开之前快照。
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// 当前是否离线（启动时拉取失败 / 显式 YK_OFFLINE）
@@ -396,9 +412,30 @@ impl AppRoot {
         // 顶栏下拉不能横跨在播放浮窗之上（12.1 行为红线）。
         self.search.open = false;
         self.reset_card_hover();
+        self.cancel_smooth_scroll();
         let theme = self.theme.clone();
         self.playing = Some(cx.new(|cx| player::PlayerView::new(theme, cx)));
         self.install_player_close_handler(cx);
+        // 入场动画（280ms）结束、播放器完全盖住内容区后，把背后的页面停绘。
+        // 入场期间仍要真实网格做展开背景，所以延迟到动画结束后再置位。
+        self.player_page_hidden = false;
+        let player_id = self.playing.as_ref().map(|player| player.entity_id());
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(PLAYER_PAGE_HIDE_DELAY_MS))
+                .await;
+            let _ = this.update(cx, |root, cx| {
+                // 只对「发起这次延迟的那个播放器实例」生效：快速开关/换实例时，
+                // 旧定时器不能把新播放器入场期间的页面提前停绘。
+                if root.playing.as_ref().map(|player| player.entity_id()) == player_id
+                    && !root.close_player_requested
+                {
+                    root.player_page_hidden = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// 打开登录卡片（扫码 / 密码 / 验证码）。
@@ -527,6 +564,7 @@ impl AppRoot {
         self.settings = None;
         self.playing = None;
         self.close_player_requested = false;
+        self.player_page_hidden = false;
         self.dynamic_detail = None;
         self.dynamic_detail_close_requested = false;
         self.reset_following();
@@ -912,10 +950,15 @@ impl AppRoot {
         let app = cx.entity().downgrade();
         let _ = player.update(cx, |view, _| {
             view.set_close_handler(move |cx, finished| {
-                if !finished {
-                    return;
-                }
                 let _ = app.update(cx, |root, cx| {
+                    if !finished {
+                        // 关闭缩回开始：先把停绘的页面放回来，缩回动画
+                        // 需要真实网格/封面作为背景。
+                        root.player_page_hidden = false;
+                        cx.notify();
+                        return;
+                    }
+                    root.player_page_hidden = false;
                     root.close_player_requested = true;
                     cx.notify();
                 });
@@ -1293,9 +1336,141 @@ impl AppRoot {
     }
 
     /// 切页 / 刷新后把内容区拉回顶部。
-    fn scroll_content_to_top(&self) {
+    fn scroll_content_to_top(&mut self) {
+        self.cancel_smooth_scroll();
         self.content_scroll.scroll_to_item(0, ScrollStrategy::Top);
         self.content_scroll.base_handle().scroll_to_top_of_item(0);
+    }
+
+    /// 取消离散滚轮的平滑滚动（页面切换 / 打开播放器 / 触控板事件时）。
+    fn cancel_smooth_scroll(&mut self) {
+        self.smooth_scroll_generation = self.smooth_scroll_generation.wrapping_add(1);
+        self.smooth_scroll_animating = false;
+        self.smooth_scroll_key = None;
+        self.smooth_scroll_handle = None;
+    }
+
+    /// 当前指针位置该驱动哪个滚动句柄。
+    ///
+    /// 首页 / 关注 / 搜索等页面共用外壳 `content_scroll`；历史页左栏用自己的
+    /// `history.scroll`，右栏是日期导航、不滚左栏。消息页有自己的虚拟列表，
+    /// 浮层打开时也不接管。
+    fn smooth_scroll_target_for(
+        &self,
+        position: Point<Pixels>,
+        window: &Window,
+    ) -> Option<(u8, ScrollHandle)> {
+        if self.playing.is_some()
+            || self.search.open
+            || self.account.is_some()
+            || self.settings.is_some()
+            || self.login.is_some()
+            || self.dynamic_detail.is_some()
+        {
+            return None;
+        }
+        let viewport = window.viewport_size();
+        if position.y <= px(TOP_BAR_HEIGHT)
+            || position.y >= viewport.height - px(DOCK_RESERVED)
+        {
+            return None;
+        }
+        match self.page {
+            // 只接管明确需要的三个滚动面板；搜索/消息等页面内部还有
+            // 自己的滚动区，继续交给原生处理，避免误抢。
+            None | Some(pages::PageKind::Following) => {
+                Some((1, self.content_scroll.base_handle().clone()))
+            }
+            Some(pages::PageKind::History) => {
+                // 右栏宽 RAIL_W，滚轮停在日期栏上时不滚左侧网格。
+                let left_limit = viewport.width - px(history_view::RAIL_W + SPACE_5 + SPACE_6);
+                if position.x < left_limit {
+                    Some((2, self.history.scroll.base_handle().clone()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// 捕获阶段处理离散滚轮：不交给 GPUI 的「一格一跳」，而是写入目标偏移，
+    /// 由 8ms 动画循环逐帧推进。
+    fn handle_smooth_scroll(
+        &mut self,
+        event: &ScrollWheelEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.delta.precise() {
+            // 触控板 / 高精度滚轮是像素级增量，交给原生滚动更跟手；
+            // 若平滑动画正在跑，先停掉，避免两边抢 offset。
+            self.cancel_smooth_scroll();
+            return;
+        }
+        let delta = event.delta.pixel_delta(window.line_height()).y.as_f32();
+        if delta.abs() < 0.01 {
+            return;
+        }
+        let Some((key, handle)) = self.smooth_scroll_target_for(event.position, window) else {
+            return;
+        };
+        let same = self.smooth_scroll_key == Some(key);
+        let base = if same && self.smooth_scroll_animating {
+            self.smooth_scroll_target
+        } else {
+            handle.offset().y.as_f32()
+        };
+        let max = handle.max_offset().y.as_f32().max(0.0);
+        let target = (base + delta).clamp(-max, 0.0);
+        if !same {
+            self.smooth_scroll_generation = self.smooth_scroll_generation.wrapping_add(1);
+            self.smooth_scroll_animating = false;
+            self.smooth_scroll_key = Some(key);
+        }
+        self.smooth_scroll_handle = Some(handle);
+        self.smooth_scroll_target = target;
+        // 阻止 GPUI 内置的滚轮 handler 直接把 offset 跳过去。
+        cx.stop_propagation();
+        if !self.smooth_scroll_animating {
+            self.start_smooth_scroll(cx);
+        }
+    }
+
+    /// 8ms 一步，把 offset 以指数缓动推向目标；到点后停。
+    fn start_smooth_scroll(&mut self, cx: &mut Context<Self>) {
+        self.smooth_scroll_animating = true;
+        let generation = self.smooth_scroll_generation;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(8))
+                .await;
+            let keep = this.update(cx, |view, cx| {
+                if view.smooth_scroll_generation != generation {
+                    return false;
+                }
+                let Some(handle) = view.smooth_scroll_handle.clone() else {
+                    view.smooth_scroll_animating = false;
+                    return false;
+                };
+                let current = handle.offset().y.as_f32();
+                let target = view.smooth_scroll_target;
+                let diff = target - current;
+                if diff.abs() < 0.5 {
+                    handle.set_offset(point(px(0.), px(target)));
+                    view.smooth_scroll_animating = false;
+                    cx.notify();
+                    return false;
+                }
+                handle.set_offset(point(px(0.), px(current + diff * 0.22)));
+                cx.notify();
+                true
+            });
+            if !matches!(keep, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
     }
 
     /// 滚到底部时按当前页面追加数据。
@@ -1325,6 +1500,7 @@ impl AppRoot {
             feed_loading: false,
             initial_load_started: false,
             close_player_requested: false,
+            player_page_hidden: false,
             session: None,
             login: None,
             account: None,
@@ -1357,6 +1533,11 @@ impl AppRoot {
             pull_refresh_triggered: false,
             last_refresh_at: None,
             content_scroll: VirtualListScrollHandle::new(),
+            smooth_scroll_key: None,
+            smooth_scroll_handle: None,
+            smooth_scroll_target: 0.0,
+            smooth_scroll_generation: 0,
+            smooth_scroll_animating: false,
             layout_bounds: Rc::new(Cell::new(None)),
             offline: false,
             offline_updated_at: None,
@@ -1375,6 +1556,7 @@ impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.close_player_requested {
             self.close_player_requested = false;
+            self.player_page_hidden = false;
             self.playing = None;
             self.hovered_card = None;
             self.leaving_card = None;
@@ -1539,6 +1721,7 @@ impl Render for AppRoot {
         let t = &self.theme;
 
         let layout_bounds = self.layout_bounds.clone();
+        let weak_root = cx.entity().downgrade();
         div()
             .relative()
             .size_full()
@@ -1565,7 +1748,19 @@ impl Render for AppRoot {
                     move |bounds, _window, _cx| {
                         layout_bounds.set(Some(bounds));
                     },
-                    |_, _, _, _| {},
+                    move |_, _, window, _cx| {
+                        let weak = weak_root.clone();
+                        window.on_mouse_event(
+                            move |event: &ScrollWheelEvent, phase, window, cx| {
+                                if phase != DispatchPhase::Capture {
+                                    return;
+                                }
+                                let _ = weak.update(cx, |root, cx| {
+                                    root.handle_smooth_scroll(event, window, cx)
+                                });
+                            },
+                        );
+                    },
                 )
                 .absolute()
                 .inset_0(),
@@ -1616,6 +1811,7 @@ impl Render for AppRoot {
                             t,
                             self.feed.items(),
                             self.feed_loading,
+                            self.player_page_hidden && self.playing.is_some(),
                             self.page,
                             self.page_state,
                             self.session.is_some(),
@@ -2060,6 +2256,7 @@ fn content_area(
     t: &YkTheme,
     items: &[CoverItem],
     loading: bool,
+    behind_player: bool,
     page: Option<pages::PageKind>,
     state: pages::PageState,
     signed_in: bool,
@@ -2079,6 +2276,14 @@ fn content_area(
     // Dock 现在是底部横向浮层：横向不再占位，内容区左右各留 24；
     // 底部留出 `DOCK_RESERVED`，否则最后一行封面会被 Dock 压住 ——
     // 浮层「在上」不等于内容可以钻到它背后。
+    if behind_player {
+        return div()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .bg(t.surfaces.bg_base)
+            .into_any_element();
+    }
 
     // 消息页自带虚拟列表与输入框，滚动由页内自己管，不接外壳的 content-scroll。
     if page == Some(pages::PageKind::Messages) {
@@ -2980,6 +3185,10 @@ const DOCK_BOTTOM_MARGIN: f32 = 20.0;
 const DOCK_ITEM_HEIGHT: f32 = 40.0;
 /// Dock 本体高 52（40 + 6×2）+ 下边距 20 + 呼吸 24。
 const DOCK_RESERVED: f32 = 96.0;
+
+/// 播放器入场动画结束后，再延迟一点停绘背后页面。
+/// 入场动画 280ms，留 40ms 余量，避免最后一帧还在展开时页面先消失。
+const PLAYER_PAGE_HIDE_DELAY_MS: u64 = 320;
 
 /// 首页网格列数：可用宽度能放下几个「卡片 + 间距」槽位，至少 1 列。
 ///
