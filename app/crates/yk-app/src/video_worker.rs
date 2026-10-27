@@ -38,6 +38,7 @@ unsafe impl Send for SendBuffer {}
 
 enum WorkerCommand {
     Pause(bool),
+    Seek(f64),
 }
 
 /// 渲染线程句柄。
@@ -113,6 +114,11 @@ impl FrameWorker {
                                     eprintln!("[video] set pause={paused} 失败：{e}");
                                 }
                             }
+                            WorkerCommand::Seek(secs) => {
+                                if let Err(e) = player.seek(secs) {
+                                    eprintln!("[video] seek {secs:.1}s 失败：{e}");
+                                }
+                            }
                         }
                     }
                     player.drain_events();
@@ -172,6 +178,11 @@ impl FrameWorker {
     /// 暂停 / 继续；命令投递给渲染线程，UI 线程不直接碰 mpv。
     pub fn set_paused(&self, paused: bool) {
         let _ = self.commands.send(WorkerCommand::Pause(paused));
+    }
+
+    /// 跳转到指定秒数；进度条拖动走这里，UI 线程不直接碰 mpv。
+    pub fn seek(&self, position_secs: f64) {
+        let _ = self.commands.send(WorkerCommand::Seek(position_secs));
     }
 
     /// 取最新一帧（丢弃中间积压的）。没新帧时返回 `None`。

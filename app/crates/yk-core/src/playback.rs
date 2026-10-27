@@ -25,6 +25,10 @@ pub struct PlaybackSource {
     pub quality: String,
     /// 时长（秒）。
     pub duration_secs: u64,
+    /// 视频像素宽（DASH 响应；0 = 未知）。
+    pub video_width: u32,
+    /// 视频像素高（DASH 响应；0 = 未知）。
+    pub video_height: u32,
     /// 视频 aid；观看历史心跳上报 / 评论 oid 用。
     pub aid: i64,
     /// 视频 bvid；观看历史心跳上报用。
@@ -83,6 +87,8 @@ fn meta_from_info(info: &VideoInfoData, duration_secs: u64, quality: String) -> 
         category: info.tname.trim().to_string(),
         quality,
         duration_secs,
+        video_width: 0,
+        video_height: 0,
         aid: info.aid,
         bvid: if info.bvid.is_empty() {
             String::new()
@@ -174,6 +180,8 @@ pub fn select_playback(info: &VideoInfoData, play: &PlayUrlData) -> Result<Playb
                 .max_by_key(|a| a.id);
             let mut source = meta_from_info(info, duration_secs, quality_label(video.height));
             source.video_url = video.play_url().to_string();
+            source.video_width = video.width.max(0) as u32;
+            source.video_height = video.height.max(0) as u32;
             source.audio_url = audio.map(|a| a.play_url().to_string());
             return Ok(source);
         }
@@ -243,6 +251,8 @@ mod tests {
         assert_eq!(src.video_url, "v80-avc");
         assert_eq!(src.audio_url.as_deref(), Some("a80"));
         assert_eq!(src.duration_secs, 107);
+        assert_eq!(src.video_width, 1920);
+        assert_eq!(src.video_height, 1080);
         assert_eq!(src.title, "测试视频");
     }
 

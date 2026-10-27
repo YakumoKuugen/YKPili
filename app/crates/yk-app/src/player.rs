@@ -27,6 +27,9 @@
 use gpui::assets::IconName;
 use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::component::Icon;
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gpui::prelude::*;
 use gpui::{FocusHandle, InteractiveElement, StatefulInteractiveElement, *};
 use yk_core::danmaku::{Danmaku, DanmakuSet, LaneAllocator};
@@ -107,6 +110,9 @@ const CTRL_H: f32 = PLAYER_CONTROL_BAR_HEIGHT; // 88
 const DANMAKU_INPUT_H: f32 = 38.0;
 const INFO_PANEL_EXPANDED: f32 = PLAYER_INFO_PANEL_WIDTH; // 400
 const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
+/// 面板整块滚动超过这个距离后，右下角才浮出「回到顶部」。
+/// 留 24px 是为了不因滚轮抖动 / 触控板回弹闪一下按钮。
+const PANEL_BACK_TO_TOP_THRESHOLD: f32 = 24.0;
 /// 播放层右缘的 hover 热区宽度（覆盖在视频右侧、控制栏上方）。
 /// 侧栏常驻右侧 200；播放层/控制栏宽度都是「窗口 − 200」，不再额外缩 88。
 /// 88 只是控制栏高度 / 这条热区的宽度，不是控制栏与侧栏之间的空隙。
@@ -244,6 +250,17 @@ pub struct PlayerView {
     danmaku_visible: bool,
     /// 关注按钮的本地态（本轮不写服务端，只做视觉反馈）。
     followed: bool,
+    /// 信息面板的唯一滚动区：顶部信息与评论一起滚。
+    /// 右下角「回到顶部」按钮直接读它的 offset，滚过阈值才出现。
+    panel_scroll: ScrollHandle,
+    /// 进度条拖动中：指针移出轨道 / 移出控制条后仍继续跟随。
+    scrubbing: bool,
+    /// 进度条轨道的实际 bounds，鼠标 x 换算 0..1 用。
+    progress_track_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// 上次向 mpv 发 seek 的时间：拖动中约 50ms 一次，松开时补最后一刀。
+    last_scrub_seek: Option<std::time::Instant>,
+    /// seek 发出后的短暂稳定期：旧帧的 time-pos 不能把刚拖到的位置顶回去。
+    seek_settle_until: Option<std::time::Instant>,
     /// 面板 hover 延迟收起的代际：鼠标掠过边界不会闪收。
     panel_collapse_generation: u64,
     /// 面板宽度动画代际：每次展开 / 收起换一个 id，200ms EaseStandard 重新起跑。
@@ -363,6 +380,11 @@ impl PlayerView {
             danmaku_visible: true,
             followed: false,
             panel_collapse_generation: 0,
+            panel_scroll: ScrollHandle::new(),
+            scrubbing: false,
+            progress_track_bounds: Rc::new(Cell::new(None)),
+            last_scrub_seek: None,
+            seek_settle_until: None,
             panel_generation: 0,
             panel_hover_grace_until: None,
             last_pointer: point(px(0.), px(0.)),
@@ -440,8 +462,13 @@ impl PlayerView {
         self.resume_key = None;
         self.last_resume_save = 0.0;
         // 信息面板数据跟着换源重置：旧视频的标签/评论不能落到新视频上。
+        // 滚动位置也回到顶部，否则新视频一打开就停在旧视频的评论高度。
         self.tags.clear();
         self.comments = CommentState::Idle;
+        self.panel_scroll.set_offset(point(px(0.), px(0.)));
+        self.scrubbing = false;
+        self.last_scrub_seek = None;
+        self.seek_settle_until = None;
         self.meta_generation = self.meta_generation.wrapping_add(1);
         self.followed = false;
         // 本地没有记录、也没有历史页带来的进度时，才去服务端历史里找一次
@@ -623,15 +650,28 @@ impl PlayerView {
         .detach();
     }
 
-    /// 面板 hover：进入立刻展开；离开延迟 220ms 再收，避免掠边界闪收。
-    fn set_panel_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
+    /// 面板展开 / 收起。
+    ///
+    /// 展开立刻生效；收起延迟 220ms，并先确认指针真的不在面板区域。
+    /// 收起判断不信任 `on_hover(false)`：播放中每帧重绘会让它在指针没动时闪 false。
+    fn set_panel_hover(&mut self, hovered: bool, window: &Window, cx: &mut Context<Self>) {
         if hovered {
             self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
+            self.panel_hover_grace_until = None;
             if !self.expanded {
                 self.expanded = true;
                 self.panel_generation = self.panel_generation.wrapping_add(1);
                 cx.notify();
             }
+            return;
+        }
+        // 已经收起就没什么可收的，避免鼠标在视频区移动时反复起定时器。
+        if !self.expanded {
+            return;
+        }
+        // 播放中每帧重绘都会重算 hover；指针实际还在面板里时，
+        // 这次 false 是布局闪动，不是用户移出，直接忽略。
+        if self.pointer_in_panel_zone(window.mouse_position(), window) {
             return;
         }
         self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
@@ -641,18 +681,180 @@ impl PlayerView {
                 .timer(std::time::Duration::from_millis(220))
                 .await;
             let _ = this.update(cx, |view, cx| {
-                if view.panel_collapse_generation != generation || !view.expanded {
+                if view.panel_collapse_generation != generation {
                     return;
                 }
-                view.expanded = false;
-                view.panel_generation = view.panel_generation.wrapping_add(1);
-                // 鼠标可能还停在面板左缘/热区：400ms 内不响应，避免反复弹出。
-                view.panel_hover_grace_until =
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
-                cx.notify();
+                view.collapse_panel_now(cx);
             });
         })
         .detach();
+    }
+
+    /// 立即收起面板（鼠标离开窗口 / 收起定时器到点）。
+    fn collapse_panel_now(&mut self, cx: &mut Context<Self>) {
+        if !self.expanded {
+            return;
+        }
+        self.expanded = false;
+        self.panel_generation = self.panel_generation.wrapping_add(1);
+        // 鼠标可能还停在面板左缘/热区：400ms 内不响应，避免反复弹出。
+        self.panel_hover_grace_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
+        cx.notify();
+    }
+
+    /// 按下进度条：记录拖动开始，并立刻跳到按下位置。
+    fn begin_scrub(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        if self.state.duration_secs <= 0.0 {
+            return;
+        }
+        self.note_activity(window, cx);
+        self.scrubbing = true;
+        self.seek_scrub_to(position, true, cx);
+    }
+
+    /// 拖动中：指针离开轨道也继续按轨道宽度换算。
+    fn update_scrub(&mut self, position: Point<Pixels>, _window: &Window, cx: &mut Context<Self>) {
+        if !self.scrubbing {
+            return;
+        }
+        self.seek_scrub_to(position, false, cx);
+    }
+
+    /// 松开 / 指针离开窗口：结束拖动，并把最终位置补发给 mpv。
+    fn end_scrub(&mut self, cx: &mut Context<Self>) {
+        if !self.scrubbing {
+            return;
+        }
+        self.scrubbing = false;
+        if let Some(worker) = self.worker.as_ref() {
+            worker.seek(self.state.position_secs);
+        }
+        self.last_scrub_seek = None;
+        self.seek_settle_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
+        cx.notify();
+    }
+
+    fn seek_scrub_to(&mut self, position: Point<Pixels>, force: bool, cx: &mut Context<Self>) {
+        let Some(bounds) = self.progress_track_bounds.get() else {
+            return;
+        };
+        let width = bounds.size.width.as_f32();
+        if width <= 0.0 {
+            return;
+        }
+        let fraction =
+            ((position.x.as_f32() - bounds.origin.x.as_f32()) / width).clamp(0.0, 1.0) as f64;
+        self.state.seek_to_fraction(fraction);
+        self.play_time = self.state.position_secs;
+        // 拖动中约 50ms 才向 mpv 发一次 seek；松开时 force 补最后一刀。
+        let due = force
+            || self
+                .last_scrub_seek
+                .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(50));
+        if due {
+            if let Some(worker) = self.worker.as_ref() {
+                worker.seek(self.state.position_secs);
+            }
+            self.last_scrub_seek = Some(std::time::Instant::now());
+            self.seek_settle_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
+        }
+        cx.notify();
+    }
+
+    /// 用真实指针坐标决定面板展开 / 收起。
+    ///
+    /// `on_hover` 在播放中会因每帧重绘而抖动；鼠标移动是可靠的，
+    /// 所以展开状态以这条路径为准，hover 回调只做兜底。
+    fn update_panel_hover_from_pointer(
+        &mut self,
+        position: Point<Pixels>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pointer_in_panel_zone(position, window) {
+            // 刚收起 / 刚点掉面板时给 400ms 冷却，鼠标在按钮附近微动不会立刻弹回。
+            if self
+                .panel_hover_grace_until
+                .is_some_and(|until| until > std::time::Instant::now())
+            {
+                return;
+            }
+            self.set_panel_hover(true, window, cx);
+        } else {
+            self.set_panel_hover(false, window, cx);
+        }
+    }
+
+    /// 用一个透明 canvas 注册全局鼠标移动监听。
+    ///
+    /// `on_mouse_move` 只有在元素的 hover 命中为真时才会回调；播放中每帧重绘
+    /// 会让面板 / 播放器容器的 hover 偶发为 false，漏掉「鼠标真的移出面板」。
+    /// 这里绕过 hover 命中，直接拿鼠标坐标驱动面板收起。
+    fn pointer_tracker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let weak = cx.entity().downgrade();
+        canvas(
+            |_, _, _| (),
+            move |_, _, window, cx| {
+                let weak_move = weak.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = weak_move.update(cx, |view, cx| {
+                        if view.pointer_in_player(event.position, window) {
+                            view.note_activity(window, cx);
+                        }
+                        view.update_scrub(event.position, window, cx);
+                        view.update_panel_hover_from_pointer(event.position, window, cx);
+                    });
+                });
+                let weak_down = weak.clone();
+                window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Bubble || event.button != MouseButton::Left {
+                        return;
+                    }
+                    let _ = weak_down.update(cx, |view, cx| {
+                        // 展开的面板盖在控制条右侧之上，点面板不能误触进度条。
+                        let panel_covers =
+                            view.expanded && view.pointer_in_panel_zone(event.position, window);
+                        let on_track = view.controls_visible
+                            && !panel_covers
+                            && view
+                                .progress_track_bounds
+                                .get()
+                                .is_some_and(|bounds| bounds.contains(&event.position));
+                        if on_track {
+                            view.begin_scrub(event.position, window, cx);
+                            cx.stop_propagation();
+                        }
+                    });
+                });
+                let weak_up = weak.clone();
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, _window, cx| {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = weak_up.update(cx, |view, cx| view.end_scrub(cx));
+                });
+                // 指针直接离开窗口时没有 MouseMove / MouseUp；这里补一次收尾。
+                window.on_mouse_event(move |_: &MouseExitEvent, phase, _window, cx| {
+                    if phase != DispatchPhase::Bubble {
+                        return;
+                    }
+                    let _ = weak.update(cx, |view, cx| {
+                        view.end_scrub(cx);
+                        view.hide_controls(cx);
+                        view.collapse_panel_now(cx);
+                    });
+                });
+            },
+        )
+        .absolute()
+        .inset_0()
+        .into_any_element()
     }
 
     /// 鼠标移动：位置真的变了才算活动。滚轮/重绘触发的重复 move 不应反复叫出控制栏。
@@ -706,8 +908,8 @@ impl PlayerView {
                     if !view.controls_visible {
                         return false;
                     }
-                    // 正在输入弹幕时不自动隐藏，否则输入框会从眼前消失。
-                    if view.input_focused {
+                    // 正在输入弹幕 / 拖动进度条时不自动隐藏。
+                    if view.input_focused || view.scrubbing {
                         view.last_activity = std::time::Instant::now();
                         return true;
                     }
@@ -731,6 +933,10 @@ impl PlayerView {
 
     /// 立即藏起控制栏（播放开始 / 窗口失焦 / 鼠标离开时用）。
     fn hide_controls(&mut self, cx: &mut Context<Self>) {
+        // 拖动中收控制条 / 窗口失焦：先把拖动收尾，避免 scrub 状态悬空。
+        if self.scrubbing {
+            self.end_scrub(cx);
+        }
         // 正在输入弹幕时不能把输入框从树里拿掉，等失焦后再走自动隐藏。
         if self.input_focused {
             return;
@@ -994,6 +1200,76 @@ impl PlayerView {
         } else {
             INFO_PANEL_COLLAPSED
         }
+    }
+
+    /// 视频按 Contain 放进播放层后的实际宽度与左偏移。
+    ///
+    /// 播放层宽度 = 窗口 − 两侧 16 − 收起态侧栏 200；高度 = 窗口 − 顶栏下方 16
+    /// − 底部 92。控制条跟着这段**实际画面**走，而不是铺满整个播放层。
+    fn video_bar_geometry(&self, window: &Window) -> (f32, f32) {
+        let viewport = window.viewport_size();
+        let available_w = (viewport.width.as_f32() - 2.0 * SPACE_4 - INFO_PANEL_COLLAPSED).max(1.0);
+        let available_h =
+            (viewport.height.as_f32() - (TOP_BAR_HEIGHT + SPACE_4) - PLAYER_BOTTOM_INSET).max(1.0);
+        let (video_w, video_h) = self.video_pixel_size();
+        if video_w <= 0.0 || video_h <= 0.0 {
+            return (0.0, available_w);
+        }
+        let scale = (available_w / video_w).min(available_h / video_h);
+        let width = (video_w * scale).min(available_w);
+        ((available_w - width) / 2.0, width)
+    }
+
+    /// 当前视频的像素尺寸：优先用已解码帧，其次用 playurl 返回的分辨率。
+    fn video_pixel_size(&self) -> (f32, f32) {
+        #[cfg(target_os = "macos")]
+        if let Some(buffer) = self.current.as_ref() {
+            let width = objc2_core_video::CVPixelBufferGetWidth(buffer) as f32;
+            let height = objc2_core_video::CVPixelBufferGetHeight(buffer) as f32;
+            if width > 0.0 && height > 0.0 {
+                return (width, height);
+            }
+        }
+        if let Some(source) = self.source.as_ref() {
+            if source.video_width > 0 && source.video_height > 0 {
+                return (source.video_width as f32, source.video_height as f32);
+            }
+        }
+        (0.0, 0.0)
+    }
+
+    /// 指针是否还在右侧面板的交互区（面板 + 收起态左缘的 88px 唤出热区）。
+    ///
+    /// GPUI 的 `on_hover(false)` 会在布局变化时重算；播放中每帧都有重绘，
+    /// 面板内滚动 / 控制条显隐都可能让它在指针没动时闪一次 false。
+    /// 收起前用真实鼠标坐标兜底，避免面板被这种假移出事件收掉。
+    fn pointer_in_panel_zone(&self, position: Point<Pixels>, window: &Window) -> bool {
+        let viewport = window.viewport_size();
+        // 播放器窗口贴窗口右缘内缩 SPACE_4；面板再贴播放器右缘。
+        let right = viewport.width - px(SPACE_4);
+        // 展开态给骑边界按钮留 16px；收起态正好是 200px 面板 + 88px 热区。
+        let width = if self.expanded {
+            INFO_PANEL_EXPANDED + 16.0
+        } else {
+            INFO_PANEL_COLLAPSED + PANEL_HOVER_WIDTH
+        };
+        let top = px(TOP_BAR_HEIGHT + SPACE_4);
+        let bottom = viewport.height - px(PLAYER_BOTTOM_INSET);
+        position.x >= right - px(width)
+            && position.x <= right + px(1.)
+            && position.y >= top - px(1.)
+            && position.y <= bottom + px(1.)
+    }
+
+    /// 指针是否还在播放器窗口内（不是顶栏 / Dock / 页面）。
+    fn pointer_in_player(&self, position: Point<Pixels>, window: &Window) -> bool {
+        let viewport = window.viewport_size();
+        let top = px(TOP_BAR_HEIGHT + SPACE_4);
+        let bottom = viewport.height - px(PLAYER_BOTTOM_INSET);
+        position.x >= px(SPACE_4) - px(1.)
+            && position.x <= viewport.width - px(SPACE_4) + px(1.)
+            && position.y >= top - px(1.)
+            && position.y <= bottom + px(1.)
     }
 }
 
@@ -1312,15 +1588,21 @@ impl Render for PlayerView {
                         if let Some(w) = view.worker.as_ref() {
                             if let Some((buf, t)) = w.latest() {
                                 view.current = Some(buf);
-                                view.play_time = t;
-                                view.state.position_secs = t;
-                                got = true;
-                                // 播放中定期把进度落盘：进程被杀 / 崩溃时
-                                // 也不至于丢掉续播位置。
-                                if t - view.last_resume_save >= 30.0 {
-                                    view.last_resume_save = t;
-                                    view.save_resume_position();
+                                // 拖动 / seek 稳定期内不要让旧帧的 time-pos 把滑块顶回去。
+                                let settling = view
+                                    .seek_settle_until
+                                    .is_some_and(|until| until > std::time::Instant::now());
+                                if !view.scrubbing && !settling {
+                                    view.play_time = t;
+                                    view.state.position_secs = t;
+                                    // 播放中定期把进度落盘：进程被杀 / 崩溃时
+                                    // 也不至于丢掉续播位置。
+                                    if t - view.last_resume_save >= 30.0 {
+                                        view.last_resume_save = t;
+                                        view.save_resume_position();
+                                    }
                                 }
+                                got = true;
                             }
                         }
                         if got {
@@ -1407,6 +1689,7 @@ impl Render for PlayerView {
         // 控制区元素提前建好：可见时才挂树，隐藏时只留一条 3px 进度线。
         let watch_badge = self.controls_visible.then(|| self.watch_badge(cx));
         let bar: Option<AnyElement> = if self.controls_visible {
+            let (video_left, video_width) = self.video_bar_geometry(window);
             Some(
                 control_bar(
                     &t,
@@ -1416,6 +1699,9 @@ impl Render for PlayerView {
                         .as_ref()
                         .map(|source| source.quality.as_str())
                         .unwrap_or(""),
+                    video_left,
+                    video_width,
+                    &self.progress_track_bounds,
                     cx,
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_playback(window, cx);
@@ -1426,7 +1712,7 @@ impl Render for PlayerView {
         } else {
             None
         };
-        let mini_progress = (!self.controls_visible).then(|| self.mini_progress(&t, cx));
+        let mini_progress = (!self.controls_visible).then(|| self.mini_progress(&t, window, cx));
         let panel_hover = (!self.expanded).then(|| self.panel_hover_zone(cx));
         // 浮窗内部：绝对铺满窗口。窗口本身负责圆角/裁剪/阴影/遮挡。
         let content = div()
@@ -1509,11 +1795,18 @@ impl Render for PlayerView {
                 }),
             )
             // 鼠标离开播放器（去了顶栏 / 页面 / 其它窗口）：控制栏直接收起。
-            .on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
+            .on_hover(cx.listener(|view, hovered: &bool, window, cx| {
                 if !*hovered {
-                    view.hide_controls(cx);
+                    let position = window.mouse_position();
+                    // 播放中每帧重绘会让 hover 偶发 false；指针仍在播放器里就忽略。
+                    if !view.pointer_in_player(position, window) {
+                        view.hide_controls(cx);
+                        view.set_panel_hover(false, window, cx);
+                    }
                 }
             }))
+            // 全局鼠标位置监听：不依赖 hover 命中，面板收/展以它为准。
+            .child(self.pointer_tracker(cx))
             .into_any_element();
 
         // 浮窗外侧点击层：从顶栏下方开始，顶栏本身保持可用。
@@ -1866,18 +2159,9 @@ impl PlayerView {
             .bottom(px(CTRL_H))
             .w(px(PANEL_HOVER_WIDTH))
             .bg(rgba(0x00000001))
-            .on_hover(cx.listener(|view, hovered: &bool, window, cx| {
-                if !*hovered {
-                    // 从热区移出：按正常面板移出规则延迟收起。
-                    view.set_panel_hover(false, cx);
-                    return;
-                }
-                if !window.is_window_active() {
-                    return;
-                }
-                view.note_activity(window, cx);
-                view.set_panel_hover(true, cx);
-            }))
+            // 展开 / 收起统一由 `pointer_tracker` 的全局鼠标坐标驱动。
+            // 这里不再挂 on_hover：播放中每帧重绘会让 hover 在指针没动时闪 false，
+            // 热区一挂一卸就把面板和控制条带成循环。
             .on_mouse_move(cx.listener(|view, _: &MouseMoveEvent, window, cx| {
                 view.note_activity(window, cx);
             }))
@@ -1893,8 +2177,10 @@ impl PlayerView {
     }
 
     /// 控制栏隐藏时的简略态：底部 3px 进度线（40px 热区负责把控制栏叫回来）。
-    fn mini_progress(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn mini_progress(&self, t: &YkTheme, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let progress = self.state.progress().clamp(0.0, 1.0) as f32;
+        let (left, width) = self.video_bar_geometry(window);
+        // 40px hover 热区仍铺满播放层，视觉上的 3px 进度线与视频同宽。
         div()
             .absolute()
             .left_0()
@@ -1908,12 +2194,19 @@ impl PlayerView {
                 view.note_pointer_move(event.position, window, cx);
             }))
             .child(
-                div().w_full().h(px(3.)).bg(rgba(0xFFFFFF2E)).child(
-                    div()
-                        .h_full()
-                        .w(relative(progress))
-                        .bg(t.palette.theme_primary),
-                ),
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .bottom_0()
+                    .w(px(width))
+                    .h(px(3.))
+                    .bg(rgba(0xFFFFFF2E))
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(progress))
+                            .bg(t.palette.theme_primary),
+                    ),
             )
             .into_any_element()
     }
@@ -2001,18 +2294,8 @@ impl PlayerView {
             .border_color(t.surfaces.border_popover)
             .cursor_pointer()
             .hover(|style| style.bg(palette().theme_primary))
-            // 按钮骑在边界上：展开时悬停它不要触发 220ms 收起；
-            // 收起时它只是点击入口，不靠 hover 自动展开（否则点击会被自己展开再关掉）。
-            .on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
-                if *hovered {
-                    if view.expanded {
-                        view.panel_collapse_generation =
-                            view.panel_collapse_generation.wrapping_add(1);
-                    }
-                } else if view.expanded {
-                    view.set_panel_hover(false, cx);
-                }
-            }))
+            // 按钮不再挂 on_hover：展开 / 收起由真实指针坐标驱动，
+            // 这里只保留点击切换，避免播放中 hover 重算把面板反复收起。
             .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
                 view.expanded = !view.expanded;
                 view.panel_collapse_generation = view.panel_collapse_generation.wrapping_add(1);
@@ -2377,10 +2660,11 @@ impl PlayerView {
             );
         }
 
-        let body = div()
-            .w(px(PLAYER_INFO_PANEL_WIDTH))
-            .flex_shrink_0()
-            .h_full()
+        // 整个面板只有一个滚动区：图 1 那一段（标题 / UP / 互动 / 标签 / Tab）
+        // 不再固定，和下面的评论一起滚。内层单独包一列，避免 flex 子项被压缩后
+        // 高度不足、overflow_y_scroll 反而滚不动。
+        let content = div()
+            .w_full()
             .flex()
             .flex_col()
             .child(head)
@@ -2390,6 +2674,19 @@ impl PlayerView {
             .children(tags_row)
             .child(tabs_row)
             .child(self.tab_content(t, active, cx));
+
+        let body = div()
+            .id("player-info-scroll")
+            .w(px(PLAYER_INFO_PANEL_WIDTH))
+            .flex_shrink_0()
+            .h_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.panel_scroll)
+            .child(content);
+
+        // offset.y 向下滚为负；过阈值才浮出「回到顶部」。
+        let show_back_to_top =
+            self.expanded && self.panel_scroll.offset().y < px(-PANEL_BACK_TO_TOP_THRESHOLD);
 
         let to_width = self.panel_width();
         let from_width = if self.panel_generation == 0 {
@@ -2414,19 +2711,66 @@ impl PlayerView {
             .when(self.expanded, |el| {
                 el.border_l_1().border_color(s.border_subtle)
             })
-            // 面板本体即 hover 热区（D-05）：进入展开，移出延迟 220ms 收回。
-            .on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
-                view.set_panel_hover(*hovered, cx);
+            // hover 只负责「进入即展开」的兜底；收起一律由真实指针坐标决定。
+            // 播放中每帧重绘都会重算 hover，不能让它驱动收起。
+            .on_hover(cx.listener(|view, hovered: &bool, window, cx| {
+                if *hovered && view.pointer_in_panel_zone(window.mouse_position(), window) {
+                    view.set_panel_hover(true, window, cx);
+                }
             }))
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, cx| {
                 view.note_pointer_move(event.position, window, cx);
             }))
             .child(body)
+            // 滚动后出现：浮在内容之上，右下角 16px 内边距。
+            .children(show_back_to_top.then(|| self.panel_back_to_top(t, cx)))
             .with_animation(
                 format!("player-panel-{}", self.panel_generation),
                 Animation::new(std::time::Duration::from_millis(200)).with_easing(ease_standard()),
                 move |el, delta| el.w(px(from_width + (to_width - from_width) * delta)),
             )
+            .into_any_element()
+    }
+
+    /// 面板整块滚动后，右下角浮出的「回到顶部」。
+    ///
+    /// 读的是面板唯一滚动区的 offset；点击直接把 offset 归零，
+    /// 不依赖子元素索引，Tab 切换后也能稳稳回到最顶上的视频信息。
+    fn panel_back_to_top(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+        let s = &t.surfaces;
+        // 浮在评论上：用抬升实心面 + 阴影，和面板内容拉开层级。
+        let mut shadow = t.shadows.shadow_2.clone();
+        shadow.extend(t.shadows.edge_glow_1.clone());
+        div()
+            .id("player-panel-to-top")
+            .absolute()
+            .right(px(SPACE_4))
+            .bottom(px(SPACE_4))
+            .h(px(34.))
+            .px(px(SPACE_3))
+            .flex()
+            .items_center()
+            .gap(px(SPACE_1))
+            .rounded_full()
+            .bg(s.surface_elevated_solid)
+            .border_1()
+            .border_color(s.border_popover)
+            .shadow(shadow)
+            .cursor_pointer()
+            .hover(|style| style.bg(s.surface_elevated_solid_hover))
+            .text_size(px(FONT_SIZE_CAPTION))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(s.text_secondary)
+            .child(
+                Icon::new(IconName::ChevronUp)
+                    .size(px(14.))
+                    .text_color(s.text_secondary),
+            )
+            .child("回到顶部")
+            .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                view.panel_scroll.set_offset(point(px(0.), px(0.)));
+                cx.notify();
+            }))
             .into_any_element()
     }
 
@@ -2452,13 +2796,9 @@ impl PlayerView {
             .as_ref()
             .map(|source| (source.aid, source.bvid.clone()));
 
-        let mut list = div()
-            .id("player-comments-scroll")
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
-            .px(px(SPACE_4))
-            .pb(px(SPACE_4));
+        // 评论不再自己滚：外层 `player-info-scroll` 是唯一滚动区，
+        // 这里只负责把评论排成自然高度的一列。
+        let mut list = div().w_full().px(px(SPACE_4)).pb(px(SPACE_4));
         match &self.comments {
             CommentState::Idle => {}
             CommentState::Loading => {
@@ -2516,8 +2856,7 @@ impl PlayerView {
         }
 
         div()
-            .flex_1()
-            .min_h(px(0.))
+            .w_full()
             .flex()
             .flex_col()
             .child(
@@ -2559,13 +2898,7 @@ impl PlayerView {
 
     fn danmaku_tab(&self, t: &YkTheme) -> AnyElement {
         let s = &t.surfaces;
-        let mut list = div()
-            .id("player-danmaku-scroll")
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
-            .px(px(SPACE_4))
-            .pb(px(SPACE_4));
+        let mut list = div().w_full().px(px(SPACE_4)).pb(px(SPACE_4));
         let mut any = false;
         for (danmaku, _) in self.danmaku.iter().take(40) {
             any = true;
@@ -2609,10 +2942,7 @@ impl PlayerView {
         let current = source.map(|source| source.current_page).unwrap_or(1);
         let pages = source.map(|source| source.pages.as_slice()).unwrap_or(&[]);
         let mut list = div()
-            .id("player-pages-scroll")
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
+            .w_full()
             .px(px(SPACE_4))
             .pb(px(SPACE_4))
             .flex()
@@ -2942,6 +3272,9 @@ fn control_bar(
     state: &PlayerState,
     danmaku_input: Option<&Entity<InputState>>,
     quality: &str,
+    video_left: f32,
+    video_width: f32,
+    progress_track_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
     cx: &mut Context<PlayerView>,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -2964,9 +3297,9 @@ fn control_bar(
 
     div()
         .absolute()
-        .left_0()
-        // 控制条宽度 = 播放层（红框/蓝框）宽度：右端直接贴到侧栏左边缘。
-        .right(px(INFO_PANEL_COLLAPSED))
+        // 控制条跟视频实际显示宽度对齐并水平居中；面板展开时允许盖住右端。
+        .left(px(video_left))
+        .w(px(video_width))
         .bottom_0()
         .h(px(CTRL_H))
         .flex()
@@ -3109,18 +3442,35 @@ fn control_bar(
                         .text_color(hsla(0.0, 0.0, 1.0, 0.85))
                         .child(format!("{time_now} / {time_total}")),
                 )
-                // 进度条：左侧已播 + 右侧未播，滑块骑在交界处
-                .child(
+                // 进度条：左侧已播 + 右侧未播，滑块骑在交界处。
+                // 轨道自身记录 bounds，按下 / 拖动时把鼠标 x 换算成 0..1。
+                .child({
+                    let track_bounds = progress_track_bounds.clone();
                     div()
+                        .id("player-progress-track")
+                        .relative()
                         .flex_1()
                         .min_w(px(0.))
                         .h(px(12.))
-                        .flex()
-                        .items_center()
+                        .cursor_pointer()
+                        // 按下 / 拖动由 `pointer_tracker` 的全局监听处理，
+                        // 不走 hover 命中，避免播放中 hover 抖动导致点不中。
+                        // 整条底轨：同时用来量轨道宽度。
                         .child(
                             div()
-                                .relative()
-                                .flex_shrink_0()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top(px(4.))
+                                .h(px(4.))
+                                .rounded_full()
+                                .bg(rgba(0xFFFFFF33)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top(px(4.))
                                 .h(px(4.))
                                 .w(relative(progress))
                                 .rounded_full()
@@ -3136,8 +3486,16 @@ fn control_bar(
                                         .bg(rgb(0xFFFFFF)),
                                 ),
                         )
-                        .child(div().flex_1().h(px(4.)).rounded_full().bg(rgba(0xFFFFFF33))),
-                )
+                        // 轨道 bounds 由这层透明 canvas 在 prepaint 时写回。
+                        .child(
+                            canvas(
+                                move |bounds, _, _| track_bounds.set(Some(bounds)),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
+                })
                 .child(ctrl_pill(quality_text))
                 .child(ctrl_pill(rate_text))
                 .child(ctrl_icon(volume_icon, icon_color))
