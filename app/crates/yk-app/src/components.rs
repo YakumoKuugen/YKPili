@@ -5,11 +5,11 @@
 //! 所以：如果这页的颜色和设计稿一致，说明主题桥接是对的；
 //! 如果出现了组件库默认的紫/蓝，说明某个字段没覆盖到。
 
-use gpui::component::button::{Button, ButtonVariants};
-use gpui::component::Theme as GpuiTheme;
-use gpui::component::Disableable;
 use gpui::component::badge::Badge;
+use gpui::component::button::{Button, ButtonVariants};
 use gpui::component::tag::Tag;
+use gpui::component::Disableable;
+use gpui::component::Theme as GpuiTheme;
 use gpui::prelude::*;
 use gpui::*;
 use yk_ui::theme::*;
@@ -133,92 +133,74 @@ impl Render for ComponentGallery {
             .child(group(
                 "令牌色板",
                 muted_fg,
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(SPACE_2))
-                    .children(
-                        [
-                            ("品牌蓝", p.theme_primary),
-                            ("品牌粉", p.bili_pink),
-                            ("信息", p.status_info),
-                            ("成功", p.status_success),
-                            ("警告", p.status_warning),
-                            ("错误", p.status_error),
-                        ]
-                        .into_iter()
-                        .map(|(name, color)| {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap(px(SPACE_1))
-                                .child(
-                                    div()
-                                        .w(px(56.))
-                                        .h(px(36.))
-                                        .rounded(px(RADIUS_MD))
-                                        .bg(color),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(FONT_SIZE_MICRO))
-                                        .text_color(muted_fg)
-                                        .child(name),
-                                )
-                        }),
-                    ),
+                div().flex().flex_row().gap(px(SPACE_2)).children(
+                    [
+                        ("品牌蓝", p.theme_primary),
+                        ("品牌粉", p.bili_pink),
+                        ("信息", p.status_info),
+                        ("成功", p.status_success),
+                        ("警告", p.status_warning),
+                        ("错误", p.status_error),
+                    ]
+                    .into_iter()
+                    .map(|(name, color)| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(SPACE_1))
+                            .child(div().w(px(56.)).h(px(36.)).rounded(px(RADIUS_MD)).bg(color))
+                            .child(
+                                div()
+                                    .text_size(px(FONT_SIZE_MICRO))
+                                    .text_color(muted_fg)
+                                    .child(name),
+                            )
+                    }),
+                ),
             ))
             // ---- 表面层级 ----
             .child(group(
                 "表面层级（Fill1–4 / 表面变体）",
                 muted_fg,
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(SPACE_2))
-                    .children(
-                        [
-                            ("Fill1", self.theme.surfaces.fill_1),
-                            ("Fill2", self.theme.surfaces.fill_2),
-                            ("Fill3", self.theme.surfaces.fill_3),
-                            ("Fill4", self.theme.surfaces.fill_4),
-                            ("Content", self.theme.surfaces.surface_content),
-                            ("Strong", self.theme.surfaces.surface_elevated_strong),
-                        ]
-                        .into_iter()
-                        .map(|(name, color)| {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap(px(SPACE_1))
-                                .child(
-                                    div()
-                                        .w(px(72.))
-                                        .h(px(36.))
-                                        .rounded(px(RADIUS_MD))
-                                        .bg(color)
-                                        .border_1()
-                                        .border_color(self.theme.surfaces.border_subtle),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(FONT_SIZE_MICRO))
-                                        .text_color(muted_fg)
-                                        .child(name),
-                                )
-                        }),
-                    ),
+                div().flex().flex_row().gap(px(SPACE_2)).children(
+                    [
+                        ("Fill1", self.theme.surfaces.fill_1),
+                        ("Fill2", self.theme.surfaces.fill_2),
+                        ("Fill3", self.theme.surfaces.fill_3),
+                        ("Fill4", self.theme.surfaces.fill_4),
+                        ("Content", self.theme.surfaces.surface_content),
+                        ("Strong", self.theme.surfaces.surface_elevated_strong),
+                    ]
+                    .into_iter()
+                    .map(|(name, color)| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap(px(SPACE_1))
+                            .child(
+                                div()
+                                    .w(px(72.))
+                                    .h(px(36.))
+                                    .rounded(px(RADIUS_MD))
+                                    .bg(color)
+                                    .border_1()
+                                    .border_color(self.theme.surfaces.border_subtle),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(FONT_SIZE_MICRO))
+                                    .text_color(muted_fg)
+                                    .child(name),
+                            )
+                    }),
+                ),
             ))
     }
 }
 
-fn group(
-    title: &str,
-    muted_fg: Hsla,
-    body: impl IntoElement,
-) -> impl IntoElement {
+fn group(title: &str, muted_fg: Hsla, body: impl IntoElement) -> impl IntoElement {
     div()
         .flex()
         .flex_col()

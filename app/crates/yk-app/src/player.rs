@@ -627,7 +627,7 @@ impl PlayerView {
     fn set_panel_hover(&mut self, hovered: bool, cx: &mut Context<Self>) {
         if hovered {
             self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
-                if !self.expanded {
+            if !self.expanded {
                 self.expanded = true;
                 self.panel_generation = self.panel_generation.wrapping_add(1);
                 cx.notify();
@@ -647,9 +647,8 @@ impl PlayerView {
                 view.expanded = false;
                 view.panel_generation = view.panel_generation.wrapping_add(1);
                 // 鼠标可能还停在面板左缘/热区：400ms 内不响应，避免反复弹出。
-                view.panel_hover_grace_until = Some(
-                    std::time::Instant::now() + std::time::Duration::from_millis(400),
-                );
+                view.panel_hover_grace_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
                 cx.notify();
             });
         })
@@ -765,11 +764,8 @@ impl PlayerView {
             .resume_position(&key)
             .or_else(|| self.resume.resume_position(&src.bvid));
         let seed = self.resume_seed;
-        let start = yk_core::resume::resolve_start_position(
-            &[local, seed, remote],
-            duration,
-        )
-        .unwrap_or(0.0);
+        let start = yk_core::resume::resolve_start_position(&[local, seed, remote], duration)
+            .unwrap_or(0.0);
         self.resume_key = Some(key);
         if start > 0.0 {
             eprintln!(
@@ -1355,7 +1351,8 @@ impl Render for PlayerView {
         // 用 gpui-component 的 Input —— 它内部走 InputHandler，
         // 支持 IME 组合（marked text），中文输入必需。
         if self.danmaku_input.is_none() {
-            let state = cx.new(|cx| InputState::new(window, cx).placeholder("发个友善的弹幕见证当下"));
+            let state =
+                cx.new(|cx| InputState::new(window, cx).placeholder("发个友善的弹幕见证当下"));
             // Enter 走 Input 自己的 Enter action（外层补了 key_context("Input") 才匹配），
             // 由它发出 PressEnter。Shift+Enter 不发送。
             // 中文输入法组合中的 Enter 应由输入法先消费（用于选词）；
@@ -1388,16 +1385,14 @@ impl Render for PlayerView {
             // 放到本帧之后注册：observe_window_activation 会立刻回调一次，
             // 直接在 render 里注册会造成重入。
             cx.defer_in(window, |view, window, cx| {
-                view.activation_observer = Some(cx.observe_window_activation(
-                    window,
-                    |view, window, cx| {
+                view.activation_observer =
+                    Some(cx.observe_window_activation(window, |view, window, cx| {
                         if !window.is_window_active() {
                             // 失焦时输入框也拿不到键盘，直接收起。
                             view.input_focused = false;
                             view.hide_controls(cx);
                         }
-                    },
-                ));
+                    }));
             });
         }
         if !window.is_window_active() && self.controls_visible {
@@ -1507,9 +1502,12 @@ impl Render for PlayerView {
             .on_mouse_move(cx.listener(|view, _: &MouseMoveEvent, window, cx| {
                 view.note_activity(window, cx);
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|view, _: &MouseDownEvent, window, cx| {
-                view.note_activity(window, cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, window, cx| {
+                    view.note_activity(window, cx);
+                }),
+            )
             // 鼠标离开播放器（去了顶栏 / 页面 / 其它窗口）：控制栏直接收起。
             .on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
                 if !*hovered {
@@ -1910,16 +1908,12 @@ impl PlayerView {
                 view.note_pointer_move(event.position, window, cx);
             }))
             .child(
-                div()
-                    .w_full()
-                    .h(px(3.))
-                    .bg(rgba(0xFFFFFF2E))
-                    .child(
-                        div()
-                            .h_full()
-                            .w(relative(progress))
-                            .bg(t.palette.theme_primary),
-                    ),
+                div().w_full().h(px(3.)).bg(rgba(0xFFFFFF2E)).child(
+                    div()
+                        .h_full()
+                        .w(relative(progress))
+                        .bg(t.palette.theme_primary),
+                ),
             )
             .into_any_element()
     }
@@ -1969,7 +1963,7 @@ impl PlayerView {
                             view.tab = 1;
                             view.panel_collapse_generation =
                                 view.panel_collapse_generation.wrapping_add(1);
-                                    if !view.expanded {
+                            if !view.expanded {
                                 view.expanded = true;
                                 view.panel_generation = view.panel_generation.wrapping_add(1);
                             }
@@ -2021,16 +2015,12 @@ impl PlayerView {
             }))
             .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
                 view.expanded = !view.expanded;
-                view.panel_collapse_generation =
-                    view.panel_collapse_generation.wrapping_add(1);
+                view.panel_collapse_generation = view.panel_collapse_generation.wrapping_add(1);
                 view.panel_generation = view.panel_generation.wrapping_add(1);
                 view.panel_hover_grace_until = if view.expanded {
                     None
                 } else {
-                    Some(
-                        std::time::Instant::now()
-                            + std::time::Duration::from_millis(400),
-                    )
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(400))
                 };
                 cx.notify();
             }))
@@ -2068,12 +2058,7 @@ impl PlayerView {
     /// 信息面板：标题 → 元信息 → UP 主 → 互动 → 标签 → Tab → 内容。
     ///
     /// 内容按 400px 排版，收起态只把右半裁掉（D-05：收起仍是 200px 半宽）。
-    fn info_panel(
-        &self,
-        t: &YkTheme,
-        scale_factor: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn info_panel(&self, t: &YkTheme, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
         let s = &t.surfaces;
         let p = &t.palette;
         let source = self.source.as_ref();
@@ -2257,12 +2242,10 @@ impl PlayerView {
                                         .text_color(s.text_secondary),
                                 )
                                 .child(if self.followed { "已关注" } else { "关注" })
-                                .on_click(cx.listener(
-                                    |view, _: &ClickEvent, _window, cx| {
-                                        view.followed = !view.followed;
-                                        cx.notify();
-                                    },
-                                )),
+                                .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                                    view.followed = !view.followed;
+                                    cx.notify();
+                                })),
                         ),
                 )
         });
@@ -2382,17 +2365,11 @@ impl PlayerView {
                     })
                     .text_color(if on { p.theme_primary } else { s.text_tertiary })
                     .child(*name)
-                    .child(
-                        div()
-                            .w(px(28.))
-                            .h(px(2.))
-                            .rounded_full()
-                            .bg(if on {
-                                p.theme_primary
-                            } else {
-                                hsla(0.0, 0.0, 0.0, 0.0)
-                            }),
-                    )
+                    .child(div().w(px(28.)).h(px(2.)).rounded_full().bg(if on {
+                        p.theme_primary
+                    } else {
+                        hsla(0.0, 0.0, 0.0, 0.0)
+                    }))
                     .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
                         view.tab = index;
                         cx.notify();
@@ -2490,48 +2467,40 @@ impl PlayerView {
                 }
             }
             CommentState::Error(error) => {
-                list = list
-                    .child(panel_empty_line(t, "评论加载失败"))
-                    .child(
-                        div()
-                            .w_full()
-                            .pb(px(SPACE_4))
-                            .flex()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .text_size(px(FONT_SIZE_CAPTION))
-                                    .text_color(s.text_quaternary)
-                                    .line_clamp(2)
-                                    .child(error.clone()),
-                            ),
-                    );
+                list = list.child(panel_empty_line(t, "评论加载失败")).child(
+                    div()
+                        .w_full()
+                        .pb(px(SPACE_4))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_size(px(FONT_SIZE_CAPTION))
+                                .text_color(s.text_quaternary)
+                                .line_clamp(2)
+                                .child(error.clone()),
+                        ),
+                );
                 if let Some((aid, bvid)) = retry {
                     list = list.child(
-                        div()
-                            .w_full()
-                            .flex()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .id("player-comments-retry")
-                                    .px(px(SPACE_3))
-                                    .h(px(26.))
-                                    .flex()
-                                    .items_center()
-                                    .rounded(px(RADIUS_MD))
-                                    .bg(s.fill_2)
-                                    .cursor_pointer()
-                                    .hover(|style| style.bg(s.fill_3))
-                                    .text_size(px(FONT_SIZE_CAPTION))
-                                    .text_color(p.theme_primary)
-                                    .child("重试")
-                                    .on_click(cx.listener(
-                                        move |view, _: &ClickEvent, _window, cx| {
-                                            view.spawn_video_meta(aid, bvid.clone(), cx);
-                                        },
-                                    )),
-                            ),
+                        div().w_full().flex().justify_center().child(
+                            div()
+                                .id("player-comments-retry")
+                                .px(px(SPACE_3))
+                                .h(px(26.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(RADIUS_MD))
+                                .bg(s.fill_2)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(s.fill_3))
+                                .text_size(px(FONT_SIZE_CAPTION))
+                                .text_color(p.theme_primary)
+                                .child("重试")
+                                .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                                    view.spawn_video_meta(aid, bvid.clone(), cx);
+                                })),
+                        ),
                     );
                 }
             }
@@ -2682,11 +2651,7 @@ impl PlayerView {
                                 .min_w(px(0.))
                                 .truncate()
                                 .text_size(px(FONT_SIZE_CAPTION))
-                                .text_color(if on {
-                                    s.text_primary
-                                } else {
-                                    s.text_secondary
-                                })
+                                .text_color(if on { s.text_primary } else { s.text_secondary })
                                 .child(format!("P{} · {}", page.page, page.part)),
                         )
                         .child(
@@ -2782,9 +2747,27 @@ fn comment_skeleton(t: &YkTheme) -> impl IntoElement {
                 .flex()
                 .flex_col()
                 .gap(px(6.))
-                .child(div().w(relative(0.36)).h(px(10.)).rounded_full().bg(s.fill_2))
-                .child(div().w(relative(0.92)).h(px(12.)).rounded_full().bg(s.fill_1))
-                .child(div().w(relative(0.64)).h(px(12.)).rounded_full().bg(s.fill_1)),
+                .child(
+                    div()
+                        .w(relative(0.36))
+                        .h(px(10.))
+                        .rounded_full()
+                        .bg(s.fill_2),
+                )
+                .child(
+                    div()
+                        .w(relative(0.92))
+                        .h(px(12.))
+                        .rounded_full()
+                        .bg(s.fill_1),
+                )
+                .child(
+                    div()
+                        .w(relative(0.64))
+                        .h(px(12.))
+                        .rounded_full()
+                        .bg(s.fill_1),
+                ),
         )
 }
 
@@ -2867,9 +2850,7 @@ fn comment_item(t: &YkTheme, comment: &DynamicComment) -> impl IntoElement {
                                     .flex()
                                     .items_center()
                                     .gap(px(2.))
-                                    .child(
-                                        Icon::new(IconName::ThumbsUp).size(px(11.)),
-                                    )
+                                    .child(Icon::new(IconName::ThumbsUp).size(px(11.)))
                                     .child(format::count(comment.like)),
                             )
                         }),
@@ -3155,13 +3136,7 @@ fn control_bar(
                                         .bg(rgb(0xFFFFFF)),
                                 ),
                         )
-                        .child(
-                            div()
-                                .flex_1()
-                                .h(px(4.))
-                                .rounded_full()
-                                .bg(rgba(0xFFFFFF33)),
-                        ),
+                        .child(div().flex_1().h(px(4.)).rounded_full().bg(rgba(0xFFFFFF33))),
                 )
                 .child(ctrl_pill(quality_text))
                 .child(ctrl_pill(rate_text))

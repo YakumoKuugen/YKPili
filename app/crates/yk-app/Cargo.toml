@@ -24,3 +24,21 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-core-foundation = "0.3.2"
 objc2-core-video = { version = "0.3.2", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVBase", "CVReturn"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+
+[[test]]
+name = "search_visual"
+path = "tests/search_visual.rs"
+harness = false
+
+[[test]]
+name = "messages_visual"
+path = "tests/messages_visual.rs"
+harness = false
+
+[[test]]
+name = "topbar_visual"
+path = "tests/topbar_visual.rs"
+harness = false

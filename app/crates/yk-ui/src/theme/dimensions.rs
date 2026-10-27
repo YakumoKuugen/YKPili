@@ -71,6 +71,10 @@ pub const PADDING_BUTTON: (f32, f32) = (16.0, 8.0);
 
 pub const CONTROL_HEIGHT: f32 = 34.0;
 pub const TOP_BAR_CONTROL_HEIGHT: f32 = 46.0;
+/// 顶栏胶囊里的图标按钮：46 高胶囊内上下各留 6。
+pub const TOP_BAR_ICON_BUTTON_SIZE: f32 = 34.0;
+/// 顶栏搜索框最大宽（参考稿把搜索做成顶栏唯一的大件）。
+pub const TOP_BAR_SEARCH_WIDTH: f32 = 600.0;
 pub const TOP_BAR_HEIGHT: f32 = 64.0;
 pub const SCROLL_BAR_SIZE: f32 = 6.0;
 

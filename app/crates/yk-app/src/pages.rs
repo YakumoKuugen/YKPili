@@ -21,6 +21,10 @@ pub enum PageKind {
     Following,
     /// 观看历史：底部 Dock 的「历史」动作。
     History,
+    /// 消息中心：回复 / @ / 赞 / 私信四通道。
+    Messages,
+    /// 收藏夹：接口未接入，先保留 Dock 入口与选中态。
+    Favorites,
     Mine,
     Settings,
     Search,
@@ -31,13 +35,15 @@ impl PageKind {
         match self {
             Self::Hot => "热门",
             Self::Category => "分区",
-            Self::Rank => "排行",
+            Self::Rank => "视频排行榜",
             Self::Live => "直播",
             Self::Following => "正在关注",
             Self::History => "观看历史",
+            Self::Messages => "消息中心",
+            Self::Favorites => "我的收藏",
             Self::Mine => "我的",
             Self::Settings => "设置",
-            Self::Search => "搜索",
+            Self::Search => "搜索结果",
         }
     }
 }
@@ -111,7 +117,19 @@ fn body(theme: &YkTheme, page: PageKind, signed_in: bool) -> AnyElement {
         PageKind::Following => following(theme, signed_in),
         // 历史页是独立的两栏视图，由 AppRoot 在 content_area 里特判，
         // 不会走到这里；保留分支只为让 match 穷尽。
-        PageKind::History => status::empty(theme, "观看历史", "由历史页独立渲染").into_any_element(),
+        PageKind::History => {
+            status::empty(theme, "观看历史", "由历史页独立渲染").into_any_element()
+        }
+        // 消息页自带分栏与虚拟列表，由 AppRoot 在 content_area 里特判。
+        PageKind::Messages => {
+            status::empty(theme, "消息中心", "由消息页独立渲染").into_any_element()
+        }
+        PageKind::Favorites => status::empty(
+            theme,
+            "收藏夹功能尚未接入",
+            "收藏接口接入后，收藏的视频会显示在这里",
+        )
+        .into_any_element(),
         PageKind::Mine => mine(theme).into_any_element(),
         PageKind::Settings => settings(theme).into_any_element(),
         PageKind::Search => search(theme).into_any_element(),
@@ -221,31 +239,13 @@ fn category(theme: &YkTheme) -> impl IntoElement {
 }
 
 fn rank(theme: &YkTheme) -> impl IntoElement {
-    let s = &theme.surfaces;
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(SPACE_3))
-        .w_full()
-        // 吸顶筛选条
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(SPACE_2))
-                .child(chip(theme, "全部", true))
-                .child(chip(theme, "动画", false))
-                .child(chip(theme, "音乐", false))
-                .child(chip(theme, "游戏", false))
-                .child(
-                    div()
-                        .flex_1()
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(s.text_tertiary)
-                        .child("周榜为二期项（依赖客户端每日快照 + 7 天窗口聚合）"),
-                ),
-        )
-        .child(hot(theme))
+    // 排行接口（全站榜 / 分区榜）尚未接入；这里不放占位榜单，
+    // 避免用户把假数据当成真实排行。
+    status::empty(
+        theme,
+        "排行榜功能尚未接入",
+        "排行接口接入后，全站榜与分区榜会显示在这里",
+    )
 }
 
 fn chip(theme: &YkTheme, label: &str, active: bool) -> impl IntoElement {

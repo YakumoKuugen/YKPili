@@ -36,9 +36,11 @@ pub mod dynamic_view;
 pub mod history_view;
 pub mod http;
 pub mod login_view;
+pub mod messages_view;
 pub mod page_image_cache;
 pub mod pages;
 pub mod player;
+pub mod search_view;
 pub mod settings_view;
 pub mod video;
 pub mod video_worker;
@@ -113,6 +115,10 @@ pub struct AppRoot {
     following_generation: u64,
     /// 观看历史页状态（数据、筛选、批量选择、搜索框）。
     history: history_view::HistoryState,
+    /// 搜索：顶栏输入、联想面板与结果页共享同一份状态。
+    search: search_view::SearchState,
+    /// 消息中心：四通道列表、私信会话与未读角标。
+    messages: messages_view::MessageState,
     /// 启动后是否已经自动弹过一次登录；取消后不再打扰。
     login_prompted: bool,
     /// 推荐流请求代际：登录后的带 Cookie 请求必须覆盖启动时的匿名请求。
@@ -190,13 +196,168 @@ impl AppRoot {
         self
     }
 
+    /// 验收入口：启动即落到某个关键词的结果页（`YK_SEARCH=鬼灭`）。
+    pub fn with_search(mut self, query: &str) -> Self {
+        let query = query.trim();
+        if !query.is_empty() {
+            self.page = Some(pages::PageKind::Search);
+            self.search.query = query.to_string();
+            self.search.draft = query.to_string();
+        }
+        self
+    }
+
+    /// 验收入口：启动即展开顶栏联想面板（`YK_SEARCH_SUGGEST=test`）。
+    pub fn with_search_suggest(mut self, term: &str) -> Self {
+        self.search.draft = term.to_string();
+        self.search.open = true;
+        self
+    }
+
+    /// 测试 / 截图入口：不自动弹登录卡片。
+    pub fn without_login_prompt(mut self) -> Self {
+        self.login_prompted = true;
+        self
+    }
+
+    /// 测试 / 截图入口：固定一张封面处于 hover 态，用于检查卡片材质。
+    pub fn with_hovered_card(mut self, index: usize) -> Self {
+        self.hovered_card = Some(index);
+        self
+    }
+
+    /// 测试 / 截图入口：注入历史页数据并进入批量模式，检查选中卡片的材质。
+    pub fn with_history_entries(mut self, entries: Vec<yk_core::history::HistoryEntry>) -> Self {
+        self.page = Some(pages::PageKind::History);
+        self.history.entries = entries;
+        self.history.loaded = true;
+        self.history.batch = true;
+        let kids: Vec<i64> = self.history.entries.iter().take(2).map(|e| e.kid).collect();
+        self.history.selected = kids.into_iter().collect();
+        self
+    }
+
+    /// 测试 / 截图入口：直接注入一份结果，跳过网络。
+    pub fn with_search_results(
+        mut self,
+        query: &str,
+        results: yk_core::search::SearchResults,
+        total: u64,
+    ) -> Self {
+        self.page = Some(pages::PageKind::Search);
+        self.search.query = query.to_string();
+        self.search.draft = query.to_string();
+        self.search.loading = false;
+        self.search.error = None;
+        self.search.page = 1;
+        self.search.num_pages = 1;
+        self.search.num_results = total;
+        self.search.has_more = false;
+        self.search.results = results;
+        self
+    }
+
+    /// 测试 / 截图入口：注入联想面板内容。
+    pub fn with_search_suggestions(
+        mut self,
+        term: &str,
+        items: Vec<yk_core::search::SuggestItem>,
+        hotwords: Vec<yk_core::search::Hotword>,
+    ) -> Self {
+        self.search.draft = term.to_string();
+        self.search.open = true;
+        self.search.suggestions = items;
+        self.search.hotwords = hotwords;
+        self.search.hotwords_loaded = true;
+        self
+    }
+
+    /// 测试 / 截图入口：直接注入互动通道数据，跳过网络。
+    pub fn with_message_inbox(
+        mut self,
+        channel: yk_core::messages::MessageChannel,
+        entries: Vec<yk_core::messages::MessageEntry>,
+        unread: yk_core::messages::UnreadCounts,
+    ) -> Self {
+        self.page = Some(pages::PageKind::Messages);
+        self.messages.channel = channel;
+        let inbox = self.messages.inbox_mut();
+        inbox.entries = entries;
+        inbox.loaded = true;
+        inbox.loading = false;
+        inbox.has_more = false;
+        self.messages.unread = unread;
+        self.messages.unread_loaded = true;
+        self
+    }
+
+    /// 测试 / 截图入口：私信列表直接开启「只看互关」。
+    pub fn with_message_only_mutual(mut self, only: bool) -> Self {
+        self.messages.only_mutual = only;
+        self.messages.ensure_dm_selection();
+        self
+    }
+
+    /// 测试 / 截图入口：展开某条赞消息的点赞者列表。
+    pub fn with_message_expanded_like(mut self, id: i64) -> Self {
+        self.messages.expanded_like = Some(id);
+        self
+    }
+
+    /// 测试 / 截图入口：直接注入私信会话列表。
+    pub fn with_message_conversations(
+        mut self,
+        conversations: Vec<yk_core::messages::Conversation>,
+        unread: yk_core::messages::UnreadCounts,
+    ) -> Self {
+        self.page = Some(pages::PageKind::Messages);
+        self.messages.channel = yk_core::messages::MessageChannel::Dm;
+        self.messages.dm.conversations = conversations;
+        self.messages.dm.loaded = true;
+        self.messages.dm.loading = false;
+        self.messages.apply_whitelist();
+        self.messages.unread = unread;
+        self.messages.unread_loaded = true;
+        self
+    }
+
+    /// 测试 / 截图入口：直接打开一个私信会话。
+    pub fn with_message_chat(
+        mut self,
+        conversation: yk_core::messages::Conversation,
+        messages: Vec<yk_core::messages::ChatMessage>,
+    ) -> Self {
+        self.page = Some(pages::PageKind::Messages);
+        self.messages.channel = yk_core::messages::MessageChannel::Dm;
+        self.messages.dm.conversations = vec![conversation.clone()];
+        self.messages.dm.loaded = true;
+        self.messages.apply_whitelist();
+        let mut chat = messages_view::ChatState::new(&conversation);
+        chat.messages = messages;
+        chat.loading = false;
+        chat.has_more = false;
+        self.messages.chat = Some(chat);
+        self.messages.unread_loaded = true;
+        self
+    }
+
     /// 首帧后补齐「当前页面所需的异步数据」。
     ///
     /// 关注页与历史页都需要：`with_page` 只切路由，数据仍要等窗口建好后拉。
     pub fn load_current_page(&mut self, cx: &mut Context<Self>) {
+        // 验收入口可能带着展开的联想面板启动；先补一次联想请求。
+        if self.search.open && !self.search.draft.trim().is_empty() {
+            self.schedule_suggest(cx);
+        }
         match self.page {
             Some(pages::PageKind::Following) => self.ensure_following(cx),
             Some(pages::PageKind::History) => self.ensure_history(cx),
+            Some(pages::PageKind::Messages) => self.ensure_messages(cx),
+            Some(pages::PageKind::Search) => {
+                if !self.search.query.trim().is_empty() {
+                    self.load_search_page(false, cx);
+                }
+            }
             _ => {}
         }
     }
@@ -214,6 +375,14 @@ impl AppRoot {
             .unwrap_or_default()
     }
 
+    /// 切页 / 换 tab / 排序后清空卡片 hover：卡片索引属于上一组结果，
+    /// 不清的话新页面第 N 张卡会沿用旧 hover 态。
+    pub(crate) fn reset_card_hover(&mut self) {
+        self.hovered_card = None;
+        self.leaving_card = None;
+        self.hover_generation = self.hover_generation.wrapping_add(1);
+    }
+
     /// 打开播放器。**只在没有实例时创建，已有就复用。**
     ///
     /// 这是附录 F L-1 的修复：`PlayerView` 里唯一的 `InputState` 跟着实例走，
@@ -224,9 +393,9 @@ impl AppRoot {
         if self.playing.is_some() {
             return;
         }
-        self.hovered_card = None;
-        self.leaving_card = None;
-        self.hover_generation = self.hover_generation.wrapping_add(1);
+        // 顶栏下拉不能横跨在播放浮窗之上（12.1 行为红线）。
+        self.search.open = false;
+        self.reset_card_hover();
         let theme = self.theme.clone();
         self.playing = Some(cx.new(|cx| player::PlayerView::new(theme, cx)));
         self.install_player_close_handler(cx);
@@ -237,6 +406,7 @@ impl AppRoot {
         if self.login.is_some() {
             return;
         }
+        self.search.open = false;
         let theme = self.theme.clone();
         let login = cx.new(|cx| login_view::LoginView::new(theme, cx));
         let app_for_close = cx.entity().downgrade();
@@ -306,6 +476,7 @@ impl AppRoot {
         if self.account.is_some() {
             return;
         }
+        self.search.open = false;
         let Some(session) = self.session.clone() else {
             self.ensure_login(cx);
             return;
@@ -360,6 +531,7 @@ impl AppRoot {
         self.dynamic_detail_close_requested = false;
         self.reset_following();
         self.history.reset();
+        self.messages.reset_for_account();
         self.login_prompted = true;
         if let Err(e) = yk_core::session::clear(&yk_core::session::session_path()) {
             eprintln!("[login] 清除 session.json 失败：{e}");
@@ -429,14 +601,19 @@ impl AppRoot {
         self.session = Some(session);
         self.login = None;
         self.login_prompted = true;
-        // 换账号后旧的关注流一定不再适用。
+        // 换账号后旧的关注流 / 消息中心一定不再适用。
         self.reset_following();
+        self.messages.reset_for_account();
+        self.refresh_unread(cx);
         self.refresh_feed_authenticated(cx);
         if self.page == Some(pages::PageKind::Following) {
             self.load_following_page(false, false, cx);
         }
         if self.page == Some(pages::PageKind::History) {
             self.load_history(cx);
+        }
+        if self.page == Some(pages::PageKind::Messages) {
+            self.ensure_messages(cx);
         }
         cx.notify();
     }
@@ -625,7 +802,10 @@ impl AppRoot {
                             }
                         }
                         // 验收快捷入口：YK_DYNAMIC_VIDEO=1 自动展开第一条视频动态。
-                        if !append && std::env::var("YK_DYNAMIC_VIDEO").is_ok() && view.playing.is_none() {
+                        if !append
+                            && std::env::var("YK_DYNAMIC_VIDEO").is_ok()
+                            && view.playing.is_none()
+                        {
                             if let Some(item) =
                                 view.following.iter().find(|i| i.video.is_some()).cloned()
                             {
@@ -679,6 +859,7 @@ impl AppRoot {
         if self.settings.is_some() {
             return;
         }
+        self.search.open = false;
         self.account = None;
         let theme = self.theme.clone();
         let settings = cx.new(|cx| settings_view::SettingsView::new(theme, cx));
@@ -764,6 +945,10 @@ impl AppRoot {
             return;
         }
         self.initial_load_started = true;
+        // 顶栏 / Dock 的红点要在首页就正确，不能等用户先进消息页。
+        if self.session.is_some() {
+            self.refresh_unread(cx);
+        }
         self.reset_feed_paging();
         let cookie = self.cookie();
         self.feed_generation = self.feed_generation.wrapping_add(1);
@@ -947,8 +1132,7 @@ impl AppRoot {
                     Ok(items) => {
                         let added = view.feed.append(&items);
                         view.feed_page = page;
-                        view.feed_has_more =
-                            added > 0 && !items.is_empty() && !view.feed.is_full();
+                        view.feed_has_more = added > 0 && !items.is_empty() && !view.feed.is_full();
                         eprintln!(
                             "[feed] 触底加载第 {page} 页：+{added} 条（共 {} 条）",
                             view.feed.len()
@@ -1062,6 +1246,21 @@ impl AppRoot {
                 self.load_history(cx);
                 true
             }
+            Some(pages::PageKind::Messages) => {
+                if self.session.is_none() {
+                    return false;
+                }
+                self.refresh_messages(cx);
+                true
+            }
+            Some(pages::PageKind::Search) => {
+                if self.search.query.trim().is_empty() {
+                    return false;
+                }
+                // 结果页刷新 = 用同一关键词重拉第一页。
+                self.load_search_page(false, cx);
+                true
+            }
             _ => false,
         }
     }
@@ -1097,6 +1296,7 @@ impl AppRoot {
         match self.page {
             None => self.load_more_feed(cx),
             Some(pages::PageKind::Following) => self.load_following_page(true, false, cx),
+            Some(pages::PageKind::Messages) => self.messages_load_more(cx),
             _ => {}
         }
     }
@@ -1137,6 +1337,8 @@ impl AppRoot {
             following_has_more: false,
             following_generation: 0,
             history: history_view::HistoryState::new(),
+            search: search_view::SearchState::new(),
+            messages: messages_view::MessageState::new(),
             login_prompted: false,
             feed_generation: 0,
             feed_page: 0,
@@ -1183,6 +1385,21 @@ impl Render for AppRoot {
                         .timer(std::time::Duration::from_millis(60))
                         .await;
                     let alive = this.update(cx, |view, cx| {
+                        // 消息页用自己的虚拟列表 / 私信列表，滚动偏移不在 content_scroll 上。
+                        if view.page == Some(pages::PageKind::Messages) {
+                            if let Some(handle) = view
+                                .messages
+                                .active_scroll()
+                                .map(|scroll| scroll.base_handle().clone())
+                            {
+                                let y = handle.offset().y.as_f32();
+                                let max = handle.max_offset().y.as_f32();
+                                if max > 0.0 && y < -80.0 && -y >= max - 240.0 {
+                                    view.messages_load_more(cx);
+                                }
+                            }
+                            return;
+                        }
                         let handle = view.content_scroll.base_handle().clone();
                         let y = handle.offset().y.as_f32();
                         let max = handle.max_offset().y.as_f32();
@@ -1283,6 +1500,13 @@ impl Render for AppRoot {
         if self.page == Some(pages::PageKind::History) {
             self.ensure_history_search_input(window, cx);
         }
+        // 顶栏搜索框常驻，同样只能在拿到 Window 之后创建。
+        self.ensure_search_input(window, cx);
+        self.messages.window_active = window.is_window_active();
+        // 消息页：补焦点 / 私信输入框、处理延迟滚动与 Enter 发送。
+        if self.page == Some(pages::PageKind::Messages) {
+            self.messages_prepare_frame(window, cx);
+        }
 
         let t = &self.theme;
 
@@ -1290,6 +1514,17 @@ impl Render for AppRoot {
         div()
             .relative()
             .size_full()
+            // 点空白处收起搜索联想面板；搜索框与面板自己会 stop_propagation。
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                    if view.search.open {
+                        view.search.open = false;
+                        view.search.selected = None;
+                        cx.notify();
+                    }
+                }),
+            )
             // ⓪ 页面原点探针：封面快照用它把窗口坐标换算成页面坐标。
             //    canvas 自己不可见、不吃点击，每帧 prepaint 更新。
             .child(
@@ -1325,6 +1560,8 @@ impl Render for AppRoot {
                         t,
                         self.session.as_ref().map(|s| s.face_url.clone()),
                         self.account.is_some(),
+                        &self.search,
+                        window,
                         cx,
                     ))
                     // 顶栏下方直接是内容区：分类条已删除（与底部 Dock 重复），
@@ -1350,6 +1587,11 @@ impl Render for AppRoot {
                             self.page_state,
                             self.session.is_some(),
                             &self.history,
+                            &self.search,
+                            &self.messages,
+                            self.hovered_card,
+                            self.leaving_card,
+                            self.hover_generation,
                             dynamic_feed::FeedState {
                                 items: &self.following,
                                 loading: self.following_loading,
@@ -1381,7 +1623,22 @@ impl Render for AppRoot {
                     }),
             )
             // Dock 是「页面场景内的浮层」，挂在内容之后，横向浮在所有封面之上
-            .child(dock(t, self.page, self.session.is_some(), cx))
+            .child(dock(
+                t,
+                self.page,
+                self.session.is_some(),
+                self.messages.unread.total(),
+                cx,
+            ))
+            // 搜索联想面板：挂在根层，天然压在内容与 Dock 之上、播放浮窗之下。
+            .children(search_view::suggest_overlay(t, &self.search, window, cx))
+            // 尚未接入的动作给一个明确提示，避免「点了没反应」。
+            .children(
+                self.search
+                    .notice
+                    .as_deref()
+                    .map(|text| search_view::notice(t, text)),
+            )
             // 历史页的删除确认：盖住内容与 Dock，但仍在播放浮窗之下。
             .children(self.history.confirm.as_ref().map(|kind| {
                 history_view::confirm_overlay(
@@ -1392,6 +1649,22 @@ impl Render for AppRoot {
                     cx,
                 )
             }))
+            // 消息页的移除会话确认 / 轻提示。
+            .children(self.messages.confirm.as_ref().map(|confirm| {
+                messages_view::confirm_overlay(
+                    t,
+                    confirm,
+                    self.messages.confirm_busy,
+                    self.messages.action_error.as_deref(),
+                    cx,
+                )
+            }))
+            .children(
+                self.messages
+                    .notice
+                    .as_deref()
+                    .map(|text| messages_view::notice(t, text)),
+            )
             // 刷新 / 触底加载的浮层提示
             .children(
                 (self.feed_refreshing || self.following_refreshing)
@@ -1446,13 +1719,7 @@ fn status_pill(t: &YkTheme, text: &str, at_top: bool) -> AnyElement {
                 .border_color(s.border_popover)
                 .shadow(t.shadows.shadow_2.clone())
                 .occlude()
-                .child(
-                    div()
-                        .w(px(6.))
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(p.theme_primary),
-                )
+                .child(div().w(px(6.)).h(px(6.)).rounded_full().bg(p.theme_primary))
                 .child(
                     div()
                         .text_size(px(FONT_SIZE_CAPTION))
@@ -1488,61 +1755,64 @@ fn glow_layer(t: &YkTheme) -> impl IntoElement {
 
 // ================= 顶栏（64px） =================
 
+/// 当前页面是否有可重拉的数据。
+///
+/// 顶栏刷新与 Dock「刷新」共用这一份判断：没有数据可拉的页面
+/// （如收藏、排行榜）把入口置灰，而不是点了没反应。
+fn can_refresh_page(page: Option<pages::PageKind>, signed_in: bool) -> bool {
+    page.is_none()
+        || page == Some(pages::PageKind::Search)
+        || (matches!(
+            page,
+            Some(pages::PageKind::Following)
+                | Some(pages::PageKind::History)
+                | Some(pages::PageKind::Messages)
+        ) && signed_in)
+}
+
+/// 顶栏（64px）。
+///
+/// 视觉口径参考 macOS 浏览器工具栏：深色半透明底、两侧成组的胶囊按钮、
+/// 中间一根更宽的搜索框。功能上不新增导航入口 —— 页面切换仍只由底部
+/// Dock 承担；刷新也仍然只在 Dock 里，避免同一条顶栏出现两个刷新。
 fn top_bar(
     t: &YkTheme,
     face_url: Option<String>,
     hide_avatar: bool,
+    search: &search_view::SearchState,
+    window: &Window,
     cx: &mut Context<AppRoot>,
 ) -> impl IntoElement {
     let s = &t.surfaces;
-    let p = &t.palette;
     div()
         .id("topbar-drag")
         .relative()
         // 整条顶栏都能按住拖动窗口。原生透明标题栏只让顶部那条 titlebar
         // 高度参与拖动，顶栏下半部分实测按不住 —— 在用户眼里就是 bug。
-        // 这里显式接管：按下即发起系统窗口拖拽，顶栏里的控件用自己的
-        // `occlude()` 把事件截住，所以点输入框 / 图标 / 头像不会误拖窗口。
-        .on_mouse_down(MouseButton::Left, |_, window, _| {
-            window.start_window_move()
-        })
+        // 控件组各自截住 mouse_down，所以点胶囊 / 输入框不会误拖窗口。
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
         .flex()
         .items_center()
         .w_full()
         .h(px(TOP_BAR_HEIGHT))
-        // 设计稿 03：窗口内边距 20，搜索框居中最大 520，右侧 38 圆形图标组。
-        // macOS 标题栏透明后红黄绿按钮压在顶栏左上，logo 再让出 64px。
+        // 窗口再矮也不能把工具栏压扁：内容区自己滚动 / 留白。
+        .flex_shrink_0()
+        // macOS 透明标题栏的红黄绿压在顶栏左上：按钮占 20..72，品牌胶囊从 96
+        // 开始，留出 24px 呼吸位（参考稿里红黄绿与第一个胶囊之间也是大留白）。
         .pl(px(if cfg!(target_os = "macos") {
-            SPACE_5 + 64.0
+            SPACE_5 + 76.0
         } else {
             SPACE_5
         }))
         .pr(px(SPACE_5))
         .gap(px(SPACE_4))
-        // 顶栏压在内容上：必须用 Strong 变体（浮层压在内容之上，
-        // 而 GPUI 没有元素级 backdrop blur，只提高自身不透明度）
-        .bg(s.surface_elevated_strong)
+        // 比卡片 / 浮层更暗、带一点透明：工具栏是「窗口的外壳」，不抢内容的视觉重量。
+        // 内容不与顶栏重叠（顶栏是 flex 列的第一个 child），所以这里可以放心用
+        // 半透明表面；GPUI 没有元素级 backdrop blur，透出的是页面底色与光晕。
+        .bg(s.surface_toolbar)
         .border_b_1()
         .border_color(s.border_subtle)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(SPACE_2))
-                .flex_shrink_0()
-                .child(
-                    Icon::new(IconName::Tv)
-                        .size(px(24.))
-                        .text_color(p.theme_primary),
-                )
-                .child(
-                    div()
-                        .text_size(px(17.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(s.text_primary)
-                        .child("YKPili"),
-                ),
-        )
+        .child(brand_pill(t, cx))
         .child(
             div()
                 .flex_1()
@@ -1550,105 +1820,85 @@ fn top_bar(
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(search_bar(t)),
+                .child(search_view::search_bar(t, search, window, cx)),
         )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(SPACE_1))
-                .flex_shrink_0()
-                // 历史 / 收藏 / 消息 / 刷新 四个快捷动作已挪进底部 Dock，
-                // 顶栏右侧只保留账号头像。
-                .child(avatar(t, face_url, hide_avatar, cx)),
-        )
+        .child(toolbar_group(t, face_url, hide_avatar, cx))
 }
 
-fn search_bar(t: &YkTheme) -> impl IntoElement {
+/// 左侧品牌胶囊：点一下回首页。整块是一个可点击目标，也负责截住窗口拖拽。
+fn brand_pill(t: &YkTheme, cx: &mut Context<AppRoot>) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
-    let mut shadow = t.shadows.shadow_1.clone();
-    shadow.extend(t.shadows.edge_glow_1.clone());
+    let hover = s.fill_3;
     div()
+        .id("topbar-home")
+        .h(px(TOP_BAR_CONTROL_HEIGHT))
+        .px(px(SPACE_3))
         .flex()
         .items_center()
         .gap(px(SPACE_2))
-        .w_full()
-        .max_w(px(520.))
-        .h(px(TOP_BAR_CONTROL_HEIGHT))
-        // 胶囊搜索框：左 16、右 8，按钮离边 8。
-        .pl(px(SPACE_4))
-        .pr(px(SPACE_2))
+        .flex_shrink_0()
         .rounded_full()
-        .bg(s.surface_elevated)
+        .bg(s.fill_2)
         .border_1()
-        .border_color(s.border_popover)
-        .shadow(shadow)
-        // 搜索框整体是控件，不参与顶栏拖动：挡住顶栏的拖拽 hitbox。
+        .border_color(s.border_strong)
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
         .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
+            // 回首页：不重拉推荐流（Dock 的「个性推荐」同款行为），只切页 + 回顶。
+            view.search.open = false;
+            view.search.selected = None;
+            view.page = None;
+            view.reset_card_hover();
+            view.top_refresh_armed = false;
+            view.pull_refresh_triggered = false;
+            view.scroll_content_to_top();
+            window.refresh();
+            cx.stop_propagation();
+            cx.notify();
+        }))
         .child(
-            Icon::new(IconName::Search)
-                .size(px(18.))
-                .text_color(s.text_quaternary),
+            Icon::new(IconName::Tv)
+                .size(px(22.))
+                .text_color(p.theme_primary),
         )
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_size(px(FONT_SIZE_BODY))
-                .text_color(s.text_quaternary)
-                .child("搜索视频、UP 主、番剧"),
-        )
-        .child(
-            div()
-                .id("topbar-search-go")
-                .h(px(34.))
-                .px(px(SPACE_4))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .bg(p.theme_primary)
-                .text_size(px(FONT_SIZE_CONTROL))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0xFFFFFF))
-                .cursor_pointer()
-                .child("搜索"),
+                .text_size(px(15.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(s.text_primary)
+                .child("YKPili"),
         )
 }
 
-fn top_icon_button(t: &YkTheme, icon: IconName, unread: bool) -> impl IntoElement {
+/// 右上角头像胶囊。
+///
+/// 2026-10-27 反馈：暂时只保留头像，不放假设置入口；胶囊只作为材质容器，
+/// 等有真实功能（设置 / 通知等）再往里加图标。容器截住 mouse_down，
+/// 点头像不会误拖窗口。
+fn toolbar_group(
+    t: &YkTheme,
+    face_url: Option<String>,
+    hide_avatar: bool,
+    cx: &mut Context<AppRoot>,
+) -> impl IntoElement {
     let s = &t.surfaces;
-    let p = &t.palette;
-    let bg = s.fill_2;
-    let fg = s.text_primary;
-    let mut button = div()
-        .relative()
-        .w(px(38.))
-        .h(px(38.))
+    div()
         .flex()
         .items_center()
-        .justify_center()
+        .gap(px(SPACE_0_5))
+        .p(px(6.))
+        .h(px(TOP_BAR_CONTROL_HEIGHT))
+        .flex_shrink_0()
         .rounded_full()
-        .text_color(s.text_secondary)
-        .cursor_pointer()
-        .hover(move |style| style.bg(bg).text_color(fg))
-        // 图标按钮是控件，不能把按下事件冒泡给顶栏的拖拽层。
+        .bg(s.fill_2)
+        .border_1()
+        .border_color(s.border_strong)
         .occlude()
-        .child(Icon::new(icon).size(px(18.)));
-    if unread {
-        button = button.child(
-            div()
-                .absolute()
-                .top(px(8.))
-                .right(px(9.))
-                .w(px(6.))
-                .h(px(6.))
-                .rounded_full()
-                .bg(p.bili_pink),
-        );
-    }
-    button
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .child(avatar(t, face_url, hide_avatar, cx))
 }
 
 fn avatar(
@@ -1675,6 +1925,7 @@ fn avatar(
         .cursor_pointer()
         // 头像点击是真实交互，必须挡住顶栏拖拽，否则一点就变成拖窗口。
         .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
             if view.session.is_some() {
                 view.ensure_account(cx);
@@ -1780,6 +2031,11 @@ fn content_area(
     state: pages::PageState,
     signed_in: bool,
     history: &history_view::HistoryState,
+    search: &search_view::SearchState,
+    messages: &messages_view::MessageState,
+    hovered_card: Option<usize>,
+    leaving_card: Option<usize>,
+    hover_generation: u64,
     following: dynamic_feed::FeedState<'_>,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
@@ -1790,6 +2046,17 @@ fn content_area(
     // Dock 现在是底部横向浮层：横向不再占位，内容区左右各留 24；
     // 底部留出 `DOCK_RESERVED`，否则最后一行封面会被 Dock 压住 ——
     // 浮层「在上」不等于内容可以钻到它背后。
+
+    // 消息页自带虚拟列表与输入框，滚动由页内自己管，不接外壳的 content-scroll。
+    if page == Some(pages::PageKind::Messages) {
+        return div()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .bg(t.surfaces.bg_base)
+            .child(messages_view::page(t, messages, active_images, window, cx))
+            .into_any_element();
+    }
 
     // 历史页自带左右分栏 + 左栏独立滚动，不接外壳的 `content-scroll`：
     // 右栏必须固定，跟着整页滚就失去「日期导航」的意义。
@@ -1804,6 +2071,7 @@ fn content_area(
                 history,
                 signed_in,
                 active_images,
+                layout_bounds.clone(),
                 window,
                 cx,
             ))
@@ -1827,6 +2095,18 @@ fn content_area(
                 visible_y,
                 active_images.clone(),
                 layout_bounds,
+                window,
+                cx,
+            )
+        } else if kind == pages::PageKind::Search {
+            search_view::page(
+                t,
+                search,
+                hovered_card,
+                leaving_card,
+                hover_generation,
+                layout_bounds,
+                active_images.clone(),
                 window,
                 cx,
             )
@@ -1908,8 +2188,7 @@ fn content_area(
 
     // 首页的真实可视范围从滚动偏移算，而不是用虚拟列表的 overdraw 范围：
     // 后者会多给 2 行，拿它当加载范围会让最后一行「可见但没图」。
-    let viewport_h =
-        (window.viewport_size().height.as_f32() - TOP_BAR_HEIGHT).max(row_h);
+    let viewport_h = (window.viewport_size().height.as_f32() - TOP_BAR_HEIGHT).max(row_h);
     let offset_y = scroll.base_handle().offset().y.as_f32();
     let first_visible = (((-offset_y) - SPACE_4).max(0.0) / row_h).floor() as usize;
     let last_visible = (((-offset_y) + viewport_h - SPACE_4).max(0.0) / row_h).ceil() as usize;
@@ -2017,9 +2296,10 @@ fn card(
     let title = item.title.clone();
     let bvid = item.bvid.clone();
     let idx = item.index;
-    let hover_shadow = t.shadows.shadow_card_hover.clone();
-    let hover_border = s.border_popover;
-    let hover_bg = s.surface_content;
+    // 与顶栏胶囊同一套「玻璃」：fill_2 底 + border_strong 边 + 带内高光的阴影。
+    let hover_shadow = t.shadows.shadow_glass_card.clone();
+    let hover_border = s.border_strong;
+    let hover_bg = s.fill_2;
     // 当前帧封面几何：prepaint 写入，点击时读取；不 notify。
     let cover_source: Rc<RefCell<Option<player::CoverSource>>> = Rc::new(RefCell::new(None));
     let cover_image_url = item.cover_thumb_url();
@@ -2205,12 +2485,7 @@ fn card(
                         .line_clamp(2)
                         .child(title.clone()),
                 )
-                .child(byline(
-                    t,
-                    item,
-                    load_cover,
-                    active_images.clone(),
-                )),
+                .child(byline(t, item, load_cover, active_images.clone())),
         )
         // 子元素 0 是封面。记录实际布局（含 hover 放大后的 inset），
         // 点击时用它作为浮窗展开的起点；这里只写 Rc，不触发重绘。
@@ -2716,15 +2991,22 @@ fn dock_action(
     label: &'static str,
     unread: bool,
     enabled: bool,
+    active: bool,
 ) -> Div {
     let s = &t.surfaces;
     let p = &t.palette;
-    let hover_bg = s.fill_1;
-    let hover_fg = s.text_primary;
-    let fg = if enabled {
-        s.text_secondary
-    } else {
+    let fg = if !enabled {
         s.text_quaternary
+    } else if active {
+        s.text_on_accent
+    } else {
+        s.text_secondary
+    };
+    let hover_bg = if active { p.theme_primary } else { s.fill_2 };
+    let hover_fg = if active {
+        s.text_on_accent
+    } else {
+        s.text_primary
     };
     let mut action = div()
         .h(px(DOCK_ITEM_HEIGHT))
@@ -2733,8 +3015,17 @@ fn dock_action(
         .items_center()
         .gap(px(SPACE_2))
         .rounded_full()
+        .bg(if active {
+            p.theme_primary
+        } else {
+            hsla(0., 0., 0., 0.)
+        })
         .text_size(px(FONT_SIZE_CAPTION))
-        .font_weight(FontWeight::MEDIUM)
+        .font_weight(if active {
+            FontWeight::SEMIBOLD
+        } else {
+            FontWeight::MEDIUM
+        })
         .text_color(fg)
         .child(
             div()
@@ -2764,10 +3055,15 @@ fn dock_action(
     action
 }
 
+/// 底部 Dock。
+///
+/// `msg_unread` 是消息中心的总未读，**只在这里画红点**：顶栏已经不放消息铃铛，
+/// 未读状态全部由 Dock「消息」按钮承接（数字仍只在消息中心分段上显示）。
 fn dock(
     t: &YkTheme,
     page: Option<pages::PageKind>,
     signed_in: bool,
+    msg_unread: u64,
     cx: &mut Context<AppRoot>,
 ) -> impl IntoElement {
     let s = &t.surfaces;
@@ -2780,13 +3076,15 @@ fn dock(
         .gap(px(SPACE_1))
         .p(px(6.))
         .rounded_full()
-        .bg(s.surface_elevated_strong)
+        // 与顶栏同一套材质：SurfaceToolbar 底 + BorderStrong 边 + 玻璃投影/内高光。
+        // Dock 浮在封面之上，底色必须足够实（0.95），否则亮封面会透上来。
+        .bg(s.surface_toolbar)
         .border_1()
-        .border_color(s.border_subtle)
+        .border_color(s.border_strong)
         // 浮层必须挡住下层的封面：胶囊的 padding / 按钮间隙没有自己的
         // 点击处理器，不 occlude 的话点缝里会直接点开背后的封面。
         .occlude()
-        .shadow(t.shadows.shadow_3.clone());
+        .shadow(t.shadows.shadow_glass_elevated.clone());
 
     for (i, entry) in DOCK_ENTRIES.iter().enumerate() {
         let active = page == entry.page;
@@ -2800,7 +3098,7 @@ fn dock(
         } else {
             hsla(0., 0., 0., 0.)
         };
-        let hover_bg = if active { p.theme_primary } else { s.fill_1 };
+        let hover_bg = if active { p.theme_primary } else { s.fill_2 };
         let target = entry.page;
         row = row.child(
             div()
@@ -2847,6 +3145,7 @@ fn dock(
                         }
                     }
                     this.page = target;
+                    this.reset_card_hover();
                     this.top_refresh_armed = false;
                     this.pull_refresh_triggered = false;
                     // 切页回到顶部：滚动位置属于「上一页」，不该带到新页面。
@@ -2860,49 +3159,110 @@ fn dock(
     // 顶栏原来的四个快捷动作挪进 Dock：导航与动作之间用 1px 分隔线。
     // 刷新只在有数据的页面上可用：「个性推荐」、登录后的「正在关注」与「历史」；
     // 其余页面没有可重拉的数据，按钮置灰，不假装刷新。
-    let can_refresh = page.is_none()
-        || (matches!(
-            page,
-            Some(pages::PageKind::Following) | Some(pages::PageKind::History)
-        ) && signed_in);
+    let can_refresh = can_refresh_page(page, signed_in);
     row = row
         .child(
             div()
                 .w(px(1.))
                 .h(px(20.))
                 .mx(px(SPACE_1))
-                .bg(s.border_subtle),
+                .bg(s.border_popover),
         )
         // 顺序：历史 / 收藏 / 消息 / 刷新；与导航项一样带文字
         .child(
-            dock_action(t, IconName::Clock, "历史", false, true)
-                .id("dock-history")
-                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                    // 再点一次「历史」= 刷新第一页（与一级入口的习惯一致）。
-                    if this.page == Some(pages::PageKind::History) {
-                        this.refresh_page_manually(cx);
-                        window.refresh();
-                        cx.notify();
-                        return;
-                    }
-                    this.page = Some(pages::PageKind::History);
-                    this.top_refresh_armed = false;
-                    this.pull_refresh_triggered = false;
-                    if this.session.is_none() {
-                        this.ensure_login(cx);
-                    }
-                    // 从其他页面进入历史：重拉第一页，确保刚看完的视频、
-                    // 其他设备产生的记录能立刻出现；不是只在首次进入时加载。
-                    this.load_history(cx);
-                    this.history.scroll.scroll_to_item(0, ScrollStrategy::Top);
+            dock_action(
+                t,
+                IconName::Clock,
+                "历史",
+                false,
+                true,
+                page == Some(pages::PageKind::History),
+            )
+            .id("dock-history")
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                // 再点一次「历史」= 刷新第一页（与一级入口的习惯一致）。
+                if this.page == Some(pages::PageKind::History) {
+                    this.refresh_page_manually(cx);
                     window.refresh();
                     cx.notify();
-                })),
+                    return;
+                }
+                this.page = Some(pages::PageKind::History);
+                this.reset_card_hover();
+                this.top_refresh_armed = false;
+                this.pull_refresh_triggered = false;
+                if this.session.is_none() {
+                    this.ensure_login(cx);
+                }
+                // 从其他页面进入历史：重拉第一页，确保刚看完的视频、
+                // 其他设备产生的记录能立刻出现；不是只在首次进入时加载。
+                this.load_history(cx);
+                this.history.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                window.refresh();
+                cx.notify();
+            })),
         )
-        .child(dock_action(t, IconName::Bookmark, "收藏", false, true))
-        .child(dock_action(t, IconName::Bell, "消息", true, true))
         .child(
-            dock_action(t, IconName::RefreshCw, "刷新", false, can_refresh)
+            dock_action(
+                t,
+                IconName::Bookmark,
+                "收藏",
+                false,
+                true,
+                page == Some(pages::PageKind::Favorites),
+            )
+            .id("dock-favorites")
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                if this.page == Some(pages::PageKind::Favorites) {
+                    window.refresh();
+                    cx.notify();
+                    return;
+                }
+                this.page = Some(pages::PageKind::Favorites);
+                this.reset_card_hover();
+                this.top_refresh_armed = false;
+                this.pull_refresh_triggered = false;
+                this.scroll_content_to_top();
+                window.refresh();
+                cx.notify();
+            })),
+        )
+        .child(
+            dock_action(
+                t,
+                IconName::Bell,
+                "消息",
+                signed_in && msg_unread > 0,
+                true,
+                page == Some(pages::PageKind::Messages),
+            )
+            .id("dock-messages")
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                if this.session.is_none() {
+                    this.ensure_login(cx);
+                    window.refresh();
+                    cx.notify();
+                    return;
+                }
+                if this.page == Some(pages::PageKind::Messages) {
+                    this.refresh_messages(cx);
+                    window.refresh();
+                    cx.notify();
+                    return;
+                }
+                this.page = Some(pages::PageKind::Messages);
+                this.reset_card_hover();
+                this.top_refresh_armed = false;
+                this.pull_refresh_triggered = false;
+                this.messages_land_on_first_unread(cx);
+                this.ensure_messages(cx);
+                this.scroll_content_to_top();
+                window.refresh();
+                cx.notify();
+            })),
+        )
+        .child(
+            dock_action(t, IconName::RefreshCw, "刷新", false, can_refresh, false)
                 .id("dock-refresh")
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     // 刷新是从第一页重拉，滚动位置留在旧内容中间没有意义。

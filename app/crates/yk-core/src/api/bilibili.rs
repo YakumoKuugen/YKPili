@@ -212,6 +212,112 @@ pub fn dynamic_comments(oid: &str, kind: i64, cookie: &str, pn: u32, ps: u32) ->
     }
 }
 
+// ================= 消息中心 =================
+
+/// 私信 / 会话接口的域名。互动接口仍在 `api.bilibili.com` 下。
+pub const MESSAGE_BASE: &str = "https://api.vc.bilibili.com";
+
+/// 未读数（`/x/msgfeed/unread`）。
+pub fn msgfeed_unread(cookie: &str) -> Request {
+    Request {
+        url: format!(
+            "{API_BASE}/x/msgfeed/unread?platform=web&build=0&mobi_app=web"
+        ),
+        cookie: cookie.to_string(),
+        name: "msgfeed_unread",
+    }
+}
+
+/// 互动列表（回复 / @ / 赞）。三个通道共用一套游标参数。
+///
+/// `cursor.id` / `cursor.time` 来自上一页响应的 `data.cursor`；
+/// 第一页传 0 / 0，`is_end` 判到底。
+pub fn msgfeed_inbox(
+    channel: crate::messages::MessageChannel,
+    cursor: (i64, i64),
+    cookie: &str,
+) -> Request {
+    let path = match channel {
+        crate::messages::MessageChannel::Reply => "reply",
+        crate::messages::MessageChannel::Mention => "at",
+        crate::messages::MessageChannel::Like => "like",
+        // 私信不走 msgfeed；调用方不应该走到这里。
+        crate::messages::MessageChannel::Dm => "reply",
+    };
+    Request {
+        url: format!(
+            "{API_BASE}/x/msgfeed/{path}?platform=web&mobi_app=web&build=0&ps=30&id={}&time={}",
+            cursor.0, cursor.1
+        ),
+        cookie: cookie.to_string(),
+        name: "msgfeed_inbox",
+    }
+}
+
+/// 私信会话列表：`session_type=9` 是「互相关注」档，本客户端只请求这一档。
+pub fn message_sessions(begin_ts: Option<i64>, cookie: &str) -> Request {
+    let begin = begin_ts
+        .filter(|ts| *ts > 0)
+        .map(|ts| format!("&begin_ts={ts}"))
+        .unwrap_or_default();
+    Request {
+        url: format!(
+            "{MESSAGE_BASE}/session_svr/v1/session_svr/get_sessions?session_type=9&group_fold=1&unfold_fold=0&sort_rule=2&build=0&mobi_app=web{begin}"
+        ),
+        cookie: cookie.to_string(),
+        name: "message_sessions",
+    }
+}
+
+/// 会话消息。`begin_seqno` 为空表示最新一页；更早一页传上一页的 `min_seqno`。
+pub fn session_messages(talker_id: i64, begin_seqno: Option<i64>, size: u32, cookie: &str) -> Request {
+    let begin = begin_seqno
+        .filter(|seqno| *seqno > 0)
+        .map(|seqno| format!("&begin_seqno={seqno}"))
+        .unwrap_or_default();
+    Request {
+        url: format!(
+            "{MESSAGE_BASE}/svr_sync/v1/svr_sync/fetch_session_msgs?talker_id={talker_id}&session_type=1&size={size}{begin}&build=0&mobi_app=web"
+        ),
+        cookie: cookie.to_string(),
+        name: "session_messages",
+    }
+}
+
+/// 用户名片：补私信会话的昵称与头像。
+pub fn user_cards(uids: &[i64], cookie: &str) -> Request {
+    let joined = uids
+        .iter()
+        .map(|mid| mid.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    Request {
+        url: format!(
+            "{MESSAGE_BASE}/account/v1/user/cards?uids={joined}&build=0&mobi_app=web"
+        ),
+        cookie: cookie.to_string(),
+        name: "user_cards",
+    }
+}
+
+/// 互关好友名单（E-24 的退路：进页拉一次，5 分钟 TTL）。
+pub fn mutual_friends(mid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/relation/friends?fid={mid}&page=1&ps=50&order=desc"),
+        cookie: cookie.to_string(),
+        name: "mutual_friends",
+    }
+}
+
+/// 单条关系（打开会话时再校验一次）：`attribute` 6 = 已互粉，128 = 已拉黑。
+pub fn relation_attribute(fid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/relation?fid={fid}"),
+        cookie: cookie.to_string(),
+        name: "relation_attribute",
+    }
+}
+
 /// 发送请求的能力抽象。
 ///
 /// 目前没有接具体实现：离线环境里没有可用的 HTTP crate。
@@ -291,4 +397,39 @@ mod tests {
         let rid = |s: &str| s.split("w_rid=").nth(1).unwrap().to_string();
         assert_ne!(rid(&a.url), rid(&b.url));
     }
+
+    #[test]
+    fn msgfeed_urls_carry_channel_and_cursor() {
+        use crate::messages::MessageChannel;
+        let reply = msgfeed_inbox(MessageChannel::Reply, (12, 34), "SESSDATA=x");
+        assert!(reply.url.contains("/x/msgfeed/reply?"));
+        assert!(reply.url.contains("id=12"));
+        assert!(reply.url.contains("time=34"));
+        let mention = msgfeed_inbox(MessageChannel::Mention, (0, 0), "");
+        assert!(mention.url.contains("/x/msgfeed/at?"));
+        let like = msgfeed_inbox(MessageChannel::Like, (0, 0), "");
+        assert!(like.url.contains("/x/msgfeed/like?"));
+        let unread = msgfeed_unread("SESSDATA=x");
+        assert!(unread.url.contains("/x/msgfeed/unread"));
+    }
+
+    #[test]
+    fn dm_urls_carry_optional_cursors() {
+        let sessions = message_sessions(None, "SESSDATA=x");
+        assert!(sessions.url.contains("session_type=9"));
+        assert!(!sessions.url.contains("begin_ts="));
+        let older = message_sessions(Some(1_700_000_000_123_456), "");
+        assert!(older.url.contains("begin_ts=1700000000123456"));
+
+        let latest = session_messages(77, None, 20, "");
+        assert!(latest.url.contains("talker_id=77"));
+        assert!(latest.url.contains("size=20"));
+        assert!(!latest.url.contains("begin_seqno="));
+        let older_msgs = session_messages(77, Some(123), 20, "");
+        assert!(older_msgs.url.contains("begin_seqno=123"));
+
+        let cards = user_cards(&[1, 2, 3], "");
+        assert!(cards.url.contains("uids=1,2,3"));
+    }
+
 }

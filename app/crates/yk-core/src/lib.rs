@@ -18,10 +18,12 @@ pub mod format;
 pub mod history;
 pub mod image_cache;
 pub mod login;
+pub mod messages;
 pub mod models;
 pub mod playback;
 pub mod player;
 pub mod resume;
+pub mod search;
 pub mod session;
 
 pub use cache::CacheManager;
@@ -34,8 +36,16 @@ pub use feed::{Feed, MAX_ITEMS};
 pub use history::{HistoryCursor, HistoryDay, HistoryEntry};
 pub use image_cache::ImageDiskCache;
 pub use login::{LoginFlow, PollAction, POLL_INTERVAL_MS};
+pub use messages::{
+    ChatKind, ChatMessage, Conversation, InboxCursor, MessageChannel, MessageEntry, MessageTarget,
+    MessageUser, UnreadCounts,
+};
 pub use models::{CoverItem, LoginState, UserSession};
 pub use playback::PlaybackSource;
 pub use player::{PlayerPrefs, PlayerState, RATE_OPTIONS};
 pub use resume::{ResumeRecord, ResumeStore};
+pub use search::{
+    Hotword, SearchArticle, SearchHistory, SearchLive, SearchMedia, SearchPage, SearchResults,
+    SearchSort, SearchTab, SearchUser, SearchVideo, SuggestItem,
+};
 pub use session::{AppShell, Screen};

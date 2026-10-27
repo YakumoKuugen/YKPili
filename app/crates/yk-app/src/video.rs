@@ -19,7 +19,7 @@ mod mac {
 
     use objc2_core_foundation::{CFDictionary, CFRetained, CFType};
     use objc2_core_video::{
-        kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelBufferIOSurfacePropertiesKey,
+        kCVPixelBufferIOSurfacePropertiesKey, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
         CVPixelBuffer, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
         CVPixelBufferGetBytesPerRowOfPlane, CVPixelBufferGetHeightOfPlane,
         CVPixelBufferGetWidthOfPlane, CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags,
@@ -33,7 +33,9 @@ mod mac {
 
     impl TestFrame {
         pub fn new(width: usize, height: usize) -> Self {
-            Self { buffer: make(width, height) }
+            Self {
+                buffer: make(width, height),
+            }
         }
 
         pub fn buffer(&self) -> CFRetained<CVPixelBuffer> {
@@ -43,7 +45,9 @@ mod mac {
 
     impl Clone for TestFrame {
         fn clone(&self) -> Self {
-            Self { buffer: self.buffer.clone() }
+            Self {
+                buffer: self.buffer.clone(),
+            }
         }
     }
 
@@ -65,7 +69,8 @@ mod mac {
             )
         };
         assert_eq!(status, 0, "CVPixelBufferCreate 失败, status={status}");
-        let buffer = unsafe { CFRetained::from_raw(NonNull::new(out).expect("pixel buffer 为 null")) };
+        let buffer =
+            unsafe { CFRetained::from_raw(NonNull::new(out).expect("pixel buffer 为 null")) };
 
         unsafe {
             CVPixelBufferLockBaseAddress(&buffer, CVPixelBufferLockFlags::empty());
@@ -100,7 +105,11 @@ mod mac {
                 for x in 0..uv_w {
                     let off = y * uv_stride + x * 2;
                     // 左半偏蓝（U 高）、右半偏红（V 高）
-                    let (u, v) = if x < uv_w / 2 { (200u8, 90u8) } else { (90u8, 200u8) };
+                    let (u, v) = if x < uv_w / 2 {
+                        (200u8, 90u8)
+                    } else {
+                        (90u8, 200u8)
+                    };
                     *uv_base.add(off) = u;
                     *uv_base.add(off + 1) = v;
                 }

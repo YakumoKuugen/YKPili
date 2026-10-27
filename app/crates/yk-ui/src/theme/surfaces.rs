@@ -28,6 +28,9 @@ pub struct YkSurfaces {
     pub surface_elevated_solid: Hsla,
     pub surface_elevated_solid_hover: Hsla,
     pub surface_elevated_strong: Hsla,
+    /// 顶栏 / 工具栏底：比卡片 / 浮层更暗、带一点透明，让工具栏成为「窗口外壳」
+    /// 而不是另一块内容卡。取色参考 macOS 浏览器工具栏（#2E3034）。
+    pub surface_toolbar: Hsla,
     pub fill_1: Hsla,
     pub fill_2: Hsla,
     pub fill_3: Hsla,
@@ -69,6 +72,7 @@ pub fn light() -> YkSurfaces {
         surface_elevated_solid: rgba(0xFFFFFFFF).into(),
         surface_elevated_solid_hover: rgba(0xD9D9D9FF).into(),
         surface_elevated_strong: rgba(0xFFFFFFEB).into(),
+        surface_toolbar: rgba(0xF6F7F9F2).into(),
         fill_1: rgba(0x83839126).into(),
         fill_2: rgba(0x8383914D).into(),
         fill_3: rgba(0x83839173).into(),
@@ -116,6 +120,7 @@ pub fn dark() -> YkSurfaces {
         surface_elevated_solid: rgba(0x373A3EFF).into(),
         surface_elevated_solid_hover: rgba(0x414449FF).into(),
         surface_elevated_strong: rgba(0x373A3EEB).into(),
+        surface_toolbar: rgba(0x2B2E33F2).into(),
         fill_1: rgba(0x8383911A).into(),
         fill_2: rgba(0x83839133).into(),
         fill_3: rgba(0x8383914D).into(),

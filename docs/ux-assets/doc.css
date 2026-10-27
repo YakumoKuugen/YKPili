@@ -93,6 +93,7 @@
   --surface-elevated-hover: rgba(65, 68, 73, 0.68);
   --surface-elevated-solid: #373A3E; --surface-elevated-solid-hover: #414449;
   --surface-elevated-strong: rgba(55, 58, 62, 0.92);
+  --surface-toolbar: rgba(43, 46, 51, 0.95);
 
   --fill-1: rgba(131, 131, 145, 0.10); --fill-2: rgba(131, 131, 145, 0.20);
   --fill-3: rgba(131, 131, 145, 0.30); --fill-4: rgba(131, 131, 145, 0.40);
@@ -143,6 +144,7 @@
   --surface-elevated-hover: rgba(217, 217, 217, 0.68);
   --surface-elevated-solid: #FFFFFF; --surface-elevated-solid-hover: #D9D9D9;
   --surface-elevated-strong: rgba(255, 255, 255, 0.92);
+  --surface-toolbar: rgba(246, 247, 249, 0.95);
 
   --fill-1: rgba(131, 131, 145, 0.15); --fill-2: rgba(131, 131, 145, 0.30);
   --fill-3: rgba(131, 131, 145, 0.45); --fill-4: rgba(131, 131, 145, 0.60);
@@ -366,18 +368,31 @@ tbody tr:hover { background: var(--fill-1); }
 .topbar .logo { display: flex; align-items: center; gap: var(--space-2); font-weight: var(--fw-bold);
                 font-size: 17px; color: var(--text-1); }
 .topbar .logo .mark { color: var(--theme-primary); }
+/* 参考 macOS 浏览器工具栏：左侧品牌、右侧工具都收进 46 高胶囊。 */
+.topbar .brand-pill { height: var(--topbar-control-h); display: flex; align-items: center;
+  gap: var(--space-2); padding: 0 var(--space-3); flex-shrink: 0;
+  border-radius: var(--radius-full); background: var(--fill-2);
+  border: 1px solid var(--border-strong); color: var(--text-1);
+  font-weight: var(--fw-bold); font-size: 15px; cursor: pointer; }
+.topbar .brand-pill .mark { color: var(--theme-primary); }
+.topbar .toolbar-pill { height: var(--topbar-control-h); display: flex; align-items: center;
+  gap: 2px; padding: 0 6px; margin-left: auto; flex-shrink: 0;
+  border-radius: var(--radius-full); background: var(--fill-2);
+  border: 1px solid var(--border-strong); }
+.topbar .toolbar-pill .iconbtn { width: 34px; height: 34px; }
+.topbar .tb-sep { width: 1px; height: 18px; margin: 0 var(--space-1); background: var(--border-popover); }
 
 .search {
-  flex: 1; max-width: 520px; height: var(--topbar-control-h); margin: 0 auto;
+  flex: 1; max-width: 600px; height: var(--topbar-control-h); margin: 0 auto;
   display: flex; align-items: center; gap: var(--space-2);
   padding: 0 var(--space-2) 0 var(--space-4);
   border-radius: var(--radius-full);
-  background: var(--surface-elevated); border: 1px solid var(--border-popover);
+  background: var(--surface-elevated-solid); border: 1px solid var(--border-popover);
   box-shadow: var(--shadow-1), var(--edge-glow);
   transition: border-color var(--dur-fast) var(--ease-standard), box-shadow var(--dur-fast) var(--ease-standard);
 }
-.search:focus-within { border-color: var(--theme-60);
-                       box-shadow: 0 0 0 3px var(--theme-20), var(--shadow-2); }
+.search:focus-within { border-color: var(--theme-primary);
+                       box-shadow: 0 0 0 1.5px var(--theme-primary), 0 0 0 4px var(--theme-20), var(--shadow-2); }
 .search svg { color: var(--text-4); }
 .search input { flex: 1; border: 0; outline: 0; background: transparent; color: var(--text-1);
                 font-family: inherit; font-size: var(--fs-body); }

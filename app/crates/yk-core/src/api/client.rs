@@ -9,13 +9,19 @@
 
 use crate::api::bilibili::{self, HttpClient, Request};
 use crate::api::models::{
-    DynamicFeedResponse, HistoryResponse, PlayUrlData, RecommendResponse, RecommendVideoItem,
-    ReplyResponse, UserInfoResponse, VideoInfoData, VideoInfoResponse, VideoPlayUrlResponse,
-    VideoTagsResponse,
+    DynamicFeedResponse, HistoryResponse, MsgfeedInboxResponse, MsgfeedUnreadResponse, PlayUrlData,
+    RecommendResponse, RecommendVideoItem, RelationFriendsResponse, RelationResponse, ReplyResponse,
+    SessionListResponse, SessionMsgsResponse, UserCardsResponse, UserInfoResponse, VideoInfoData,
+    VideoInfoResponse, VideoPlayUrlResponse, VideoTagsResponse,
 };
 use crate::api::wbi;
 use crate::dynamic::{CommentTarget, DynamicComment, DynamicItem, DynamicPage};
+use std::collections::{HashMap, HashSet};
 use crate::history::{HistoryCursor, HistoryEntry};
+use crate::messages::{
+    aggregate_likes, ChatMessage, Conversation, InboxCursor, MessageChannel, MessageEntry,
+    MessageUser, UnreadCounts,
+};
 use crate::playback::{select_playback, PlaybackSource};
 
 /// 伪装成桌面浏览器 —— 与旧实现的 UA 策略一致。
@@ -537,6 +543,470 @@ fn check_write_code(body: &str, action: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ================= 消息中心 =================
+
+/// 未读数：`reply` / `at` / `like` / `recv_like` 各取各的，私信由会话列表另算。
+pub fn fetch_msgfeed_unread<C>(client: &C, cookie: &str) -> Result<UnreadCounts, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if cookie.trim().is_empty() {
+        return Err("未登录，无法读取消息未读数".into());
+    }
+    let body = client.get(&bilibili::msgfeed_unread(cookie))?;
+    let parsed: MsgfeedUnreadResponse =
+        serde_json::from_str(&body).map_err(|e| format!("未读数解析失败：{e}"))?;
+    check_message_code(parsed.code, &parsed.message, "未读数")?;
+    let data = parsed.data.ok_or_else(|| "未读数响应缺少 data".to_string())?;
+    Ok(UnreadCounts::from_unread_data(&data))
+}
+
+/// 拉一页互动消息。`cursor = None` 为第一页；返回下一页游标（到底为 None）。
+pub fn fetch_msgfeed_inbox<C>(
+    client: &C,
+    channel: MessageChannel,
+    cursor: Option<InboxCursor>,
+    cookie: &str,
+) -> Result<(Vec<MessageEntry>, Option<InboxCursor>), String>
+where
+    C: HttpClient<Error = String>,
+{
+    if cookie.trim().is_empty() {
+        return Err("未登录，无法读取消息".into());
+    }
+    if channel == MessageChannel::Dm {
+        return Err("私信通道不走 msgfeed 接口".into());
+    }
+    let cursor = cursor.unwrap_or_default();
+    if cursor.is_end {
+        return Ok((Vec::new(), None));
+    }
+    let body = client.get(&bilibili::msgfeed_inbox(
+        channel,
+        (cursor.id, cursor.time),
+        cookie,
+    ))?;
+    let parsed: MsgfeedInboxResponse =
+        serde_json::from_str(&body).map_err(|e| format!("消息列表解析失败：{e}"))?;
+    check_message_code(parsed.code, &parsed.message, "消息列表")?;
+    let data = parsed
+        .data
+        .ok_or_else(|| "消息列表响应缺少 data".to_string())?;
+    // 「收到的赞」是 `{ latest, total }`，不是平铺的 items。
+    // `latest` 是上次查看后的新增，`total` 才是完整列表；两者拼起来并去重。
+    let (mut raw_items, raw_cursor, last_view_at) = match data.total {
+        Some(total) => {
+            let last_view_at = data
+                .latest
+                .as_ref()
+                .map(|latest| latest.last_view_at)
+                .filter(|ts| *ts > 0)
+                .unwrap_or(data.last_view_at);
+            let mut raw_items = data
+                .latest
+                .map(|latest| latest.items)
+                .unwrap_or_default();
+            raw_items.extend(total.items);
+            (raw_items, total.cursor, last_view_at)
+        }
+        None => (data.items, data.cursor, data.last_view_at),
+    };
+    if channel == MessageChannel::Like {
+        let mut seen = std::collections::HashSet::new();
+        raw_items.retain(|item| {
+            let key = if item.id != 0 {
+                item.id
+            } else {
+                item.item.item_id
+            };
+            seen.insert(key)
+        });
+    }
+    // @ 没有 last_view_at、旧版赞也可能没有：默认全部已读，
+    // 再由 app 按 unread 的「最新 N 条」降级成未读；不能默认成全部未读。
+    let last_view_at = if last_view_at == 0 && channel != MessageChannel::Reply {
+        now_wts() as i64
+    } else {
+        last_view_at
+    };
+    let raw_cursor = raw_cursor.unwrap_or_default();
+    let is_end = raw_cursor.is_end || raw_items.is_empty();
+    let next = (!is_end && (raw_cursor.id != 0 || raw_cursor.time != 0)).then_some(InboxCursor {
+        id: raw_cursor.id,
+        time: raw_cursor.time,
+        is_end: false,
+    });
+    let items = raw_items
+        .into_iter()
+        .map(|raw| MessageEntry::from_raw(channel, raw, last_view_at))
+        .collect::<Vec<_>>();
+    // @ / 赞接口未被公开文档收录（E-25）：字段缺失时退回通用文案，
+    // 但不要在客户端再猜一遍聚合，交给 aggregate_likes 的明确规则。
+    let items = if channel == MessageChannel::Like {
+        aggregate_likes(items)
+    } else {
+        items
+    };
+    Ok((items, next))
+}
+
+/// 拉互关好友白名单（最多 5 页 / 250 人），用于私信会话的「互关」判定。
+pub fn fetch_mutual_ids<C>(client: &C, cookie: &str, mid: i64) -> Result<HashSet<i64>, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if mid <= 0 {
+        return Err("缺少当前账号 mid，无法判定互关".into());
+    }
+    let mut ids = HashSet::new();
+    for page in 1..=5 {
+        let mut req = bilibili::mutual_friends(mid, cookie);
+        req.url = req.url.replace("page=1", &format!("page={page}"));
+        let body = client.get(&req)?;
+        let parsed: RelationFriendsResponse =
+            serde_json::from_str(&body).map_err(|e| format!("互关列表解析失败：{e}"))?;
+        check_message_code(parsed.code, &parsed.message, "互关列表")?;
+        let list = parsed.data.map(|data| data.list).unwrap_or_default();
+        if list.is_empty() {
+            break;
+        }
+        let before = ids.len();
+        for friend in list {
+            if friend.mid > 0 {
+                ids.insert(friend.mid);
+            }
+        }
+        // 接口不分页（一次给完）时第二页会重复同一批，靠「没有新增」收手。
+        if ids.len() == before {
+            break;
+        }
+    }
+    Ok(ids)
+}
+
+/// 单条关系校验：`attribute == 6` 是互关，`128` 是拉黑。
+pub fn fetch_relation_attribute<C>(client: &C, cookie: &str, fid: i64) -> Result<i64, String>
+where
+    C: HttpClient<Error = String>,
+{
+    let body = client.get(&bilibili::relation_attribute(fid, cookie))?;
+    let parsed: RelationResponse =
+        serde_json::from_str(&body).map_err(|e| format!("关系解析失败：{e}"))?;
+    check_message_code(parsed.code, &parsed.message, "关系")?;
+    Ok(parsed.data.map(|data| data.attribute).unwrap_or(0))
+}
+
+/// 私信会话列表 + 用户名片。昵称 / 头像不在会话响应里，必须二次补。
+pub fn fetch_conversations<C>(
+    client: &C,
+    cookie: &str,
+    my_mid: i64,
+    begin_ts: Option<i64>,
+) -> Result<(Vec<Conversation>, Option<i64>), String>
+where
+    C: HttpClient<Error = String>,
+{
+    if cookie.trim().is_empty() {
+        return Err("未登录，无法读取私信".into());
+    }
+    let body = client.get(&bilibili::message_sessions(begin_ts, cookie))?;
+    let parsed: SessionListResponse =
+        serde_json::from_str(&body).map_err(|e| format!("私信会话解析失败：{e}"))?;
+    check_message_code(parsed.code, &parsed.message, "私信会话")?;
+    let data = parsed.data.unwrap_or_default();
+    let raw_sessions = data.session_list;
+    if raw_sessions.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+    let uids: Vec<i64> = raw_sessions
+        .iter()
+        .map(|session| session.talker_id)
+        .filter(|uid| *uid > 0)
+        .collect();
+    let cards = fetch_user_cards(client, cookie, &uids).unwrap_or_default();
+    let next = raw_sessions
+        .iter()
+        .map(|session| session.session_ts)
+        .min()
+        .filter(|ts| data.has_more != 0 && *ts > 0);
+    let mut conversations: Vec<Conversation> = raw_sessions
+        .into_iter()
+        .filter(|session| {
+            session.talker_id > 0
+                && session.session_type != 2
+                // 系统通知（登录 / 收益 / 预约）与「UP 主助手」不在这里。
+                && session.system_msg_type == 0
+                && session
+                    .last_msg
+                    .as_ref()
+                    .map(|message| message.msg_type != 10)
+                    .unwrap_or(true)
+        })
+        // session_type=9 本身就是「互相关注」档；白名单到了再逐条校正。
+        .map(|session| Conversation::from_raw(session, my_mid, &cards, Some(true)))
+        .collect();
+    conversations.sort_by(|a, b| b.session_ts.cmp(&a.session_ts));
+    Ok((conversations, next))
+}
+
+/// 用户名片：`data` 是以 mid 为 key 的对象，字段名按 `name` / `uname` 兼容。
+pub fn fetch_user_cards<C>(
+    client: &C,
+    cookie: &str,
+    uids: &[i64],
+) -> Result<HashMap<i64, MessageUser>, String>
+where
+    C: HttpClient<Error = String>,
+{
+    let mut cards = HashMap::new();
+    if uids.is_empty() {
+        return Ok(cards);
+    }
+    let body = client.get(&bilibili::user_cards(uids, cookie))?;
+    let parsed: UserCardsResponse =
+        serde_json::from_str(&body).map_err(|e| format!("用户名片解析失败：{e}"))?;
+    check_message_code(parsed.code, &parsed.message, "用户名片")?;
+    let Some(data) = parsed.data else {
+        return Ok(cards);
+    };
+    // 真实响应是数组；旧版本 / 其他端点可能是以 mid 为 key 的对象。两种都接。
+    let values: Vec<(Option<i64>, &serde_json::Value)> = match &data {
+        serde_json::Value::Array(items) => items.iter().map(|item| (None, item)).collect(),
+        serde_json::Value::Object(object) => object
+            .iter()
+            .map(|(key, value)| (key.parse::<i64>().ok(), value))
+            .collect(),
+        _ => Vec::new(),
+    };
+    for (fallback_mid, value) in values {
+        let mid = value
+            .get("mid")
+            .and_then(|v| v.as_i64())
+            .or(fallback_mid)
+            .unwrap_or(0);
+        if mid == 0 {
+            continue;
+        }
+        let nickname = value
+            .get("name")
+            .or_else(|| value.get("uname"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let avatar = value
+            .get("face")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        cards.insert(
+            mid,
+            MessageUser {
+                mid,
+                nickname,
+                avatar,
+            },
+        );
+    }
+    Ok(cards)
+}
+
+/// 只算私信未读总数（给顶栏 / Dock 红点用，不拉名片也不落会话列表）。
+///
+/// `session_type=9` 是互关档；这与设计文档「Σ 互关会话 unread_count」同义。
+pub fn fetch_dm_unread_total<C>(client: &C, cookie: &str) -> Result<u64, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if cookie.trim().is_empty() {
+        return Ok(0);
+    }
+    let body = client.get(&bilibili::message_sessions(None, cookie))?;
+    let parsed: SessionListResponse =
+        serde_json::from_str(&body).map_err(|e| format!("私信未读解析失败：{e}"))?;
+    check_message_code(parsed.code, &parsed.message, "私信未读")?;
+    Ok(parsed
+        .data
+        .map(|data| {
+            data.session_list
+                .iter()
+                .filter(|session| {
+                    session.session_type != 2
+                        && session.system_msg_type == 0
+                        && session
+                            .last_msg
+                            .as_ref()
+                            .map(|message| message.msg_type != 10)
+                            .unwrap_or(true)
+                })
+                .map(|session| session.unread_count.max(0) as u64)
+                .sum()
+        })
+        .unwrap_or(0))
+}
+
+/// 拉一页聊天记录。返回 `(按时间升序的消息, 是否还有更早, 下一页 begin_seqno)`。
+pub fn fetch_chat_messages<C>(
+    client: &C,
+    cookie: &str,
+    talker_id: i64,
+    my_mid: i64,
+    begin_seqno: Option<i64>,
+) -> Result<(Vec<ChatMessage>, bool, i64), String>
+where
+    C: HttpClient<Error = String>,
+{
+    if cookie.trim().is_empty() {
+        return Err("未登录，无法读取私信".into());
+    }
+    let body = client.get(&bilibili::session_messages(talker_id, begin_seqno, 20, cookie))?;
+    let parsed: SessionMsgsResponse =
+        serde_json::from_str(&body).map_err(|e| format!("聊天记录解析失败：{e}"))?;
+    check_message_code(parsed.code, &parsed.message, "聊天记录")?;
+    let data = parsed.data.ok_or_else(|| "聊天记录响应缺少 data".to_string())?;
+    let has_more = data.has_more != 0;
+    let next_begin = data.min_seqno;
+    let mut messages: Vec<ChatMessage> = data
+        .messages
+        .into_iter()
+        .map(|raw| ChatMessage::from_raw(raw, my_mid))
+        .collect();
+    // 接口给的是倒序；页面按时间正序排，相邻消息才好做「5 分钟」分组。
+    messages.sort_by_key(|message| message.seqno);
+    Ok((messages, has_more, next_begin))
+}
+
+/// 打开会话 / 点「标为已读」：`ack_seqno` 留空表示最新。
+pub fn mark_conversation_read(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    talker_id: i64,
+) -> Result<(), String> {
+    if csrf.trim().is_empty() {
+        return Err("登录会话缺少 bili_jct，无法标记已读".into());
+    }
+    let body = client.post_form(
+        &format!(
+            "{}/session_svr/v1/session_svr/update_ack",
+            bilibili::MESSAGE_BASE
+        ),
+        &[
+            ("talker_id", talker_id.to_string()),
+            ("session_type", "1".to_string()),
+            ("ack_seqno", String::new()),
+            ("csrf", csrf.to_string()),
+            ("csrf_token", csrf.to_string()),
+        ],
+        cookie,
+    )?;
+    check_message_code_value(&body, "标记已读")
+}
+
+/// 移除会话（需要模态确认；失败时调用方保留条目）。
+pub fn remove_conversation(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    talker_id: i64,
+) -> Result<(), String> {
+    if csrf.trim().is_empty() {
+        return Err("登录会话缺少 bili_jct，无法移除会话".into());
+    }
+    // 文档核实为 GET（`talker_id` + `session_type=1` + csrf）。
+    let req = Request {
+        url: format!(
+            "{}/session_svr/v1/session_svr/remove_session?talker_id={talker_id}&session_type=1&csrf={csrf}&csrf_token={csrf}",
+            bilibili::MESSAGE_BASE
+        ),
+        cookie: cookie.to_string(),
+        name: "remove_session",
+    };
+    let body = client.get(&req)?;
+    check_message_code_value(&body, "移除会话")
+}
+
+/// 发送私信（只做文本 `msg_type=1`）。
+///
+/// 成功后调用方**不要**乐观伪造服务端消息：用接口返回的时间 / seqno 再拉一次，
+/// 或者先插入本地「发送中」气泡再以回包替换。这里只负责把请求发出去。
+pub fn send_dm(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    my_mid: i64,
+    talker_id: i64,
+    text: &str,
+    wbi_keys: Option<(String, String)>,
+) -> Result<(), String> {
+    crate::messages::validate_dm_text(text)?;
+    if csrf.trim().is_empty() {
+        return Err("登录会话缺少 bili_jct，无法发送私信".into());
+    }
+    if my_mid <= 0 || talker_id <= 0 {
+        return Err("缺少发送者 / 接收者 mid，无法发送私信".into());
+    }
+    let (img, sub) = match wbi_keys {
+        Some((img, sub)) if !img.is_empty() && !sub.is_empty() => (img, sub),
+        _ => fetch_wbi_keys(client, cookie)?,
+    };
+    let now = now_wts();
+    let signed = wbi::signed_url(
+        &format!("{}/web_im/v1/web_im/send_msg", bilibili::MESSAGE_BASE),
+        &[],
+        &img,
+        &sub,
+        now,
+    );
+    // dev_id 只需稳定且像浏览器指纹；用 mid + 时间做 md5，避免额外依赖。
+    let dev_id = {
+        let digest = wbi::md5_hex(&format!("{my_mid}:{talker_id}:{now}"));
+        format!(
+            "{}-{}-{}-{}-{}",
+            &digest[0..8],
+            &digest[8..12],
+            &digest[12..16],
+            &digest[16..20],
+            &digest[20..32]
+        )
+    };
+    let content = serde_json::json!({ "content": text }).to_string();
+    let form = vec![
+        ("msg[sender_uid]", my_mid.to_string()),
+        ("msg[receiver_id]", talker_id.to_string()),
+        ("msg[receiver_type]", "1".to_string()),
+        ("msg[msg_type]", "1".to_string()),
+        ("msg[dev_id]", dev_id),
+        ("msg[timestamp]", now.to_string()),
+        ("msg[content]", content),
+        ("csrf", csrf.to_string()),
+        ("csrf_token", csrf.to_string()),
+    ];
+    let body = client.post_form(&signed, &form, cookie)?;
+    check_message_code_value(&body, "发送私信")
+}
+
+fn check_message_code(code: i64, message: &str, action: &str) -> Result<(), String> {
+    if code == 0 {
+        return Ok(());
+    }
+    Err(format!("{action}失败：code={code} {}", message.trim()))
+}
+
+fn check_message_code_value(body: &str, action: &str) -> Result<(), String> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("{action}响应解析失败：{e}"))?;
+    let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != 0 {
+        let message = parsed
+            .get("message")
+            .or_else(|| parsed.get("msg"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        return Err(format!("{action}失败：code={code} {message}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,4 +1118,134 @@ mod tests {
     fn timeout_matches_legacy() {
         assert_eq!(REQUEST_TIMEOUT_SECS, 15);
     }
+
+    struct MsgClient;
+
+    impl HttpClient for MsgClient {
+        type Error = String;
+        fn get(&self, req: &Request) -> Result<String, String> {
+            match req.name {
+                "msgfeed_unread" => Ok(r#"{"code":0,"data":{"reply":3,"at":1,"like":0,"recv_reply":4,"recv_like":3}}"#.into()),
+                "msgfeed_inbox" => Ok(r#"{"code":0,"data":{"cursor":{"id":9,"time":100,"is_end":false},"last_view_at":90,"items":[
+                    {"id":1,"user":{"mid":5,"nickname":"A","avatar":"http://x/a.jpg"},"item":{"type":"reply","business":"comment","title":"T","uri":"https://www.bilibili.com/video/BV1xx411c7mD","source_content":"hi"},"counts":{"reply":1},"reply_time":100,"last_view_at":90},
+                    {"id":2,"user":{"mid":6,"nickname":"B","avatar":""},"item":{"type":"reply","business":"comment","title":"T","uri":"","source_content":"yo"},"counts":{"reply":1},"reply_time":95,"last_view_at":99}
+                ]}}"#.into()),
+                "message_sessions" => Ok(r#"{"code":0,"data":{"has_more":1,"session_list":[
+                    {"talker_id":7,"session_type":1,"unread_count":2,"session_ts":1700000000123456,"is_follow":1,"last_msg":{"sender_uid":7,"msg_type":1,"content":"{\"content\":\"在吗\"}","msg_seqno":9,"timestamp":1700000000}}
+                ]}}"#.into()),
+                "user_cards" => Ok(r#"{"code":0,"data":{"7":{"mid":7,"name":"阿茶","face":"http://x/7.jpg"}}}"#.into()),
+                "session_messages" => Ok(r#"{"code":0,"data":{"has_more":1,"min_seqno":3,"max_seqno":9,"messages":[
+                    {"sender_uid":7,"msg_type":1,"content":"{\"content\":\"第二条\"}","msg_seqno":9,"timestamp":1700000100},
+                    {"sender_uid":1,"msg_type":1,"content":"{\"content\":\"第一条\"}","msg_seqno":8,"timestamp":1700000000}
+                ]}}"#.into()),
+                other => Err(format!("未预期消息请求：{other}")),
+            }
+        }
+    }
+
+    #[test]
+    fn message_unread_and_inbox_pipeline() {
+        let counts = fetch_msgfeed_unread(&MsgClient, "SESSDATA=x").unwrap();
+        assert_eq!((counts.reply, counts.mention, counts.like), (3, 1, 3));
+
+        let (items, next) =
+            fetch_msgfeed_inbox(&MsgClient, MessageChannel::Reply, None, "SESSDATA=x").unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].user.nickname, "A");
+        assert!(items[0].is_unread());
+        assert!(!items[1].is_unread(), "reply_time <= last_view_at 是已读");
+        assert_eq!(next, Some(InboxCursor { id: 9, time: 100, is_end: false }));
+    }
+
+    #[test]
+    fn conversations_get_names_from_user_cards() {
+        let (conversations, next) =
+            fetch_conversations(&MsgClient, "SESSDATA=x", 1, None).unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].nickname, "阿茶");
+        assert_eq!(conversations[0].preview(), "在吗");
+        assert_eq!(conversations[0].unread, 2);
+        assert_eq!(next, Some(1_700_000_000_123_456));
+    }
+
+    #[test]
+    fn chat_messages_are_sorted_ascending() {
+        let (messages, has_more, begin) =
+            fetch_chat_messages(&MsgClient, "SESSDATA=x", 7, 1, None).unwrap();
+        assert!(has_more);
+        assert_eq!(begin, 3);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].seqno, 8);
+        assert_eq!(messages[1].seqno, 9);
+        assert_eq!(messages[0].text, "第一条");
+        assert!(messages[0].mine);
+        assert!(!messages[1].mine);
+    }
+
+
+    /// 真实响应的形状回归：`reply.counts` 是整数、`at_time`、赞是 latest/total、
+    /// 用户名片是数组。这四点是线上抓包核对过的，别再被「同构假设」打回去。
+    struct LiveMsgClient;
+
+    impl HttpClient for LiveMsgClient {
+        type Error = String;
+        fn get(&self, req: &Request) -> Result<String, String> {
+            if req.url.contains("/x/msgfeed/reply?") {
+                Ok(r#"{"code":0,"data":{"cursor":{"is_end":false,"id":11,"time":22},"last_view_at":90,"items":[
+                    {"id":1,"user":{"mid":5,"nickname":"A","avatar":"http://x/a.jpg"},"item":{"type":"reply","business":"评论","business_id":1,"subject_id":0,"item_id":99,"title":"T","uri":"https://www.bilibili.com/video/BV1xx411c7mD","source_content":"hi"},"counts":1,"is_multi":0,"reply_time":100}
+                ]}}"#.into())
+            } else if req.url.contains("/x/msgfeed/at?") {
+                Ok(r#"{"code":0,"data":{"cursor":{"is_end":true,"id":1,"time":2},"items":[
+                    {"id":2,"user":{"mid":6,"nickname":"B","avatar":""},"item":{"type":"reply","business":"评论","business_id":1,"title":"提到你","uri":"https://www.bilibili.com/video/BV1xx411c7mD","source_content":"@你 看这个"},"counts":{"reply":0},"at_time":50}
+                ]}}"#.into())
+            } else if req.url.contains("/x/msgfeed/like?") {
+                Ok(r#"{"code":0,"data":{"latest":{"items":[],"last_view_at":90},"total":{"cursor":{"is_end":false,"id":7,"time":8},"items":[
+                    {"id":3,"users":[{"mid":1,"nickname":"甲","avatar":""},{"mid":2,"nickname":"乙","avatar":""},{"mid":3,"nickname":"丙","avatar":""},{"mid":4,"nickname":"丁","avatar":""}],"item":{"item_id":77,"type":"reply","business":"评论","business_id":0,"title":"被赞的评论","uri":"https://www.bilibili.com/video/BV1xx411c7mD"},"counts":8,"like_time":70}
+                ]}}}"#.into())
+            } else if req.name == "message_sessions" {
+                Ok(r#"{"code":0,"data":{"has_more":0,"session_list":[
+                    {"talker_id":7,"session_type":1,"unread_count":1,"session_ts":1700000000123456,"is_follow":1,"last_msg":{"sender_uid":7,"msg_type":11,"content":"{\"title\":\"视频标题\"}","msg_seqno":9,"timestamp":1700000000}}
+                ]}}"#.into())
+            } else if req.name == "user_cards" {
+                Ok(r#"{"code":0,"data":[{"mid":7,"name":"阿茶","face":"http://x/7.jpg"}]}"#.into())
+            } else if req.name == "msgfeed_unread" {
+                Ok(r#"{"code":0,"data":{"at":0,"chat":0,"like":0,"recv_like":0,"recv_reply":0,"reply":0}}"#.into())
+            } else {
+                Err(format!("未预期消息请求：{}", req.url))
+            }
+        }
+    }
+
+    #[test]
+    fn live_message_shapes_parse() {
+        let (reply, next) =
+            fetch_msgfeed_inbox(&LiveMsgClient, MessageChannel::Reply, None, "SESSDATA=x")
+                .unwrap();
+        assert_eq!(reply.len(), 1);
+        assert!(reply[0].is_unread());
+        assert_eq!(next, Some(InboxCursor { id: 11, time: 22, is_end: false }));
+
+        let (at, at_next) =
+            fetch_msgfeed_inbox(&LiveMsgClient, MessageChannel::Mention, None, "SESSDATA=x")
+                .unwrap();
+        assert_eq!(at.len(), 1);
+        assert_eq!(at[0].time, 50, "at_time 要能映射成时间");
+        assert!(at_next.is_none());
+
+        let (like, like_next) =
+            fetch_msgfeed_inbox(&LiveMsgClient, MessageChannel::Like, None, "SESSDATA=x")
+                .unwrap();
+        assert_eq!(like.len(), 1);
+        assert_eq!(like[0].likers.len(), 4);
+        assert_eq!(like[0].like_count, 8, "counts 是总人数，不是 users 长度");
+        assert_eq!(like[0].like_actor_label(), "甲、乙 等 8 人");
+        assert_eq!(like[0].target_title, "被赞的评论");
+        assert_eq!(like_next, Some(InboxCursor { id: 7, time: 8, is_end: false }));
+
+        let (conversations, _) =
+            fetch_conversations(&LiveMsgClient, "SESSDATA=x", 1, None).unwrap();
+        assert_eq!(conversations[0].nickname, "阿茶", "名片是数组也要能补昵称");
+        assert_eq!(conversations[0].preview(), "[视频] 视频标题");
+    }
+
 }

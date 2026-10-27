@@ -670,6 +670,29 @@ where
     })
 }
 
+/// 兼容 `counts` 的两种形状：`reply` 给整数，`at` / `like` 给对象。
+fn de_counts_or_int<'de, D>(deserializer: D) -> Result<MsgfeedCountsRaw, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Counts {
+        Number(i64),
+        Object(MsgfeedCountsRaw),
+    }
+
+    Ok(match Counts::deserialize(deserializer)? {
+        Counts::Number(n) => MsgfeedCountsRaw {
+            reply: n,
+            ..MsgfeedCountsRaw::default()
+        },
+        Counts::Object(counts) => counts,
+    })
+}
+
 /// 兼容「数组或 null」的反序列化器。
 ///
 /// 动态 / 评论接口在空列表时经常直接给 `null`（例如 `reply.replies`），
@@ -680,4 +703,306 @@ where
     T: serde::Deserialize<'de>,
 {
     Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+// ================= 消息中心（msgfeed / 私信） =================
+//
+// 四类人际互动：回复我的 / @我的 / 收到的赞 / 私信。
+// - 互动走 `/x/msgfeed/*`：`unread` 与 `reply` 字段已核实；
+//   `at` / `like` 未被公开文档收录（附录 E · E-25），**按 reply 同构解析、
+//   字段缺失就降级**，不写死未核查的字段名。
+// - 私信走 `session_svr` / `svr_sync`：字段以设计文档 12.5.4 的核实表为准。
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedUnreadResponse {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<MsgfeedUnreadData>,
+}
+
+/// `/x/msgfeed/unread` 的 data。
+///
+/// 只声明 UI 需要的四项：`reply` / `at` / `like` / `recv_like`。
+/// `recv_reply = reply + at`，只能用于总数，**不能拿来推分通道数**。
+/// 旧接口字段名是 `like`，新接口是 `recv_like`，两个都要读。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedUnreadData {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub reply: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub at: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub like: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub recv_reply: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub recv_like: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedInboxResponse {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<MsgfeedInboxData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedInboxData {
+    pub cursor: Option<MsgfeedCursorRaw>,
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub items: Vec<MsgfeedItemRaw>,
+    /// 顶层已读时间（部分响应放在这里，而不是每条 item 上）。
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub last_view_at: i64,
+    /// 「收到的赞」的实际响应形状：`latest` + `total`，而不是平铺的 items。
+    /// 兼容两套形状，避免接口一变整页失败。
+    pub latest: Option<MsgfeedLatestRaw>,
+    pub total: Option<MsgfeedLikeTotalRaw>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedLatestRaw {
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub items: Vec<MsgfeedItemRaw>,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub last_view_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedLikeTotalRaw {
+    pub cursor: Option<MsgfeedCursorRaw>,
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub items: Vec<MsgfeedItemRaw>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedCursorRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub id: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub time: i64,
+    pub is_end: bool,
+}
+
+/// 一条互动消息。`item` / `user` 都可能整体缺失，全部给默认值。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedItemRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub id: i64,
+    pub user: MsgfeedUserRaw,
+    /// 赞列表给的是 `users`（一行聚合多人），不是单个 `user`。
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub users: Vec<MsgfeedUserRaw>,
+    pub item: MsgfeedBodyRaw,
+    /// `reply` 的 `counts` 是整数；`at` / `like` 里也可能是对象，两种都接。
+    #[serde(default, deserialize_with = "de_counts_or_int")]
+    pub counts: MsgfeedCountsRaw,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub is_multi: i64,
+    /// 回复 / 点赞 / @ 时间。三个接口用的键名不同：
+    /// `reply_time` / `like_time` / `at_time`。
+    #[serde(
+        default,
+        alias = "like_time",
+        alias = "at_time",
+        deserialize_with = "de_i64_or_string"
+    )]
+    pub reply_time: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub last_view_at: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedUserRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub mid: i64,
+    pub nickname: String,
+    pub avatar: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedBodyRaw {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub business: String,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub business_id: i64,
+    /// 赞列表的真实主键在被赞内容上，`subject_id` 可能为 0。
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub item_id: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub subject_id: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub root_id: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub source_id: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub target_id: i64,
+    pub title: String,
+    pub uri: String,
+    pub source_content: String,
+    pub target_reply_content: String,
+    pub root_reply_content: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct MsgfeedCountsRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub up: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub reply: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub is_up: i64,
+}
+
+/// 私信会话列表。会话本身的昵称 / 头像不在响应里，要再用 user cards 补。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SessionListResponse {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<SessionListData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SessionListData {
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub session_list: Vec<SessionRaw>,
+    pub has_more: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SessionRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub talker_id: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub session_type: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub unread_count: i64,
+    /// 微秒级时间戳（**不是秒**）。
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub session_ts: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub is_follow: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub can_fold: i64,
+    /// 非 0 表示系统通知会话（登录 / 收益 / 预约…），不进消息中心。
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub system_msg_type: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub is_intercept: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub top_ts: i64,
+    pub last_msg: Option<SessionMsgRaw>,
+}
+
+/// 一条私信消息（会话列表的最后一条与聊天记录共用）。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SessionMsgRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub sender_uid: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub receiver_id: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub receiver_type: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub msg_type: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub msg_status: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub msg_source: i64,
+    /// JSON 字符串，例如 `{"content":"hi"}`。
+    pub content: String,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub msg_seqno: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SessionMsgsResponse {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<SessionMsgsData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct SessionMsgsData {
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub messages: Vec<SessionMsgRaw>,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub has_more: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub min_seqno: i64,
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub max_seqno: i64,
+}
+
+/// 用户名片（补私信会话的昵称与头像）。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct UserCardsResponse {
+    pub code: i64,
+    pub message: String,
+    /// key 是 mid 的字符串形式，值里再带 `mid`；用 serde_json::Value 兜住。
+    pub data: Option<serde_json::Value>,
+}
+
+/// 互关好友列表（`/x/relation/friends`）。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct RelationFriendsResponse {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<RelationFriendsData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct RelationFriendsData {
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub list: Vec<RelationFriendRaw>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct RelationFriendRaw {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub mid: i64,
+    pub uname: String,
+    pub face: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct RelationResponse {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<RelationData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct RelationData {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub mid: i64,
+    /// 6 = 已互粉，128 = 已拉黑。
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub attribute: i64,
 }

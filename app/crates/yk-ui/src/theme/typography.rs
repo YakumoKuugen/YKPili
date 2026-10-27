@@ -30,6 +30,8 @@ pub const FONT_SIZE_CAPTION: f32 = 12.0;
 pub const FONT_SIZE_CONTROL: f32 = 13.0;
 pub const FONT_SIZE_BODY: f32 = 15.0;
 pub const FONT_SIZE_TITLE: f32 = 15.0;
+/// 页面内分段标题（搜索结果「影视 / 用户 / 视频」、媒体大卡标题）。
+pub const FONT_SIZE_SECTION: f32 = 17.0;
 pub const FONT_SIZE_HEADING: f32 = 20.0;
 pub const FONT_SIZE_DISPLAY: f32 = 24.0;
 pub const FONT_SIZE_DATA_EMPHASIS: f32 = 28.0;

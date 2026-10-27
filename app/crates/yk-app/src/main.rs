@@ -65,8 +65,10 @@ fn main() {
                         title: Some("YKPili".into()),
                         // 原生标题栏透明 + FullSizeContentView：去掉白色标题条，
                         // 红黄绿按钮直接压在应用顶栏上；顶栏左侧为按钮让出空间。
+                        // y = 26 让 12px 按钮的中心落在 64 高顶栏的 32 中线，
+                        // 与左右两组 46 高胶囊垂直对齐（参考稿即居中对齐）。
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(20.), px(18.))),
+                        traffic_light_position: Some(point(px(20.), px(26.))),
                     }),
                     // 顶栏自己接管拖动（见 lib.rs `top_bar`）：不交出这一项，
                     // AppKit 只让原生 titlebar 那条窄带可拖，顶栏下半部分按不住，
@@ -138,10 +140,18 @@ fn main() {
                                 "rank" => Some(yk_app::pages::PageKind::Rank),
                                 "live" => Some(yk_app::pages::PageKind::Live),
                                 "history" => Some(yk_app::pages::PageKind::History),
+                                "messages" => Some(yk_app::pages::PageKind::Messages),
+                                "favorites" => Some(yk_app::pages::PageKind::Favorites),
                                 _ => None,
                             });
                     if let Some(page) = start_page {
                         app = app.with_page(page);
+                    }
+                    if let Ok(query) = std::env::var("YK_SEARCH") {
+                        app = app.with_search(&query);
+                    }
+                    if let Ok(term) = std::env::var("YK_SEARCH_SUGGEST") {
+                        app = app.with_search_suggest(&term);
                     }
                     let entity = cx.new(|_| app);
                     // 页面图片缓存：滚动时按「可视 + 一行」驱逐卡片图，

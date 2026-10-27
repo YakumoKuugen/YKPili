@@ -12,11 +12,12 @@
 //! - 页面自带左右分栏，右栏不随左栏滚动，所以它**不接**外壳的
 //!   `content-scroll`，由本模块自己管高度（见 `content_area` 的特判）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 
 use gpui::assets::IconName;
+use gpui::base::ElementExt as _;
 use gpui::component::input::{Input, InputState};
 use gpui::component::{v_virtual_list, Icon, VirtualListScrollHandle};
 use gpui::prelude::*;
@@ -25,7 +26,7 @@ use yk_core::history::{group_days, HistoryCursor, HistoryDay, HistoryEntry};
 use yk_ui::status;
 use yk_ui::theme::*;
 
-use crate::{AppRoot, ImageResidency, DOCK_RESERVED};
+use crate::{player, AppRoot, ImageResidency, DOCK_RESERVED};
 
 /// 右侧日期栏宽度。参考稿是 320，这里取 300：1280 窗口下左栏还能放下 3 列。
 const RAIL_W: f32 = 300.0;
@@ -214,6 +215,7 @@ pub(crate) fn page(
     state: &HistoryState,
     signed_in: bool,
     active_images: Rc<RefCell<ImageResidency>>,
+    layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     window: &Window,
     cx: &mut Context<AppRoot>,
 ) -> AnyElement {
@@ -243,14 +245,9 @@ pub(crate) fn page(
     // 固定项：上内边距 16 + 标题 28 + 工具条上间距 16 + 工具条 38
     // + 主行上间距 16 + 底部 Dock 占位 96。
     let page_h = (window.viewport_size().height.as_f32() - TOP_BAR_HEIGHT).max(320.0);
-    let main_h = (page_h
-        - SPACE_4
-        - LINE_HEIGHT_HEADING
-        - SPACE_4
-        - SEARCH_H
-        - SPACE_4
-        - DOCK_RESERVED)
-        .max(240.0);
+    let main_h =
+        (page_h - SPACE_4 - LINE_HEIGHT_HEADING - SPACE_4 - SEARCH_H - SPACE_4 - DOCK_RESERVED)
+            .max(240.0);
 
     // 过滤：类型 + 搜索 + 日期。日期栏的 counts 只算类型 + 搜索，
     // 这样「今天 5 条」不会被已经选中的日期影响。
@@ -306,7 +303,15 @@ pub(crate) fn page(
                         .min_w(px(0.))
                         .overflow_hidden()
                         .child(grid_column(
-                            t, state, &visible, cols, card_w, content_w, main_h, signed_in,
+                            t,
+                            state,
+                            &visible,
+                            cols,
+                            card_w,
+                            content_w,
+                            main_h,
+                            signed_in,
+                            layout_bounds,
                             cx,
                         )),
                 )
@@ -625,6 +630,7 @@ fn grid_column(
     width: f32,
     height: f32,
     signed_in: bool,
+    layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     cx: &mut Context<AppRoot>,
 ) -> AnyElement {
     if state.loading && !state.loaded {
@@ -687,6 +693,7 @@ fn grid_column(
     let entries: Rc<Vec<HistoryEntry>> = Rc::new(visible.iter().map(|e| (*e).clone()).collect());
     let theme = t.clone();
     let scroll = state.scroll.clone();
+    let layout_bounds_for_cards = layout_bounds.clone();
     let entity = cx.entity();
     let list = v_virtual_list(
         entity,
@@ -707,7 +714,15 @@ fn grid_column(
                         .w_full()
                         .h(px(row_h))
                         .children((start..end).map(|i| {
-                            card(&theme, &this.history, &entries[i], i, card_w, cx)
+                            card(
+                                &theme,
+                                &this.history,
+                                &entries[i],
+                                i,
+                                card_w,
+                                layout_bounds_for_cards.clone(),
+                                cx,
+                            )
                         }))
                         .into_any_element()
                 })
@@ -973,6 +988,7 @@ fn card(
     entry: &HistoryEntry,
     index: usize,
     card_w: f32,
+    root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     cx: &mut Context<AppRoot>,
 ) -> AnyElement {
     let s = &t.surfaces;
@@ -993,10 +1009,17 @@ fn card(
     let watched = entry.watched_text();
     let author = entry.author_name.clone();
     let face = entry.face_thumb_url();
-    let shadow = t.shadows.shadow_2.clone();
-    let hover_border = s.border_popover;
-    let hover_bg = s.surface_content;
+    let shadow = t.shadows.shadow_glass_card.clone();
+    let selected_shadow = t.shadows.shadow_glass_card.clone();
+    let hover_border = s.border_strong;
+    let hover_bg = s.fill_2;
     let title_color = s.text_primary;
+    // 封面实际几何：prepaint 写入，点击时作为播放浮窗的展开起点。
+    // 与首页封面卡同一套 CoverSource，历史页因此也有打开 / 收回动画。
+    let cover_source: Rc<RefCell<Option<player::CoverSource>>> = Rc::new(RefCell::new(None));
+    let source_image_url = cover_url.clone();
+    let source_bvid = bvid.clone();
+    let source_title = title.clone();
 
     let mut cover = div()
         .relative()
@@ -1164,6 +1187,34 @@ fn card(
         );
     }
 
+    // 记录封面实际矩形。写 Rc 不触发重绘，和首页卡片的做法一致。
+    // 历史卡的封面是普通 div（不是可命中元素），所以用 on_prepaint 取自身 bounds。
+    let cover = {
+        let cover_source = cover_source.clone();
+        let root_bounds = root_bounds.clone();
+        cover.on_prepaint(move |bounds, _window, _cx| {
+            let Some(root) = root_bounds.get() else {
+                return;
+            };
+            *cover_source.borrow_mut() = Some(player::CoverSource {
+                bounds: Bounds {
+                    origin: point(
+                        bounds.origin.x - root.origin.x,
+                        bounds.origin.y - root.origin.y,
+                    ),
+                    size: bounds.size,
+                },
+                root_size: root.size,
+                bvid: source_bvid.clone(),
+                title: source_title.clone(),
+                image_url: source_image_url.clone(),
+                // 历史数据没有占位色；透明值会让 poster 回落到 fill_3，
+                // 与历史卡自己的封面兜底一致。
+                placeholder_color: "#00000000".into(),
+            });
+        })
+    };
+
     let title_for_more = title.clone();
     let more = div()
         .id(("hist-more", index))
@@ -1233,7 +1284,11 @@ fn card(
                 .border_color(hover_border)
                 .shadow(shadow.clone())
         })
-        .when(batch && selected, |el| el.bg(s.fill_1))
+        .when(batch && selected, move |el| {
+            el.bg(s.fill_2)
+                .border_color(s.border_strong)
+                .shadow(selected_shadow.clone())
+        })
         .child(cover)
         .child(
             div()
@@ -1314,15 +1369,18 @@ fn card(
         let title_for_click = title.clone();
         // 续播：这条历史记录本身就写着上次看到哪（秒）。
         let progress_for_click = entry.progress_secs;
+        let cover_source = cover_source.clone();
         card_el.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
             if this.playing.is_some() || this.close_player_requested {
                 return;
             }
             eprintln!("[history] 打开：{title_for_click}（{bvid_for_click}）");
+            let entrance = cover_source.borrow().clone();
             this.open_history_video(
                 bvid_for_click.clone(),
                 title_for_click.clone(),
                 progress_for_click,
+                entrance,
                 cx,
             );
             window.refresh();
@@ -1623,10 +1681,12 @@ fn rail(
                         .max_by_key(|e| e.view_at)
                         .cloned()
                     {
+                        // 「继续观看」不是封面点击，没有封面矩形；直接展开播放器。
                         this.open_history_video(
                             entry.bvid,
                             entry.title,
                             entry.progress_secs,
+                            None,
                             cx,
                         );
                         window.refresh();
@@ -2235,6 +2295,7 @@ impl AppRoot {
         bvid: String,
         title: String,
         progress_secs: u64,
+        entrance: Option<player::CoverSource>,
         cx: &mut Context<Self>,
     ) {
         if bvid.trim().is_empty() {
@@ -2242,6 +2303,9 @@ impl AppRoot {
         }
         eprintln!("[history] 进入播放浮窗：{title}（{bvid}）");
         self.ensure_player(cx);
+        if let (Some(source), Some(player)) = (entrance, self.playing.clone()) {
+            let _ = player.update(cx, |view, cx| view.set_entrance(source, cx));
+        }
         // 已看完的条目从头播：续播位置由播放器的统一规则再判一次。
         let seed = if progress_secs > 0 {
             Some(progress_secs as f64)

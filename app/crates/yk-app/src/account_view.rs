@@ -430,7 +430,11 @@ impl Render for AccountView {
 
         let width = window.viewport_size().width.as_f32();
         let source = Bounds {
-            origin: point(px(width - SPACE_5 - 34.), px((TOP_BAR_HEIGHT - 34.) / 2.)),
+            // 头像现在收在右侧工具栏胶囊里：窗口右内边距 20 + 胶囊内边距 6。
+            origin: point(
+                px(width - SPACE_5 - 6. - 34.),
+                px((TOP_BAR_HEIGHT - 34.) / 2.),
+            ),
             size: size(px(34.), px(34.)),
         };
         let target = Bounds {
