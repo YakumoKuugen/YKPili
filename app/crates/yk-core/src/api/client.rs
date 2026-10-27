@@ -15,8 +15,10 @@ use crate::api::models::{
     VideoInfoResponse, VideoPlayUrlResponse, VideoTagsResponse,
 };
 use crate::api::wbi;
+use crate::danmaku::DanmakuSet;
 use crate::dynamic::{CommentTarget, DynamicComment, DynamicItem, DynamicPage};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use crate::history::{HistoryCursor, HistoryEntry};
 use crate::messages::{
     aggregate_likes, ChatMessage, Conversation, InboxCursor, MessageChannel, MessageEntry,
@@ -84,6 +86,33 @@ impl ReqwestClient {
             return Err(format!("写操作返回 HTTP {status}"));
         }
         Ok(body)
+    }
+
+    /// 读二进制响应（弹幕 XML 是 deflate 压缩体，不能先按 UTF-8 解码）。
+    ///
+    /// 不启用 reqwest 的 `deflate` feature：少一个依赖树分支，
+    /// 解压交给 `fetch_danmaku` 里显式做，测试也更容易覆盖。
+    pub fn get_bytes(&self, req: &Request) -> Result<Vec<u8>, String> {
+        let mut rb = self
+            .inner
+            .get(&req.url)
+            .header("User-Agent", UA)
+            .header("Referer", "https://www.bilibili.com/")
+            .header("Accept", "text/xml, application/octet-stream, */*");
+        if !req.cookie.is_empty() {
+            rb = rb.header("Cookie", &req.cookie);
+        }
+        let resp = rb
+            .send()
+            .map_err(|e| format!("{} 请求失败：{e}", req.name))?;
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .map_err(|e| format!("{} 读取响应失败：{e}", req.name))?;
+        if !status.is_success() {
+            return Err(format!("{} 返回 HTTP {status}", req.name));
+        }
+        Ok(bytes.to_vec())
     }
 }
 
@@ -438,6 +467,65 @@ where
         .data
         .map(|data| data.replies.iter().map(DynamicComment::from_raw).collect())
         .unwrap_or_default())
+}
+
+/// 拉取一个视频（当前分 P）的全部弹幕。
+///
+/// 走 `/x/v1/dm/list.so`：返回 deflate 压缩的 XML，包含滚动 / 顶部 / 底部
+/// 三种模式（比分段 protobuf 的 `seg.so` 更完整）。匿名可达，登录 Cookie
+/// 可选；视频受限时服务端可能返回错误页，这里会带出解析失败的原因。
+pub fn fetch_danmaku(client: &ReqwestClient, cid: i64, cookie: &str) -> Result<DanmakuSet, String> {
+    if cid <= 0 {
+        return Err("缺少 cid，无法加载弹幕".into());
+    }
+    let bytes = client.get_bytes(&bilibili::danmaku_xml(cid, cookie))?;
+    let xml = decode_danmaku_body(&bytes)?;
+    Ok(DanmakuSet::from_xml(&xml))
+}
+
+/// 弹幕响应解压。
+///
+/// B 站固定用 `Content-Encoding: deflate`，但 CDN / 代理偶尔会回明文；
+/// 先按首字节判断，再依次试 raw deflate、zlib、gzip。都不行时把原始
+/// 字节当文本返回，让上层错误信息能带出服务端到底说了什么。
+fn decode_danmaku_body(bytes: &[u8]) -> Result<String, String> {
+    if bytes.first() == Some(&b'<') {
+        return String::from_utf8(bytes.to_vec()).map_err(|e| format!("弹幕 XML 编码失败：{e}"));
+    }
+
+    let mut errors: Vec<String> = Vec::new();
+    match decompress_xml(flate2::read::DeflateDecoder::new(bytes)) {
+        Ok(xml) => return Ok(xml),
+        Err(error) => errors.push(format!("deflate: {error}")),
+    }
+    match decompress_xml(flate2::read::ZlibDecoder::new(bytes)) {
+        Ok(xml) => return Ok(xml),
+        Err(error) => errors.push(format!("zlib: {error}")),
+    }
+    match decompress_xml(flate2::read::GzDecoder::new(bytes)) {
+        Ok(xml) => return Ok(xml),
+        Err(error) => errors.push(format!("gzip: {error}")),
+    }
+
+    // 兜底：把响应原文（可能是 JSON 错误）带进错误信息。
+    let plain = String::from_utf8_lossy(bytes);
+    let preview: String = plain.chars().take(120).collect();
+    Err(format!(
+        "弹幕响应无法解压（{}）：{preview}",
+        errors.join("；")
+    ))
+}
+
+/// 解压一段压缩体，并确认结果确实是 XML。
+fn decompress_xml(mut reader: impl Read) -> Result<String, String> {
+    let mut out = Vec::new();
+    reader
+        .read_to_end(&mut out)
+        .map_err(|error| error.to_string())?;
+    if out.first() != Some(&b'<') {
+        return Err("解压后不是 XML".into());
+    }
+    String::from_utf8(out).map_err(|error| error.to_string())
 }
 
 /// 计算签名（给需要手工验证的场合用）。
@@ -1010,6 +1098,24 @@ fn check_message_code_value(body: &str, action: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn danmaku_body_decodes_raw_deflate_and_plain_text() {
+        use std::io::Write;
+
+        let xml = r#"<i><d p="1,1,25,16777215,0,0,a,1,10">hi</d></i>"#;
+        // B 站实际返回的是无 zlib 头的 raw deflate。
+        let mut encoder = flate2::write::DeflateEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        );
+        encoder.write_all(xml.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        assert_eq!(decode_danmaku_body(&compressed).unwrap(), xml);
+
+        // CDN 回明文时也要能接住。
+        assert_eq!(decode_danmaku_body(xml.as_bytes()).unwrap(), xml);
+    }
 
     /// 不联网的假客户端：按请求名返回预置 JSON。
     struct FakeClient {

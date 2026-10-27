@@ -606,7 +606,11 @@ pub struct ReplyRaw {
 #[serde(default)]
 pub struct ReplyMemberRaw {
     pub uname: String,
+    /// 旧版字段。`/x/v2/reply` 现在多数响应只给 `avatar`，`face` 为空；
+    /// 两个字段都接，避免评论区头像整片退化成渐变占位。
     pub face: Option<String>,
+    /// 新版字段（与 `face` 同值）。
+    pub avatar: Option<String>,
     pub level_info: Option<LevelInfo>,
 }
 

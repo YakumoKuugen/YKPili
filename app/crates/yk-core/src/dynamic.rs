@@ -546,10 +546,19 @@ impl DynamicComment {
             .unwrap_or_else(|| format::relative_time(raw.ctime));
         Self {
             author: format::html_decode(raw.member.uname.trim()),
+            // 线上 `/x/v2/reply` 的用户头像在 `member.avatar`，旧字段 `face`
+            // 经常是空的；优先取非空的 face，再回退 avatar。
             face: raw
                 .member
                 .face
                 .as_deref()
+                .filter(|f| !f.trim().is_empty())
+                .or_else(|| {
+                    raw.member
+                        .avatar
+                        .as_deref()
+                        .filter(|f| !f.trim().is_empty())
+                })
                 .map(|f| normalize_image_host(f, 64))
                 .unwrap_or_default(),
             text: format::html_decode(raw.content.message.trim()),
@@ -711,6 +720,46 @@ mod tests {
             serde_json::from_str(r#"{"code":0,"data":{"replies":null,"page":{"count":0}}}"#)
                 .unwrap();
         assert!(parsed.data.unwrap().replies.is_empty());
+    }
+
+    #[test]
+    fn comment_avatar_uses_avatar_field_from_real_reply() {
+        // 线上 `/x/v2/reply` 的真实形状：只有 `member.avatar`，没有 `member.face`。
+        let parsed: ReplyResponse = serde_json::from_str(
+            r#"{"code":0,"data":{"replies":[{
+                "rpid":1,"like":2,"ctime":0,
+                "member":{"uname":"ZC_罐稀","avatar":"https://i2.hdslb.com/bfs/face/a.jpg"},
+                "content":{"message":"hi"}
+            }]}}"#,
+        )
+        .unwrap();
+        let comments: Vec<DynamicComment> = parsed
+            .data
+            .unwrap()
+            .replies
+            .iter()
+            .map(DynamicComment::from_raw)
+            .collect();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(
+            comments[0].face,
+            "https://i2.hdslb.com/bfs/face/a.jpg@64w.webp",
+            "没有 face 时必须回退到 avatar，否则评论头像只剩渐变占位"
+        );
+    }
+
+    #[test]
+    fn comment_avatar_prefers_non_empty_face() {
+        let parsed: ReplyResponse = serde_json::from_str(
+            r#"{"code":0,"data":{"replies":[{
+                "member":{"uname":"A","face":"https://i0.hdslb.com/bfs/face/old.jpg",
+                          "avatar":"https://i0.hdslb.com/bfs/face/new.jpg"},
+                "content":{"message":"hi"}
+            }]}}"#,
+        )
+        .unwrap();
+        let comment = DynamicComment::from_raw(&parsed.data.unwrap().replies[0]);
+        assert!(comment.face.ends_with("old.jpg@64w.webp"));
     }
 
     #[test]

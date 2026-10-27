@@ -32,7 +32,7 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{FocusHandle, InteractiveElement, StatefulInteractiveElement, *};
-use yk_core::danmaku::{Danmaku, DanmakuSet, LaneAllocator};
+use yk_core::danmaku::{Danmaku, DanmakuMode, DanmakuSet, LaneAllocator};
 use yk_core::dynamic::{asset_url, fitted_width, CommentTarget, DynamicComment};
 use yk_core::format;
 use yk_core::player::PlayerState;
@@ -167,6 +167,53 @@ enum CommentState {
     Error(String),
 }
 
+/// 弹幕数据的加载状态。
+enum DanmakuState {
+    /// 还没拿到 cid（取流中 / 失败）。
+    Idle,
+    Loading,
+    Ready,
+    Error(String),
+}
+
+/// 一条弹幕在屏幕上的排布方式。
+#[derive(Debug, Clone, Copy)]
+enum DanmakuLane {
+    /// 滚动弹幕的轨道号。
+    Scroll(usize),
+    /// 顶部固定弹幕的槽位号（0 = 最上面）。
+    Top(usize),
+    /// 底部固定弹幕的槽位号（0 = 最下面）。
+    Bottom(usize),
+}
+
+/// 一条已经排好屏幕位置的弹幕。
+struct PlacedDanmaku {
+    data: Danmaku,
+    lane: DanmakuLane,
+}
+
+/// 屏幕最多同时排布的滚动轨道数。
+///
+/// 真实弹幕里同一秒可以来几十条；轨道无限增长会把字画到屏幕外，
+/// 超出部分仍然进「弹幕」Tab，只是不上屏。
+const MAX_SCROLL_LANES: usize = 14;
+/// 顶部 / 底部固定弹幕各自的槽位数。
+const FIXED_LANES: usize = 5;
+/// 顶部 / 底部固定弹幕的停留时长（秒）。
+const FIXED_DANMAKU_DURATION: f64 = 4.0;
+/// 滚动弹幕最长可能飞多久（秒）——用于每帧向前取候选弹幕的窗口。
+const SCROLL_LOOKBACK: f64 = 24.0;
+
+/// 播放层宽度：窗口宽 − 左右各 `SPACE_4` 留白 − 当前右侧面板宽度。
+///
+/// 弹幕的 x 起点、可见时长都按这个宽度算；写死 1280 会在窗口缩放后
+/// 让弹幕从面板底下冒出来，或在右侧留一条空白带。面板展开到 400 时
+/// 弹幕区也跟着缩到「视频宽 − 400」（设计第 14 节）。
+fn playback_layer_width(window: &Window, panel_width: f32) -> f32 {
+    (window.viewport_size().width.as_f32() - 2.0 * SPACE_4 - panel_width).max(1.0)
+}
+
 pub struct PlayerView {
     theme: YkTheme,
     frame: TestFrame,
@@ -185,8 +232,14 @@ pub struct PlayerView {
     tab: usize,
     /// 播放状态（音量/倍速/进度/全屏）全部来自 yk-core 的 PlayerState。
     state: PlayerState,
-    /// 弹幕：已按时间排序，且每条都预分配了轨道
-    danmaku: Vec<(Danmaku, usize)>,
+    /// 弹幕：屏幕上已排好位置的滚动 / 顶部 / 底部弹幕。
+    danmaku: Vec<PlacedDanmaku>,
+    /// 当前视频的全部弹幕（按时间排序），信息面板「弹幕」Tab 用它。
+    danmaku_all: Vec<Danmaku>,
+    /// 弹幕加载状态（换源后重置）。
+    danmaku_state: DanmakuState,
+    /// 弹幕请求代次：换源后旧请求的结果直接丢弃。
+    danmaku_generation: u64,
     lanes: LaneAllocator,
     /// 最近一次从 mpv 读到的播放位置（秒），弹幕位置靠它算
     play_time: f64,
@@ -342,19 +395,10 @@ impl PlayerView {
             // 沉浸优先：播放浮窗默认收起信息面板（右侧 200 hover 热区唤出）。
             expanded: false,
             tab: 0,
-            danmaku: {
-                let set = mock_danmaku();
-                // 预分配轨道：一次算完，播放时只查时间
-                let mut lanes = LaneAllocator::new(1280.0, 220.0);
-                let mut out = Vec::with_capacity(set.len());
-                for d in set.items() {
-                    if d.mode.is_scroll() {
-                        let lane = lanes.assign(d);
-                        out.push((d.clone(), lane));
-                    }
-                }
-                out
-            },
+            danmaku: Vec::new(),
+            danmaku_all: Vec::new(),
+            danmaku_state: DanmakuState::Idle,
+            danmaku_generation: 0,
             lanes: LaneAllocator::new(1280.0, 220.0),
             play_time: 0.0,
             danmaku_input: None,
@@ -465,6 +509,12 @@ impl PlayerView {
         // 滚动位置也回到顶部，否则新视频一打开就停在旧视频的评论高度。
         self.tags.clear();
         self.comments = CommentState::Idle;
+        // 弹幕跟着换源清空：旧视频的弹幕不能落在新视频的画面上。
+        self.danmaku.clear();
+        self.danmaku_all.clear();
+        self.danmaku_state = DanmakuState::Idle;
+        self.danmaku_generation = self.danmaku_generation.wrapping_add(1);
+        self.lanes = LaneAllocator::new(1280.0, 220.0);
         self.panel_scroll.set_offset(point(px(0.), px(0.)));
         self.scrubbing = false;
         self.last_scrub_seek = None;
@@ -564,8 +614,9 @@ impl PlayerView {
                         let (aid, bvid, cid) = (src.aid, src.bvid.clone(), src.cid);
                         view.source = Some(src);
                         view.begin_history_report(aid, bvid.clone(), cid, start);
-                        // 标签 / 评论不阻塞起播：源挂上之后再拉，回来一轮重绘。
+                        // 标签 / 评论 / 弹幕不阻塞起播：源挂上之后再拉，回来一轮重绘。
                         view.spawn_video_meta(aid, bvid, cx);
+                        view.spawn_danmaku(cid, cx);
                     }
                     Err(e) => {
                         eprintln!("[player] 取流失败：{e}");
@@ -648,6 +699,125 @@ impl PlayerView {
             });
         })
         .detach();
+    }
+
+    /// 拉当前分 P 的真实弹幕（`/x/v1/dm/list.so`，按 cid 区分）。
+    ///
+    /// 与标签 / 评论分开请求：弹幕和评论互不阻塞，谁先回来谁先渲染。
+    /// 换源时 `danmaku_generation` 已经 +1，旧响应回来直接丢弃。
+    fn spawn_danmaku(&mut self, cid: i64, cx: &mut Context<Self>) {
+        self.danmaku_generation = self.danmaku_generation.wrapping_add(1);
+        let generation = self.danmaku_generation;
+        if cid <= 0 {
+            self.danmaku_state = DanmakuState::Ready;
+            cx.notify();
+            return;
+        }
+        self.danmaku_state = DanmakuState::Loading;
+        let cookie = current_session_cookie();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_core::api::client::fetch_danmaku(&client, cid, &cookie)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.danmaku_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(set) => {
+                        let count = set.len();
+                        view.install_danmaku(set);
+                        view.danmaku_state = DanmakuState::Ready;
+                        eprintln!("[danmaku] cid={cid} 已加载 {count} 条真实弹幕");
+                    }
+                    Err(error) => {
+                        eprintln!("[danmaku] cid={cid} 弹幕加载失败：{error}");
+                        view.danmaku_state = DanmakuState::Error(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 把拉回来的弹幕排到屏幕上：滚动分轨道，顶部 / 底部各分固定槽位。
+    ///
+    /// 轨道一次排完（播放时只按时间取位置），这样 seek 到任意位置都能直接算；
+    /// 同一时刻并发太多时只让前 `MAX_SCROLL_LANES` 条上屏，其余保留在列表里。
+    fn install_danmaku(&mut self, set: DanmakuSet) {
+        let mut lanes = LaneAllocator::new(1280.0, 220.0);
+        let mut top_free = [f64::NEG_INFINITY; FIXED_LANES];
+        let mut bottom_free = [f64::NEG_INFINITY; FIXED_LANES];
+        let mut placed = Vec::with_capacity(set.len());
+        let mut all = Vec::with_capacity(set.len());
+        let (mut scroll, mut top, mut bottom) = (0usize, 0usize, 0usize);
+
+        for d in set.items() {
+            all.push(d.clone());
+            let lane = match d.mode {
+                DanmakuMode::Scroll => {
+                    // 轮转分配：短弹幕（满屏「？」）不会全挤在第 0 条轨道。
+                    let Some(lane) = lanes.assign_spread(d, MAX_SCROLL_LANES) else {
+                        continue;
+                    };
+                    scroll += 1;
+                    DanmakuLane::Scroll(lane)
+                }
+                DanmakuMode::Top => {
+                    let Some(slot) = take_fixed_slot(&mut top_free, d.time) else {
+                        continue;
+                    };
+                    top += 1;
+                    DanmakuLane::Top(slot)
+                }
+                DanmakuMode::Bottom => {
+                    let Some(slot) = take_fixed_slot(&mut bottom_free, d.time) else {
+                        continue;
+                    };
+                    bottom += 1;
+                    DanmakuLane::Bottom(slot)
+                }
+            };
+            placed.push(PlacedDanmaku {
+                data: d.clone(),
+                lane,
+            });
+        }
+
+        eprintln!(
+            "[danmaku] 上屏 {} 条（滚动 {scroll} / 顶部 {top} / 底部 {bottom}），列表 {} 条",
+            placed.len(),
+            all.len()
+        );
+        self.lanes = lanes;
+        self.danmaku = placed;
+        self.danmaku_all = all;
+    }
+
+    /// 给用户刚发的一条滚动弹幕找一个当前空着的轨道。
+    ///
+    /// 预分配的 `LaneAllocator` 状态停在「整段视频排完」那一刻，
+    /// 不能直接拿来给当前时刻的新弹幕分配；这里按「此刻每条轨道上
+    /// 是否还有可见弹幕」现查，保证发出去的弹幕不会立刻叠字。
+    fn pick_free_scroll_lane(&self, now: f64, area_width: f32) -> usize {
+        for lane in 0..MAX_SCROLL_LANES {
+            let occupied = self.danmaku.iter().any(|placed| {
+                matches!(placed.lane, DanmakuLane::Scroll(l) if l == lane)
+                    && placed.data.time <= now + 0.2
+                    && self.lanes.visible_at_in(&placed.data, now, area_width)
+            });
+            if !occupied {
+                return lane;
+            }
+        }
+        0
     }
 
     /// 面板展开 / 收起。
@@ -1208,7 +1378,7 @@ impl PlayerView {
     /// − 底部 92。控制条跟着这段**实际画面**走，而不是铺满整个播放层。
     fn video_bar_geometry(&self, window: &Window) -> (f32, f32) {
         let viewport = window.viewport_size();
-        let available_w = (viewport.width.as_f32() - 2.0 * SPACE_4 - INFO_PANEL_COLLAPSED).max(1.0);
+        let available_w = playback_layer_width(window, INFO_PANEL_COLLAPSED);
         let available_h =
             (viewport.height.as_f32() - (TOP_BAR_HEIGHT + SPACE_4) - PLAYER_BOTTOM_INSET).max(1.0);
         let (video_w, video_h) = self.video_pixel_size();
@@ -1714,6 +1884,8 @@ impl Render for PlayerView {
         };
         let mini_progress = (!self.controls_visible).then(|| self.mini_progress(&t, window, cx));
         let panel_hover = (!self.expanded).then(|| self.panel_hover_zone(cx));
+        // 弹幕只在「播放层」里跑：右侧面板那 200/400px 不穿弹幕（设计第 14 节）。
+        let danmaku_width = playback_layer_width(window, self.panel_width());
         // 浮窗内部：绝对铺满窗口。窗口本身负责圆角/裁剪/阴影/遮挡。
         let content = div()
             .id("player-content")
@@ -1744,7 +1916,7 @@ impl Render for PlayerView {
             // 直接 canvas 绘制即可（见附录 D 事实 16）。
             // 左下角眼睛按钮关掉后整层不挂树。
             .children(if self.danmaku_visible {
-                Some(self.danmaku_layer())
+                Some(self.danmaku_layer(danmaku_width))
             } else {
                 None
             })
@@ -1953,19 +2125,29 @@ impl PlayerView {
         let time = self.play_time + 0.05;
         let d = Danmaku {
             time,
-            mode: yk_core::danmaku::DanmakuMode::Scroll,
+            mode: DanmakuMode::Scroll,
             font_size: 25.0,
             color: (0xFF, 0xFF, 0xFF),
             width: Danmaku::estimate_width(&text, 25.0),
             text,
         };
-        // 分配轨道后再入列；新弹幕的时间一定比已有的大（当前时刻），
-        // 所以追加到末尾不会破坏「从早到晚」的顺序。
-        let lane = self.lanes.assign(&d);
-        self.danmaku.push((d, lane));
+        // 预分配器状态停在「整段视频排完」，这里按当前时刻找空轨道；
+        // 再按时间插回两个列表，保证时间序（面板列表也按时间展示）。
+        let lane =
+            self.pick_free_scroll_lane(time, playback_layer_width(window, self.panel_width()));
+        let placed = PlacedDanmaku {
+            data: d.clone(),
+            lane: DanmakuLane::Scroll(lane),
+        };
+        let at = self
+            .danmaku
+            .partition_point(|item| item.data.time <= d.time);
+        self.danmaku.insert(at, placed);
+        let at = self.danmaku_all.partition_point(|item| item.time <= d.time);
+        self.danmaku_all.insert(at, d);
         eprintln!(
             "[danmaku] 已发送，轨道 {lane}，共 {} 条",
-            self.danmaku.len()
+            self.danmaku_all.len()
         );
 
         // 清空输入框（set_value 在 gpui-base 的 InputState 上，三参）
@@ -1975,30 +2157,80 @@ impl PlayerView {
         cx.notify();
     }
 
-    fn danmaku_layer(&self) -> impl IntoElement {
+    fn danmaku_layer(&self, area_width: f32) -> impl IntoElement {
         let now = self.play_time;
 
         // 先在普通 Rust 里把「这一帧要画什么」算好，交给 paint 闭包。
         // 闭包必须 'static，所以数据要 move 进去。
         struct Drawn {
-            x: f32,
-            y: f32,
             text: String,
             size: f32,
             color: gpui::Hsla,
+            width: f32,
+            /// 滚动弹幕的 x；固定弹幕在 paint 里按画布宽度居中。
+            scroll_x: Option<f32>,
+            /// 滚动弹幕的 y。
+            y: f32,
+            /// 固定弹幕：(是否顶部, 槽位)。
+            fixed: Option<(bool, usize)>,
         }
-        let drawn: Vec<Drawn> = self
+
+        // 时间序已经排好，用二分只取「可能还停在屏幕上」的一段；
+        // 每帧全量遍历上万条会白烧 CPU。
+        let start = self
             .danmaku
+            .partition_point(|p| p.data.time < now - SCROLL_LOOKBACK);
+        let end = self.danmaku.partition_point(|p| p.data.time <= now);
+        let drawn: Vec<Drawn> = self.danmaku[start..end]
             .iter()
-            .filter(|(d, _)| self.lanes.visible_at(d, now))
-            .take(80)
-            .map(|(d, lane)| Drawn {
-                x: self.lanes.x_at(d, now),
-                y: 8.0 + *lane as f32 * 30.0,
-                text: d.text.clone(),
-                size: d.font_size,
-                color: rgb(d.rgb()).into(),
+            .filter_map(|placed| {
+                let d = &placed.data;
+                match placed.lane {
+                    DanmakuLane::Scroll(lane) => {
+                        if !self.lanes.visible_at_in(d, now, area_width) {
+                            return None;
+                        }
+                        Some(Drawn {
+                            text: d.text.clone(),
+                            size: d.font_size,
+                            color: rgb(d.rgb()).into(),
+                            width: d.width,
+                            scroll_x: Some(self.lanes.x_at_in(d, now, area_width)),
+                            y: 8.0 + lane as f32 * 30.0,
+                            fixed: None,
+                        })
+                    }
+                    DanmakuLane::Top(slot) => {
+                        if !fixed_danmaku_visible(d, now) {
+                            return None;
+                        }
+                        Some(Drawn {
+                            text: d.text.clone(),
+                            size: d.font_size,
+                            color: rgb(d.rgb()).into(),
+                            width: d.width,
+                            scroll_x: None,
+                            y: 0.0,
+                            fixed: Some((true, slot)),
+                        })
+                    }
+                    DanmakuLane::Bottom(slot) => {
+                        if !fixed_danmaku_visible(d, now) {
+                            return None;
+                        }
+                        Some(Drawn {
+                            text: d.text.clone(),
+                            size: d.font_size,
+                            color: rgb(d.rgb()).into(),
+                            width: d.width,
+                            scroll_x: None,
+                            y: 0.0,
+                            fixed: Some((false, slot)),
+                        })
+                    }
+                }
             })
+            .take(80)
             .collect();
 
         // canvas：直接走底层 paint，不经过 div + text 的常规元素路径。
@@ -2006,8 +2238,22 @@ impl PlayerView {
         // 这条是文档第 14 节指定的方案 ②。
         canvas(
             |_bounds, _window, _cx| (),
-            move |_bounds, _state, window, cx| {
+            move |bounds, _state, window, cx| {
+                let area_width = bounds.size.width.as_f32();
+                let area_height = bounds.size.height.as_f32();
                 for d in &drawn {
+                    let (x, y) = match d.fixed {
+                        Some((top, slot)) => {
+                            let x = ((area_width - d.width) * 0.5).max(8.0);
+                            let y = if top {
+                                8.0 + slot as f32 * 30.0
+                            } else {
+                                (area_height - 40.0 - slot as f32 * 30.0).max(8.0)
+                            };
+                            (x, y)
+                        }
+                        None => (d.scroll_x.unwrap_or(0.0), d.y),
+                    };
                     // 设计稿要求「1px 深色描边 + 投影」，而 ShapedLine 的
                     // 颜色烘在 layout 里、paint 不能重新着色。这里把同一条文本
                     // shape 两次：一次深色（描边/投影），一次原色（字身）。
@@ -2028,7 +2274,7 @@ impl PlayerView {
 
                     // 投影：右下 1,2 px 先画一层，再画 8 方向 1px 描边。
                     let _ = stroke_line.paint(
-                        point(px(d.x + 1.0), px(d.y + 2.0)),
+                        point(px(x + 1.0), px(y + 2.0)),
                         line_height,
                         TextAlign::Left,
                         None,
@@ -2046,7 +2292,7 @@ impl PlayerView {
                         (1.0, 1.0),
                     ] {
                         let _ = stroke_line.paint(
-                            point(px(d.x + dx), px(d.y + dy)),
+                            point(px(x + dx), px(y + dy)),
                             line_height,
                             TextAlign::Left,
                             None,
@@ -2069,7 +2315,7 @@ impl PlayerView {
                         None,
                     );
                     let _ = line.paint(
-                        point(px(d.x), px(d.y)),
+                        point(px(x), px(y)),
                         line_height,
                         TextAlign::Left,
                         None,
@@ -2080,7 +2326,11 @@ impl PlayerView {
             },
         )
         .absolute()
-        .inset_0()
+        // 只覆盖播放层：右侧信息面板展开 400 / 收起 200，都不属于弹幕区。
+        .top_0()
+        .left_0()
+        .bottom_0()
+        .right(px(self.panel_width()))
     }
 
     /// 播放 / 暂停：控制栏与画面中央按钮共用。
@@ -2897,11 +3147,28 @@ impl PlayerView {
     }
 
     fn danmaku_tab(&self, t: &YkTheme) -> AnyElement {
+        match &self.danmaku_state {
+            DanmakuState::Idle => return panel_empty_line(t, "暂无弹幕").into_any_element(),
+            DanmakuState::Loading => {
+                return panel_empty_line(t, "弹幕加载中…").into_any_element();
+            }
+            DanmakuState::Error(error) => {
+                return panel_empty_line(t, &format!("弹幕加载失败：{error}")).into_any_element();
+            }
+            DanmakuState::Ready => {}
+        }
+        if self.danmaku_all.is_empty() {
+            return panel_empty_line(t, "暂无弹幕").into_any_element();
+        }
+
         let s = &t.surfaces;
         let mut list = div().w_full().px(px(SPACE_4)).pb(px(SPACE_4));
-        let mut any = false;
-        for (danmaku, _) in self.danmaku.iter().take(40) {
-            any = true;
+        for danmaku in self.danmaku_all.iter().take(60) {
+            let mode = match danmaku.mode {
+                DanmakuMode::Top => Some("顶"),
+                DanmakuMode::Bottom => Some("底"),
+                DanmakuMode::Scroll => None,
+            };
             list = list.child(
                 div()
                     .flex()
@@ -2918,6 +3185,17 @@ impl PlayerView {
                             .text_color(s.text_quaternary)
                             .child(format::duration(danmaku.time.max(0.0) as u64)),
                     )
+                    .when_some(mode, |el, mode| {
+                        el.child(
+                            div()
+                                .w(px(16.))
+                                .flex_shrink_0()
+                                .text_center()
+                                .text_size(px(FONT_SIZE_MICRO))
+                                .text_color(s.text_quaternary)
+                                .child(mode),
+                        )
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -2928,9 +3206,6 @@ impl PlayerView {
                             .child(danmaku.text.clone()),
                     ),
             );
-        }
-        if !any {
-            list = list.child(panel_empty_line(t, "暂无弹幕"));
         }
         list.into_any_element()
     }
@@ -3189,30 +3464,19 @@ fn comment_item(t: &YkTheme, comment: &DynamicComment) -> impl IntoElement {
 }
 
 /// 占位弹幕（真实数据要从 `/x/v1/dm/list.so` 拉 XML，属于后续）。
-fn mock_danmaku() -> DanmakuSet {
-    const TEXTS: [&str; 12] = [
-        "前方高能",
-        "这也太真实了",
-        "哈哈哈哈",
-        "有一说一，确实",
-        "第一次看到这种",
-        "好家伙",
-        "这个可以",
-        "泪目",
-        "up主加油",
-        "妙啊",
-        "学到了",
-        "名场面",
-    ];
-    let raw = (0..300).map(|i| {
-        // 从 -6 秒开始：这样首帧（play_time≈0）就有弹幕在屏幕上，
-        // 便于截图验收；真实数据里时间是 0 起。
-        let t = (i as f64) * 0.22 - 6.0;
-        let color = if i % 7 == 0 { 16777215u32 } else { 65280 };
-        let p = format!("{t},1,25,{color},0,0,0,0");
-        (p, TEXTS[i % TEXTS.len()].to_string())
-    });
-    DanmakuSet::from_raw(raw)
+/// 给顶部 / 底部固定弹幕找一个空槽位。
+///
+/// 槽位在这个时间点已被占满时返回 `None`，调用方把那一条留在列表里、
+/// 不上屏 —— 比硬挤在同一行、文字互相盖住要好。
+fn take_fixed_slot(free: &mut [f64], time: f64) -> Option<usize> {
+    let slot = free.iter().position(|end| time >= *end)?;
+    free[slot] = time + FIXED_DANMAKU_DURATION;
+    Some(slot)
+}
+
+/// 顶部 / 底部固定弹幕在 `now` 是否还该显示。
+fn fixed_danmaku_visible(d: &Danmaku, now: f64) -> bool {
+    now >= d.time && now <= d.time + FIXED_DANMAKU_DURATION
 }
 
 // ================= 视频层 =================

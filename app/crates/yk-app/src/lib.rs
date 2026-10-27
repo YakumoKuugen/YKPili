@@ -1514,6 +1514,11 @@ impl Render for AppRoot {
         div()
             .relative()
             .size_full()
+            // 顶栏 / 播放浮窗 / 账号面板 / 动态详情都在页面图片缓存范围之外；
+            // GPUI 的 `img()` 没有 `ImageCache` 就不会发请求（评论头像、顶栏头像
+            // 都只会剩渐变占位）。这里给整棵树挂一个 retain-all 缓存兜底，
+            // 内容区仍由内层 `PageImageCache` 按视口淘汰。
+            .image_cache(retain_all("app-remote-images"))
             // 点空白处收起搜索联想面板；搜索框与面板自己会 stop_propagation。
             .on_mouse_down(
                 MouseButton::Left,

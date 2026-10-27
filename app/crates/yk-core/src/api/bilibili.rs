@@ -212,6 +212,18 @@ pub fn dynamic_comments(oid: &str, kind: i64, cookie: &str, pn: u32, ps: u32) ->
     }
 }
 
+/// 视频弹幕 XML（`/x/v1/dm/list.so`）。
+///
+/// `oid` 是视频当前分 P 的 cid。响应固定带 `Content-Encoding: deflate`，
+/// 解压与解析分别在 `client::decode_danmaku_body` / `danmaku::DanmakuSet::from_xml`。
+pub fn danmaku_xml(cid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/v1/dm/list.so?oid={cid}&type=1"),
+        cookie: cookie.to_string(),
+        name: "danmaku_xml",
+    }
+}
+
 // ================= 消息中心 =================
 
 /// 私信 / 会话接口的域名。互动接口仍在 `api.bilibili.com` 下。
