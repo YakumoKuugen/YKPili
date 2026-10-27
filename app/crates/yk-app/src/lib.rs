@@ -546,6 +546,8 @@ impl AppRoot {
         self.reset_feed_paging();
         self.feed_generation = self.feed_generation.wrapping_add(1);
         let generation = self.feed_generation;
+        // 整页替换期间挡住「自动补页」，否则两边会互相顶掉 generation。
+        self.feed_loading = true;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -624,6 +626,8 @@ impl AppRoot {
         let cookie = self.cookie();
         self.feed_generation = self.feed_generation.wrapping_add(1);
         let generation = self.feed_generation;
+        // 整页替换期间挡住「自动补页」，否则两边会互相顶掉 generation。
+        self.feed_loading = true;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -945,6 +949,9 @@ impl AppRoot {
             return;
         }
         self.initial_load_started = true;
+        // 首屏请求期间挡住触底加载：有缓存时 feed 非空、`feed_loading` 原本是
+        // false，大窗口的「自动补页」会和首屏请求并发，两者会互相顶掉 generation。
+        self.feed_loading = true;
         // 顶栏 / Dock 的红点要在首页就正确，不能等用户先进消息页。
         if self.session.is_some() {
             self.refresh_unread(cx);
@@ -1403,6 +1410,27 @@ impl Render for AppRoot {
                         let handle = view.content_scroll.base_handle().clone();
                         let y = handle.offset().y.as_f32();
                         let max = handle.max_offset().y.as_f32();
+
+                        // 大窗口 / 高分辨率：一页 30 条可能连一屏都填不满，
+                        // 内容高度不够 → max_offset 恒为 0 → 下面的「触底加载」
+                        // 永远不触发，表现就是没有滚动条、也拉不到更多封面。
+                        // 这里按视口几何算出「一屏至少需要多少张」，不足就补页；
+                        // 请求中 / 离线 / 已达上限由 `load_more_feed` 自己挡。
+                        if view.page.is_none()
+                            && view.initial_load_started
+                            && !view.feed_loading
+                            && view.feed_has_more
+                        {
+                            if let Some(bounds) = view.layout_bounds.get() {
+                                let need = home_min_items(
+                                    bounds.size.width.as_f32(),
+                                    bounds.size.height.as_f32(),
+                                );
+                                if view.feed.len() < need {
+                                    view.load_more_feed(cx);
+                                }
+                            }
+                        }
 
                         // 回顶刷新：先向下滚过一段距离，再回到顶部才触发一次。
                         if y < -240.0 {
@@ -2143,14 +2171,14 @@ fn content_area(
     // 列数 = 可用宽度能放下几个 208 + 16 的槽位；至少 1 列。
     // 窗口缩放时列数会变，item_sizes 每帧重算（行数很少，成本可忽略）。
     let available = (window.viewport_size().width.as_f32() - SPACE_6 * 2.0).max(COVER_CELL_WIDTH);
-    let cols = (((available + SPACE_4) / (COVER_CELL_WIDTH + SPACE_4)).floor() as usize).max(1);
+    let cols = home_columns(window.viewport_size().width.as_f32());
     // 行高 = 卡片高 + 行间距；行内只画卡片，多出来的 16 就是行距。
     let row_h = COVER_CELL_HEIGHT + SPACE_4;
 
     // 首屏加载：用与真实卡片完全同几何的骨架卡，避免数据回来时网格跳动。
     // 只用一个 repeat 动画驱动整块网格的 opacity（1 → 0.45 → 1，1.5s），
     // 不在每张骨架卡上各排一条动画，也不引入任何额外颜色。
-    if loading {
+    if loading && items.is_empty() {
         let viewport_h = window.viewport_size().height.as_f32();
         let available_h = (viewport_h - TOP_BAR_HEIGHT - SPACE_4 - DOCK_RESERVED).max(row_h);
         let skeleton_rows = ((available_h / row_h).floor() as usize).max(2);
@@ -2953,6 +2981,32 @@ const DOCK_ITEM_HEIGHT: f32 = 40.0;
 /// Dock 本体高 52（40 + 6×2）+ 下边距 20 + 呼吸 24。
 const DOCK_RESERVED: f32 = 96.0;
 
+/// 首页网格列数：可用宽度能放下几个「卡片 + 间距」槽位，至少 1 列。
+///
+/// 网格绘制（[`content_area`]）和「一屏需要多少张封面」的判断共用这一份几何，
+/// 避免两处公式漂移。
+fn home_columns(viewport_width: f32) -> usize {
+    let available = (viewport_width - SPACE_6 * 2.0).max(COVER_CELL_WIDTH);
+    (((available + SPACE_4) / (COVER_CELL_WIDTH + SPACE_4)).floor() as usize).max(1)
+}
+
+/// 首页填满一屏所需的最少卡片数：列数 ×（整行数 + 1 行）。
+///
+/// 推荐接口一页固定 30 条；窗口大到一页填不满时，内容高度不足 → 滚动条
+/// 的 `max_offset` 为 0 → 「触底加载」永远不触发，表现就是没有滚动条、
+/// 也拉不到更多封面。这里按视口几何算出「至少几行才超出一屏」，不够就补页。
+///
+/// 网格容器上内边距 16 + 下内边距 `DOCK_RESERVED`，滚动视口高 = 窗口高 − 顶栏；
+/// 所以内容高 `rows × row_h + 112 > 视口高` 等价于 `rows × row_h > available_h`，
+/// 即整行数 + 1 行就够了（刚好多出不到一行，保证一定滚得动）。
+fn home_min_items(viewport_width: f32, viewport_height: f32) -> usize {
+    let cols = home_columns(viewport_width);
+    let row_h = COVER_CELL_HEIGHT + SPACE_4;
+    let available_h = (viewport_height - TOP_BAR_HEIGHT - SPACE_4 - DOCK_RESERVED).max(row_h);
+    let full_rows = (available_h / row_h).floor() as usize;
+    cols * (full_rows + 1)
+}
+
 struct DockEntry {
     label: &'static str,
     icon: IconName,
@@ -3355,4 +3409,44 @@ fn mock_recommend(n: usize) -> Vec<RecommendVideoItem> {
             }),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod home_grid_tests {
+    use super::{home_columns, home_min_items};
+
+    #[test]
+    fn columns_follow_window_width() {
+        // 1280 可用宽 1232 → 5 列；2560 可用宽 2512 → 11 列。
+        assert_eq!(home_columns(1280.0), 5);
+        assert_eq!(home_columns(2560.0), 11);
+        // 极窄窗口至少保留 1 列。
+        assert_eq!(home_columns(200.0), 1);
+    }
+
+    #[test]
+    fn normal_window_fits_in_one_page() {
+        // 一页 30 条：普通窗口够用，不该无谓地多请求。
+        assert!(home_min_items(1280.0, 820.0) <= 30);
+        assert!(home_min_items(1440.0, 900.0) <= 30);
+    }
+
+    #[test]
+    fn large_window_needs_more_than_one_page() {
+        // 大窗口下一页 30 条填不满一屏，必须继续补页，否则 max_offset 恒为 0。
+        assert!(home_min_items(2560.0, 1440.0) > 30);
+        assert!(home_min_items(1920.0, 1200.0) > 30);
+        // 补页目标不能超过 Feed 的容量上限。
+        assert!(home_min_items(2560.0, 1440.0) <= yk_core::feed::MAX_ITEMS);
+    }
+
+    #[test]
+    fn min_items_grows_with_viewport() {
+        let base = home_min_items(1920.0, 1080.0);
+        assert!(home_min_items(1920.0, 1440.0) > base, "更高 → 需要更多行");
+        assert!(
+            home_min_items(2560.0, 1080.0) > base,
+            "更宽 → 每行更多，同样高度需要更多条"
+        );
+    }
 }
