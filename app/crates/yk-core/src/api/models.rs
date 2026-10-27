@@ -165,6 +165,12 @@ pub struct PlayUrlData {
     pub dash: Option<DashData>,
     #[serde(default)]
     pub durl: Vec<DurlItem>,
+    /// 风控凭证：`code=0` 但没有 dash/durl 时，B 站用它要求先过验证。
+    ///
+    /// 典型响应：`{"code":0,"data":{"v_voucher":"voucher_..."}}`。
+    /// 这不是「视频不可播」：改用不带 WBI 的旧 playurl 端点通常仍能出流。
+    #[serde(default)]
+    pub v_voucher: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

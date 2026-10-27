@@ -262,6 +262,27 @@ where
         .collect())
 }
 
+/// playurl 响应里是否真的有可播放流。
+///
+/// B 站风控会用 `code=0 + data.v_voucher` 返回空响应：
+/// 不能把「没流」误判成视频不可播，调用方应走旧端点兜底。
+fn has_playable_stream(play: &PlayUrlData) -> bool {
+    play.dash
+        .as_ref()
+        .is_some_and(|dash| !dash.video.is_empty())
+        || !play.durl.is_empty()
+}
+
+/// 解析 playurl 响应；WBI 与旧端点共用。
+fn parse_play_url_response(body: &str) -> Result<PlayUrlData, String> {
+    let parsed: VideoPlayUrlResponse =
+        serde_json::from_str(body).map_err(|e| format!("播放地址解析失败：{e}"))?;
+    if parsed.code != 0 {
+        return Err(format!("播放地址返回 code={}", parsed.code));
+    }
+    parsed.data.ok_or_else(|| "播放地址缺少 data".to_string())
+}
+
 fn fetch_play_url_with_keys<C>(
     client: &C,
     bvid: &str,
@@ -275,12 +296,22 @@ where
 {
     let req = bilibili::play_url(bvid, cid, img, sub, cookie, now_wts());
     let body = client.get(&req)?;
-    let parsed: VideoPlayUrlResponse =
-        serde_json::from_str(&body).map_err(|e| format!("播放地址解析失败：{e}"))?;
-    if parsed.code != 0 {
-        return Err(format!("播放地址返回 code={}", parsed.code));
-    }
-    parsed.data.ok_or_else(|| "播放地址缺少 data".to_string())
+    parse_play_url_response(&body)
+}
+
+/// 旧 playurl 端点（不带 WBI 签名）；只在 WBI 端点被风控时调用。
+fn fetch_legacy_play_url<C>(
+    client: &C,
+    bvid: &str,
+    cid: i64,
+    cookie: &str,
+) -> Result<PlayUrlData, String>
+where
+    C: HttpClient<Error = String>,
+{
+    let req = bilibili::play_url_legacy(bvid, cid, cookie);
+    let body = client.get(&req)?;
+    parse_play_url_response(&body)
 }
 
 /// 点击卡片后的完整取流：详情取 cid → playurl → 选一条视频 + 可选音频。
@@ -308,6 +339,27 @@ where
         return Err("视频详情没有 cid，无法取播放地址".into());
     }
     let play = fetch_play_url_with_keys(client, bvid, cid, cookie, &img, &sub)?;
+    let play = if has_playable_stream(&play) {
+        play
+    } else {
+        // 典型场景：B 站风控对 WBI 端点返回 `code=0 + v_voucher`，
+        // data 里没有 dash/durl。旧端点不带 WBI、风控策略不同，实测仍能出流。
+        eprintln!(
+            "[playurl] WBI 端点没有可播放流（v_voucher={}），改用旧端点兜底",
+            play.v_voucher.is_some()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        match fetch_legacy_play_url(client, bvid, cid, cookie) {
+            Ok(legacy) => legacy,
+            Err(e) => {
+                eprintln!("[playurl] 旧端点兜底失败：{e}");
+                play
+            }
+        }
+    };
+    if !has_playable_stream(&play) && play.v_voucher.is_some() {
+        return Err("播放地址被 B 站风控拦截（v_voucher），请稍后重试".into());
+    }
     let mut source = select_playback(&info, &play)?;
     // 详情里 cid 有时是 0（分 P），播放地址用的是 pages 里的 cid；
     // 心跳上报必须用真正播放的那一 P。
@@ -1097,7 +1149,25 @@ fn check_message_code_value(body: &str, action: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    #[test]
+    fn playurl_voucher_is_not_playable() {
+        let voucher: PlayUrlData = serde_json::from_str(r#"{"v_voucher":"voucher_x"}"#).unwrap();
+        assert!(voucher.v_voucher.is_some());
+        assert!(!has_playable_stream(&voucher));
+
+        let dash: PlayUrlData = serde_json::from_str(
+            r#"{"dash":{"video":[{"id":32,"baseUrl":"https://x/v.m4s"}],"audio":[]}}"#,
+        )
+        .unwrap();
+        assert!(has_playable_stream(&dash));
+
+        let durl: PlayUrlData =
+            serde_json::from_str(r#"{"durl":[{"url":"https://x/v.mp4"}]}"#).unwrap();
+        assert!(has_playable_stream(&durl));
+    }
 
     #[test]
     fn danmaku_body_decodes_raw_deflate_and_plain_text() {
