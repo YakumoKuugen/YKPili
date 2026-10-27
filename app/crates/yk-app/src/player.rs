@@ -113,6 +113,8 @@ const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
 /// 面板整块滚动超过这个距离后，右下角才浮出「回到顶部」。
 /// 留 24px 是为了不因滚轮抖动 / 触控板回弹闪一下按钮。
 const PANEL_BACK_TO_TOP_THRESHOLD: f32 = 24.0;
+/// 滚动结束后这段时间内不响应面板收起，避免滚轮末尾的 hover 抖动。
+const PANEL_SCROLL_HOLD_MS: u64 = 400;
 /// 播放层右缘的 hover 热区宽度（覆盖在视频右侧、控制栏上方）。
 /// 侧栏常驻右侧 200；播放层/控制栏宽度都是「窗口 − 200」，不再额外缩 88。
 /// 88 只是控制栏高度 / 这条热区的宽度，不是控制栏与侧栏之间的空隙。
@@ -325,6 +327,15 @@ pub struct PlayerView {
     panel_generation: u64,
     /// 面板刚收起时的短暂抑制：鼠标还停在面板左缘/热区时不立刻重新弹出。
     panel_hover_grace_until: Option<std::time::Instant>,
+    /// 最近一次在面板内滚动的时间。
+    ///
+    /// 滚动期间 hover 会因每帧重绘而偶发抖动；用它做一小段保持窗口，
+    /// 避免「滚动 → hover 假 false → 收起 → 指针落热区 → 再展开」的高频抖动。
+    panel_last_scroll: Option<std::time::Instant>,
+    /// 已经排了一个 220ms 收起定时器；避免 watchdog 每 100ms 重新排一次。
+    panel_collapse_pending: bool,
+    /// 鼠标位置 watchdog 是否已启动（首帧启动一次）。
+    hover_watchdog_started: bool,
     /// 上次鼠标位置：过滤「位置没变」的重复 move（滚轮不应把控制栏叫出来）。
     last_pointer: Point<Pixels>,
     /// 控制栏（连同底部黑框 / 左下角标）是否可见。
@@ -437,6 +448,9 @@ impl PlayerView {
             seek_settle_until: None,
             panel_generation: 0,
             panel_hover_grace_until: None,
+            panel_last_scroll: None,
+            panel_collapse_pending: false,
+            hover_watchdog_started: false,
             last_pointer: point(px(0.), px(0.)),
             controls_visible: true,
             last_activity: std::time::Instant::now(),
@@ -503,6 +517,7 @@ impl PlayerView {
         self.controls_timer_generation = self.controls_timer_generation.wrapping_add(1);
         self.controls_timer_running = false;
         self.panel_hover_grace_until = None;
+        self.panel_last_scroll = None;
         self.needs_focus = true;
         self.escape_hint = false;
         self.escape_hint_generation = self.escape_hint_generation.wrapping_add(1);
@@ -833,6 +848,7 @@ impl PlayerView {
     /// 收起判断不信任 `on_hover(false)`：播放中每帧重绘会让它在指针没动时闪 false。
     fn set_panel_hover(&mut self, hovered: bool, window: &Window, cx: &mut Context<Self>) {
         if hovered {
+            self.panel_collapse_pending = false;
             self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
             self.panel_hover_grace_until = None;
             if !self.expanded {
@@ -846,11 +862,32 @@ impl PlayerView {
         if !self.expanded {
             return;
         }
+        // 刚在面板里滚动过：滚动期间 hover 会抖，先不收起。
+        if self.panel_scrolled_recently() {
+            return;
+        }
         // 播放中每帧重绘都会重算 hover；指针实际还在面板里时，
         // 这次 false 是布局闪动，不是用户移出，直接忽略。
         if self.pointer_in_panel_zone(window.mouse_position(), window) {
             return;
         }
+        self.arm_panel_collapse(cx);
+    }
+
+    /// 排一个 220ms 的收起定时器。调用方必须已经确认指针在 hover 区外。
+    ///
+    /// 不在这里再查 `window.mouse_position()`：watchdog 用的是系统级光标，
+    /// 而 `Window::mouse_position()` 在快速移出窗口时可能仍停留在旧位置。
+    fn arm_panel_collapse(&mut self, cx: &mut Context<Self>) {
+        if !self.expanded {
+            return;
+        }
+        // watchdog 每 100ms 也会调到这里：已经有定时器在跑就不要再排一个，
+        // 否则一直从现在起算 220ms，永远到不了点。
+        if self.panel_collapse_pending {
+            return;
+        }
+        self.panel_collapse_pending = true;
         self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
         let generation = self.panel_collapse_generation;
         cx.spawn(async move |this, cx| {
@@ -859,12 +896,21 @@ impl PlayerView {
                 .await;
             let _ = this.update(cx, |view, cx| {
                 if view.panel_collapse_generation != generation {
+                    // 已经被 set_panel_hover(true) 取消，或已有更新的
+                    // 定时器接管；不要在这里清 pending，避免和新定时器打架。
                     return;
                 }
+                view.panel_collapse_pending = false;
                 view.collapse_panel_now(cx);
             });
         })
         .detach();
+    }
+
+    /// 面板最近是否在滚动（含滚轮惯性尾部）。
+    fn panel_scrolled_recently(&self) -> bool {
+        self.panel_last_scroll
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(PANEL_SCROLL_HOLD_MS))
     }
 
     /// 立即收起面板（鼠标离开窗口 / 收起定时器到点）。
@@ -873,6 +919,7 @@ impl PlayerView {
             return;
         }
         self.expanded = false;
+        self.panel_collapse_pending = false;
         self.panel_generation = self.panel_generation.wrapping_add(1);
         // 鼠标可能还停在面板左缘/热区：400ms 内不响应，避免反复弹出。
         self.panel_hover_grace_until =
@@ -961,6 +1008,9 @@ impl PlayerView {
             }
             self.set_panel_hover(true, window, cx);
         } else {
+            // 真实鼠标已经移出：这次不受「滚动后 400ms 保持」影响，
+            // 否则刚滚完就移到右侧边距会迟迟不收起。
+            self.panel_last_scroll = None;
             self.set_panel_hover(false, window, cx);
         }
     }
@@ -1017,14 +1067,20 @@ impl PlayerView {
                     let _ = weak_up.update(cx, |view, cx| view.end_scrub(cx));
                 });
                 // 指针直接离开窗口时没有 MouseMove / MouseUp；这里补一次收尾。
-                window.on_mouse_event(move |_: &MouseExitEvent, phase, _window, cx| {
+                window.on_mouse_event(move |event: &MouseExitEvent, phase, window, cx| {
                     if phase != DispatchPhase::Bubble {
                         return;
                     }
+                    let position = event.position;
                     let _ = weak.update(cx, |view, cx| {
                         view.end_scrub(cx);
-                        view.hide_controls(cx);
-                        view.collapse_panel_now(cx);
+                        // 播放中每帧重绘会改变布局，GPUI 会因此偶发派发
+                        // 播放器区域的 MouseExit（指针其实还在面板里）。
+                        // 面板收起不在这里做：统一交给真实鼠标坐标 + 220ms 延迟，
+                        // 否则视频每帧都可能把侧栏收掉再弹回来。
+                        if !view.pointer_in_window(position, window) {
+                            view.hide_controls(cx);
+                        }
                     });
                 });
             },
@@ -1451,6 +1507,8 @@ impl PlayerView {
     fn pointer_in_panel_zone(&self, position: Point<Pixels>, window: &Window) -> bool {
         let viewport = window.viewport_size();
         // 播放器窗口贴窗口右缘内缩 SPACE_4；面板再贴播放器右缘。
+        // 右边界以内缩后的面板右缘为准：移出到窗口最右 16px 边距
+        // 也算离开 hover 区，延迟 220ms 后收起面板。
         let right = viewport.width - px(SPACE_4);
         // 展开态给骑边界按钮留 16px；收起态正好是 200px 面板 + 88px 热区。
         let width = if self.expanded {
@@ -1464,6 +1522,15 @@ impl PlayerView {
             && position.x <= right + px(1.)
             && position.y >= top - px(1.)
             && position.y <= bottom + px(1.)
+    }
+
+    /// 指针是否还在窗口内（含四周 16px 边距）。
+    fn pointer_in_window(&self, position: Point<Pixels>, window: &Window) -> bool {
+        let viewport = window.viewport_size();
+        position.x >= px(0.)
+            && position.x <= viewport.width
+            && position.y >= px(0.)
+            && position.y <= viewport.height
     }
 
     /// 指针是否还在播放器窗口内（不是顶栏 / Dock / 页面）。
@@ -1687,6 +1754,44 @@ fn current_session_cookie() -> String {
         .unwrap_or_default()
 }
 
+/// 系统级鼠标位置（全局显示坐标，原点在主屏左上角）。
+///
+/// `Window::mouse_position()` 只是「最后一次鼠标事件」的坐标；指针快速移出
+/// 窗口时可能收不到新事件，读到的还是旧位置。CoreGraphics 这里直接问系统
+/// 当前光标在哪，即使窗口不是 key/指针已在窗口外也能拿到。
+#[cfg(target_os = "macos")]
+fn system_mouse_position() -> Option<Point<Pixels>> {
+    #[repr(C)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+        fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFRelease(value: *const std::ffi::c_void);
+    }
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+        let location = CGEventGetLocation(event);
+        CFRelease(event as *const std::ffi::c_void);
+        Some(point(px(location.x as f32), px(location.y as f32)))
+    }
+}
+
+/// 非 macOS 没有 CoreGraphics 的全局光标查询；退回最后一次事件位置。
+#[cfg(not(target_os = "macos"))]
+fn system_mouse_position() -> Option<Point<Pixels>> {
+    None
+}
+
 /// 把一次历史上报快照丢到后台线程发送。
 ///
 /// 不挂在 `cx.spawn` 上：关闭动画结束时 `PlayerView` 会被回收，
@@ -1720,7 +1825,46 @@ fn dispatch_history_report(report: &HistoryReport, progress: u64) {
 
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        eprintln!("[M3] PlayerView::render 被调用");
+        if !self.hover_watchdog_started {
+            self.hover_watchdog_started = true;
+            // 鼠标快速移出窗口时，GPUI 可能来不及派发 MouseMove / MouseExit。
+            // 直接周期读取系统鼠标位置（CoreGraphics 的 CGEventGetLocation，
+            // 即使指针已经在窗口外也会给出坐标），再走同一个 220ms 延迟收起。
+            cx.spawn_in(window, async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+                let alive = this.update_in(cx, |view, window, cx| {
+                    if !view.expanded {
+                        return;
+                    }
+                    let position = system_mouse_position()
+                        .map(|global| {
+                            let origin = window.bounds().origin;
+                            point(global.x - origin.x, global.y - origin.y)
+                        })
+                        .unwrap_or_else(|| window.mouse_position());
+                    if view.pointer_in_panel_zone(position, window) {
+                        // 已经回到 hover 区：取消可能排着的收起。
+                        if view.panel_collapse_pending {
+                            view.panel_collapse_pending = false;
+                            view.panel_collapse_generation =
+                                view.panel_collapse_generation.wrapping_add(1);
+                        }
+                        return;
+                    }
+                    // 系统光标已经在 hover 区外：这是真实移出，
+                    // 不受「滚动后 400ms 保持」影响，只保留 220ms 延迟。
+                    // 直接 arm，避免再用可能过期的 window.mouse_position() 判断一次。
+                    view.panel_last_scroll = None;
+                    view.arm_panel_collapse(cx);
+                });
+                if alive.is_err() {
+                    break;
+                }
+            })
+            .detach();
+        }
         if self.needs_focus {
             self.needs_focus = false;
             let handle = self.focus_handle.clone();
@@ -2015,6 +2159,9 @@ impl Render for PlayerView {
                     let position = window.mouse_position();
                     // 播放中每帧重绘会让 hover 偶发 false；指针仍在播放器里就忽略。
                     if !view.pointer_in_player(position, window) {
+                        // 指针真的离开播放器（含移进 16px 边距）：解除滚动保持，
+                        // 让 220ms 延迟收起照常生效。
+                        view.panel_last_scroll = None;
                         view.hide_controls(cx);
                         view.set_panel_hover(false, window, cx);
                     }
@@ -2975,6 +3122,20 @@ impl PlayerView {
             .h_full()
             .overflow_y_scroll()
             .track_scroll(&self.panel_scroll)
+            .on_scroll_wheel(cx.listener(|view, event: &ScrollWheelEvent, window, cx| {
+                // 滚动事件自带窗口内坐标，用它把「指针还在面板里」钉住：
+                // 播放中每帧重绘会让 hover 偶发 false，滚动时不能被它误收起。
+                view.panel_last_scroll = Some(std::time::Instant::now());
+                view.last_pointer = event.position;
+                view.panel_collapse_generation = view.panel_collapse_generation.wrapping_add(1);
+                view.panel_hover_grace_until = None;
+                if !view.expanded {
+                    view.expanded = true;
+                    view.panel_generation = view.panel_generation.wrapping_add(1);
+                    cx.notify();
+                }
+                view.note_activity(window, cx);
+            }))
             .child(content);
 
         // offset.y 向下滚为负；过阈值才浮出「回到顶部」。
@@ -3020,7 +3181,9 @@ impl PlayerView {
             .with_animation(
                 format!("player-panel-{}", self.panel_generation),
                 Animation::new(std::time::Duration::from_millis(200)).with_easing(ease_standard()),
-                move |el, delta| el.w(px(from_width + (to_width - from_width) * delta)),
+                move |el, delta| {
+                    el.w(px(from_width + (to_width - from_width) * delta))
+                },
             )
             .into_any_element()
     }
