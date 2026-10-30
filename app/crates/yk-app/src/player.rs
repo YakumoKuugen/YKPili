@@ -221,6 +221,12 @@ const COMMENT_OVERSCAN: f32 = 1200.0;
 struct CommentRows {
     /// 每条评论的行高。
     heights: Vec<f32>,
+    /// 每条评论正文的物理行数（未按展示上限截断）。
+    ///
+    /// GPUI 的 `line_clamp` 对显式换行只按**段**生效：多段正文不会被
+    /// 压到 `COMMENT_MAX_LINES` 以内，会撑出窗口化渲染写死的高度。
+    /// 超过上限的评论渲染前要先压成一段（见 `comment_item`）。
+    line_counts: Vec<usize>,
     /// 前缀和：`offsets[i]` 是第 i 行的顶部，最后一项是内容总高。
     offsets: Vec<f32>,
     /// 算行高时用的正文宽度；面板宽度变了要整表重算。
@@ -243,24 +249,27 @@ impl CommentRows {
         if (self.width - width).abs() > 0.5 {
             self.width = width;
             self.heights.clear();
+            self.line_counts.clear();
             self.offsets.clear();
         }
         if self.heights.len() > items.len() {
             self.heights.truncate(items.len());
+            self.line_counts.truncate(items.len());
             self.offsets.truncate(self.heights.len() + 1);
         }
         if self.offsets.is_empty() {
             self.offsets.push(0.0);
         }
         for comment in &items[self.heights.len()..] {
-            let lines = lines_of(&comment.text).clamp(1, COMMENT_MAX_LINES);
+            let total_lines = lines_of(&comment.text).max(1);
+            let lines = total_lines.min(COMMENT_MAX_LINES);
+            self.line_counts.push(total_lines);
             let image_extra = if comment.pictures.is_empty() {
                 0.0
             } else {
                 COMMENT_IMAGE_ROW_HEIGHT
             };
-            let height =
-                COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32 + image_extra;
+            let height = COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32 + image_extra;
             let top = *self.offsets.last().unwrap_or(&0.0);
             self.heights.push(height);
             self.offsets.push(top + height);
@@ -2245,6 +2254,12 @@ impl PlayerView {
     #[doc(hidden)]
     pub fn set_test_scroll(&mut self, y: f32) {
         self.panel_scroll.set_offset(point(px(0.), px(y)));
+    }
+
+    /// 测试入口：信息面板当前的滚动偏移（负数向下滚）。
+    #[doc(hidden)]
+    pub fn test_scroll_offset(&self) -> f32 {
+        self.panel_scroll.offset().y.as_f32()
     }
 
     /// 测试入口：最近一帧实际创建了几个评论行（窗口化渲染验收）。
@@ -5042,6 +5057,15 @@ impl PlayerView {
                             / COMMENT_TEXT_LINE_HEIGHT)
                             .round()
                             .max(1.0) as usize;
+                        // 多段正文超过展示上限时要先压成一段，`line_clamp` 才管得住
+                        // 总行数；否则文字会撑出这行写死的高度（窗口化渲染会错位）。
+                        let flatten = self
+                            .comment_rows
+                            .line_counts
+                            .get(index)
+                            .copied()
+                            .unwrap_or(1)
+                            > COMMENT_MAX_LINES;
                         stack = stack.child(
                             div()
                                 .absolute()
@@ -5053,6 +5077,7 @@ impl PlayerView {
                                     t,
                                     &self.comment_items[index],
                                     lines,
+                                    flatten,
                                     self.image_viewer.clone(),
                                     cx,
                                 )),
@@ -5506,10 +5531,11 @@ fn comment_text_width() -> f32 {
     PLAYER_INFO_PANEL_WIDTH - SPACE_4 * 2.0 - 28.0 - SPACE_2
 }
 
-/// 评论正文在 `width` 内折成几行（最多 `COMMENT_MAX_LINES` 行）。
+/// 评论正文在 `width` 内折成的**物理行数**（按段累加，不按展示上限截断）。
 ///
-/// 用文本系统的 `shape_text` 按与渲染完全相同的字号 / 宽度 / 行数上限算，
-/// 得到的行数再乘 `COMMENT_TEXT_LINE_HEIGHT` 就是正文高度。
+/// 用文本系统的 `shape_text` 按与渲染完全相同的字号 / 宽度 / 行数上限算。
+/// 返回值交给 `CommentRows` 截断成展示行数；超过 `COMMENT_MAX_LINES`
+/// 的多段正文还要在渲染前压成一段，否则 `line_clamp` 管不住总行数。
 fn comment_wrapped_lines(window: &mut Window, text: &str, width: f32) -> usize {
     if text.trim().is_empty() || width <= 0.0 {
         return 1;
@@ -5532,20 +5558,34 @@ fn comment_wrapped_lines(window: &mut Window, text: &str, width: f32) -> usize {
             .iter()
             .map(|line| line.wrap_boundaries.len() + 1)
             .sum::<usize>()
-            .clamp(1, COMMENT_MAX_LINES),
+            .max(1),
         Err(_) => 1,
     }
+}
+
+/// 把多段正文压成单段。
+///
+/// GPUI 的 `line_clamp` 对显式换行只按段生效，多段正文会整段铺开；
+/// 窗口化评论行的高度是提前算死的，压成一段后才能保证最多 3 行。
+fn flatten_comment_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn comment_item(
     t: &YkTheme,
     comment: &DynamicComment,
     lines: usize,
+    flatten: bool,
     viewer: gpui::Entity<crate::image_viewer::ImageViewer>,
     cx: &mut Context<PlayerView>,
 ) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
+    let text = if flatten {
+        flatten_comment_text(&comment.text)
+    } else {
+        comment.text.clone()
+    };
     // 高度必须与 `CommentRows` 算出来的完全一致（窗口化渲染按它绝对定位）：
     // padding 16 + 作者行 16 + 两个 2px 间距 + 正文 20×行数 + 时间行 14，
     // 有附图时再加一条缩略图条（`COMMENT_IMAGE_ROW_HEIGHT`）。
@@ -5562,7 +5602,11 @@ fn comment_item(
         .gap(px(SPACE_2))
         .py(px(SPACE_2))
         .h(px(height))
-        .overflow_hidden()
+        // 这里**不能裁切**：`SelectableText` 的拖选自动滚动会把最近一层
+        // 裁切当成可视区。评论行只有几十像素高，指针一进正文就落进
+        // 「上下 16px 触发区」，拖动（哪怕只是左右移动）都会被判定成
+        // 贴着边缘，持续派发滚轮，把虚拟列表滚出很远。
+        // 行内内容本来就按 `CommentRows` 的精确高度排，不会溢出。
         .border_b_1()
         .border_color(s.border_subtle)
         .child(
@@ -5608,24 +5652,24 @@ fn comment_item(
                 .child(
                     // 评论正文用 `SelectableText`：拖动可以按字符选范围，Cmd/Ctrl+C
                     // 复制选中部分（`gpui-base` 的窗口级选区 + Root 的复制动作）。
-                    // 高度仍然由 `CommentRows` 算好的行数决定，外层裁切保证
-                    // 窗口化渲染的绝对定位不被撑开。
-                    div()
-                        .h(px(COMMENT_TEXT_LINE_HEIGHT * lines as f32))
-                        .overflow_hidden()
-                        .child(
-                            gpui::base::SelectableText::new(
-                                ("comment-body", comment.rpid.max(0) as usize),
-                                comment.text.clone(),
-                            )
-                            .text_style(gpui::TextStyleRefinement {
-                                font_size: Some(px(FONT_SIZE_CONTROL).into()),
-                                line_height: Some(px(COMMENT_TEXT_LINE_HEIGHT).into()),
-                                color: Some(s.text_primary),
-                                line_clamp: Some(COMMENT_MAX_LINES),
-                                ..Default::default()
-                            }),
-                        ),
+                    // 高度仍然由 `CommentRows` 算好的行数决定。
+                    //
+                    // 注意别在正文外面再包 `overflow_hidden`：拖选自动滚动按
+                    // 最近一层裁切计算可视区，裁到正文高度后左右拖动也会一直
+                    // 触发滚动。让最近一层裁切保持为侧栏的滚动视口。
+                    div().h(px(COMMENT_TEXT_LINE_HEIGHT * lines as f32)).child(
+                        gpui::base::SelectableText::new(
+                            ("comment-body", comment.rpid.max(0) as usize),
+                            text,
+                        )
+                        .text_style(gpui::TextStyleRefinement {
+                            font_size: Some(px(FONT_SIZE_CONTROL).into()),
+                            line_height: Some(px(COMMENT_TEXT_LINE_HEIGHT).into()),
+                            color: Some(s.text_primary),
+                            line_clamp: Some(COMMENT_MAX_LINES),
+                            ..Default::default()
+                        }),
+                    ),
                 )
                 // 评论附图：最多 4 张 72×72 缩略图，点开进查看器（可缩放 / 左右翻）。
                 .when(!comment.pictures.is_empty(), |el| {
@@ -6078,9 +6122,9 @@ fn ctrl_icon(icon: IconName, color: Hsla) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        comment_request_wait, comments_need_more, cursor_local, merge_comment_page, percent_encode,
-        qq_share_url, video_page_url, CommentRows, COMMENT_PAGE_SIZE, COMMENT_REQUEST_INTERVAL,
-        COMMENT_ROW_CHROME, COMMENT_TEXT_LINE_HEIGHT,
+        comment_request_wait, comments_need_more, cursor_local, flatten_comment_text,
+        merge_comment_page, percent_encode, qq_share_url, video_page_url, CommentRows,
+        COMMENT_PAGE_SIZE, COMMENT_REQUEST_INTERVAL, COMMENT_ROW_CHROME, COMMENT_TEXT_LINE_HEIGHT,
     };
     use gpui::{point, px};
 
@@ -6227,6 +6271,8 @@ mod tests {
         // 第 i 条折 1/2/3/3 行（3 行封顶）。
         rows.ensure(&items, 332.0, |text| text.len());
         assert_eq!(rows.heights.len(), 4);
+        // 物理行数保留未截断值，渲染时据此决定要不要把多段正文压成一段。
+        assert_eq!(rows.line_counts, vec![1, 2, 3, 4]);
         assert_eq!(
             rows.heights[0],
             COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT
@@ -6257,6 +6303,15 @@ mod tests {
         assert_eq!(rows.first_row_at(0.0), 0);
         assert_eq!(rows.first_row_at(rows.offsets[2] + 1.0), 2);
         assert_eq!(rows.first_row_at(rows.total()), 5);
+    }
+
+    #[test]
+    fn flatten_comment_text_collapses_explicit_breaks() {
+        assert_eq!(
+            flatten_comment_text("第一行\n第二行\n\n第三行"),
+            "第一行 第二行 第三行"
+        );
+        assert_eq!(flatten_comment_text("没有换行"), "没有换行");
     }
 
     #[test]

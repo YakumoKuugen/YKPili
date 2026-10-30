@@ -308,6 +308,23 @@ impl AppRoot {
         self
     }
 
+    /// 测试 / 截图入口：注入关注流数据并落到「正在关注」页，不发请求。
+    pub fn with_following(mut self, items: Vec<DynamicItem>) -> Self {
+        self.page = Some(pages::PageKind::Following);
+        self.following = items;
+        self.following_loaded = true;
+        self.following_loading = false;
+        self.following_loading_more = false;
+        self.following_has_more = false;
+        self
+    }
+
+    /// 测试入口：动态详情浮层是否已打开。
+    #[doc(hidden)]
+    pub fn test_dynamic_detail_open(&self) -> bool {
+        self.dynamic_detail.is_some()
+    }
+
     /// 测试 / 截图入口：固定一张封面处于 hover 态，用于检查卡片材质。
     pub fn with_hovered_card(mut self, index: usize) -> Self {
         self.hovered_card = Some(index);

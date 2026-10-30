@@ -82,3 +82,8 @@ harness = false
 name = "dynamic_detail_copy"
 path = "tests/dynamic_detail_copy.rs"
 harness = false
+
+[[test]]
+name = "following_card_copy"
+path = "tests/following_card_copy.rs"
+harness = false

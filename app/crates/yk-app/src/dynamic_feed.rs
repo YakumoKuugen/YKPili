@@ -615,28 +615,20 @@ fn card(
 
     let card_title = card_text(&item.title);
     let card_body_text = card_text(&item.text);
-    // 先记下「有没有文字」：下面两个 `SelectableText` 会把 String move 走。
-    let has_text = !card_title.is_empty() || !card_body_text.is_empty();
 
-    // 文字区单独包一层：选区层会在按下时吞掉事件，所以「点文字开详情」
-    // 由这一层的 mouse-up 兜底（有选中内容就什么都不做）。
-    // 只包文字，别把底栏按钮包进来 —— 否则点赞 / 转发也会开详情。
-    let mut text_area = div().flex().flex_col().w_full();
-
+    // 卡片只做摘要浏览：**不接入选区**。卡片本身是点击进详情的入口，
+    // 如果文字能拖动选中，按下会被选区层吞掉，还会在瀑布流里出现
+    // 跨卡片的选区；复制统一放到详情浮层（`DynamicDetailView` 的右键菜单）。
     if !card_title.is_empty() {
-        // 可选中：拖动按字符选范围，Cmd/Ctrl+C 复制（gpui-base 窗口级选区）。
-        text_area = text_area.child(
-            div().mt(px(6.)).child(
-                gpui::base::SelectableText::new(("dynamic-title", idx), card_title)
-                    .text_style(gpui::TextStyleRefinement {
-                        font_size: Some(px(FONT_SIZE_BODY).into()),
-                        line_height: Some(px(TITLE_LINE_HEIGHT).into()),
-                        font_weight: Some(FontWeight::SEMIBOLD),
-                        color: Some(s.text_primary),
-                        line_clamp: Some(2),
-                        ..Default::default()
-                    }),
-            ),
+        body = body.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(FONT_SIZE_BODY))
+                .line_height(px(TITLE_LINE_HEIGHT))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(s.text_primary)
+                .line_clamp(2)
+                .child(card_title),
         );
     }
 
@@ -646,36 +638,15 @@ fn card(
         } else {
             4
         };
-        text_area = text_area.child(
-            div().mt(px(6.)).child(
-                gpui::base::SelectableText::new(("dynamic-body", idx), card_body_text)
-                    .text_style(gpui::TextStyleRefinement {
-                        font_size: Some(px(FONT_SIZE_CONTROL).into()),
-                        line_height: Some(px(BODY_LINE_HEIGHT).into()),
-                        color: Some(s.text_secondary),
-                        line_clamp: Some(max_lines),
-                        ..Default::default()
-                    }),
-            ),
+        body = body.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(FONT_SIZE_CONTROL))
+                .line_height(px(BODY_LINE_HEIGHT))
+                .text_color(s.text_secondary)
+                .line_clamp(max_lines)
+                .child(card_body_text),
         );
-    }
-
-    if has_text {
-        text_area = text_area.on_mouse_up(
-            MouseButton::Left,
-            cx.listener({
-                let open = open_detail.clone();
-                move |this, _: &MouseUpEvent, window, cx| {
-                    if gpui::base::TextSelection::selected_text(window, cx)
-                        .trim()
-                        .is_empty()
-                    {
-                        open(this, window, cx);
-                    }
-                }
-            }),
-        );
-        body = body.child(text_area);
     }
 
     match item.kind {
