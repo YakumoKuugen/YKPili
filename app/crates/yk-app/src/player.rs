@@ -1290,6 +1290,16 @@ impl PlayerView {
     }
 
     /// AppRoot 注入：关闭时把自己的 `playing` 置空。
+    /// 测试 / 截图入口：直接灌一批弹幕（不走网络请求），并把播放位置拨到
+    /// `at` 秒。弹幕排布与绘制和真实数据走完全同一条路径，用来目检
+    /// 「弹幕层是不是跟播放层对齐」。
+    #[doc(hidden)]
+    pub fn with_danmaku(mut self, set: DanmakuSet, at: f64) -> Self {
+        self.state.position_secs = at;
+        self.play_time = at;
+        self.install_danmaku(set);
+        self
+    }
     pub fn set_close_handler(&mut self, handler: impl Fn(&mut App, bool) + 'static) {
         self.close_handler = Some(Box::new(handler));
     }
@@ -2431,6 +2441,12 @@ impl PlayerView {
             move |bounds, _state, window, cx| {
                 let area_width = bounds.size.width.as_f32();
                 let area_height = bounds.size.height.as_f32();
+                // `ShapedLine::paint` 的 origin 是**窗口坐标**，不是画布内坐标。
+                // 弹幕层只盖播放层（左上 = 窗口左 16 / 顶栏下 16），不补
+                // `bounds.origin` 整层会整体上移一条顶栏、左移 16px，
+                // 看起来就是「弹幕浮在画面上半屏」。
+                let origin = bounds.origin;
+                let at = |x: f32, y: f32| point(origin.x + px(x), origin.y + px(y));
                 for d in &drawn {
                     let (x, y) = match d.fixed {
                         Some((top, slot)) => {
@@ -2464,7 +2480,7 @@ impl PlayerView {
 
                     // 投影：右下 1,2 px 先画一层，再画 8 方向 1px 描边。
                     let _ = stroke_line.paint(
-                        point(px(x + 1.0), px(y + 2.0)),
+                        at(x + 1.0, y + 2.0),
                         line_height,
                         TextAlign::Left,
                         None,
@@ -2482,7 +2498,7 @@ impl PlayerView {
                         (1.0, 1.0),
                     ] {
                         let _ = stroke_line.paint(
-                            point(px(x + dx), px(y + dy)),
+                            at(x + dx, y + dy),
                             line_height,
                             TextAlign::Left,
                             None,
@@ -2504,14 +2520,7 @@ impl PlayerView {
                         &[run],
                         None,
                     );
-                    let _ = line.paint(
-                        point(px(x), px(y)),
-                        line_height,
-                        TextAlign::Left,
-                        None,
-                        window,
-                        cx,
-                    );
+                    let _ = line.paint(at(x, y), line_height, TextAlign::Left, None, window, cx);
                 }
             },
         )

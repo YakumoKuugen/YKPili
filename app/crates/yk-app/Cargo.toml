@@ -42,3 +42,8 @@ harness = false
 name = "topbar_visual"
 path = "tests/topbar_visual.rs"
 harness = false
+[[test]]
+name = "danmaku_visual"
+path = "tests/danmaku_visual.rs"
+harness = false
+
