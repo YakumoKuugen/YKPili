@@ -28,22 +28,35 @@ use yk_media::convert::rgba_to_nv12;
 use yk_media::pixel_buffer::nv12_to_pixel_buffer;
 use yk_media::MpvPlayer;
 
+/// 视频线程 → UI 线程的一次投递。
+pub enum WorkerFrame {
+    /// 一帧画面 + 播放位置。
+    Frame(CFRetained<CVPixelBuffer>, f64),
+    /// 只有播放位置：窗口不可见时省掉像素转换与上传。
+    ///
+    /// 进度条与续播位置不能因为「窗口最小化」就停住，所以位置照报，
+    /// 只是不再有人看画面。
+    Position(f64),
+}
+
 /// `CFRetained<CVPixelBuffer>` 本身没有 Send 标记。
 ///
 /// 安全性依据：CVPixelBuffer 是 CoreVideo 的引用计数对象，
 /// 本身线程安全；这里只是跨线程**移动**所有权，没有并发读写同一块像素内存
 /// （渲染线程产出后就不再碰它，UI 线程只把它交给 surface 绘制）。
-struct SendBuffer(CFRetained<CVPixelBuffer>, f64);
-unsafe impl Send for SendBuffer {}
+unsafe impl Send for WorkerFrame {}
 
 enum WorkerCommand {
     Pause(bool),
     Seek(f64),
+    /// 窗口不可见（最小化 / 被完全遮挡）时停帧：mpv 继续播放音频，
+    /// 只是不再「渲染 → NV12 转换 → 上传」每一帧，改为只报播放位置。
+    RenderPaused(bool),
 }
 
 /// 渲染线程句柄。
 pub struct FrameWorker {
-    rx: Receiver<SendBuffer>,
+    rx: Receiver<WorkerFrame>,
     commands: mpsc::Sender<WorkerCommand>,
     stop: Arc<AtomicBool>,
     /// 播放是否已到结尾（mpv `eof-reached`，或 time-pos 贴近 duration）。
@@ -75,7 +88,7 @@ impl FrameWorker {
         height: u32,
         start_secs: f64,
     ) -> Option<Self> {
-        let (tx, rx) = mpsc::channel::<SendBuffer>();
+        let (tx, rx) = mpsc::channel::<WorkerFrame>();
         let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_in_thread = stop.clone();
@@ -113,7 +126,14 @@ impl FrameWorker {
 
                 let mut frames_sent = 0u64;
                 let mut render_errors = 0u32;
+                let mut render_paused = false;
+                // 目标帧间隔：60fps。注意这是「**上限**」而不是「固定睡眠」——
+                // 单帧渲染 + 色彩转换本身要 10–25ms，再无条件 sleep 16ms 会把
+                // 60fps 源压到 ~38fps（实测 Dropped 一路涨）。这里改成
+                // 「补齐到目标间隔」：本帧已经超时就立刻进下一帧。
+                let frame_budget = Duration::from_micros(16_667);
                 while !stop_in_thread.load(Ordering::Relaxed) {
+                    let frame_start = std::time::Instant::now();
                     while let Ok(command) = command_rx.try_recv() {
                         match command {
                             WorkerCommand::Pause(paused) => {
@@ -125,6 +145,9 @@ impl FrameWorker {
                                 if let Err(e) = player.seek(secs) {
                                     eprintln!("[video] seek {secs:.1}s 失败：{e}");
                                 }
+                            }
+                            WorkerCommand::RenderPaused(paused) => {
+                                render_paused = paused;
                             }
                         }
                     }
@@ -138,6 +161,19 @@ impl FrameWorker {
                         yk_core::player::is_playback_finished(t, duration, eof_reached),
                         Ordering::Relaxed,
                     );
+                    // 窗口不可见（最小化 / 被完全遮挡）：不出帧。
+                    //
+                    // mpv 自己的解码与音频照常走（`time-pos` 继续推进），
+                    // 但「渲染这一帧 + RGBA→NV12 转换 + 建 IOSurface buffer」
+                    // 是整条链里最贵的一段，没人看就别做。
+                    // 只把播放位置报回去：进度条与续播位置不能停。
+                    if render_paused {
+                        if tx.send(WorkerFrame::Position(t)).is_err() {
+                            break; // UI 侧已释放 channel
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                        continue;
+                    }
                     match player.render_frame() {
                         Ok(rgba) => {
                             if frames_sent == 0 {
@@ -164,7 +200,7 @@ impl FrameWorker {
                             let nv12 = rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
                             let buf = nv12_to_pixel_buffer(&nv12);
                             // 队列里积压的旧帧直接丢弃：UI 只要最新的
-                            if tx.send(SendBuffer(buf, t)).is_err() {
+                            if tx.send(WorkerFrame::Frame(buf, t)).is_err() {
                                 break; // UI 侧已释放 channel
                             }
                         }
@@ -177,7 +213,10 @@ impl FrameWorker {
                             }
                         }
                     }
-                    std::thread::sleep(Duration::from_millis(16));
+                    // 补齐到目标帧间隔；本帧已经超时就不睡，直接进下一帧。
+                    if let Some(rest) = frame_budget.checked_sub(frame_start.elapsed()) {
+                        std::thread::sleep(rest);
+                    }
                 }
             })
             .ok()?;
@@ -201,19 +240,26 @@ impl FrameWorker {
         let _ = self.commands.send(WorkerCommand::Seek(position_secs));
     }
 
+    /// 窗口不可见（最小化 / 被完全遮挡）时暂停出帧；audio 不受影响。
+    ///
+    /// 恢复可见后下一轮循环就会重新出帧，UI 侧不需要额外唤醒。
+    pub fn set_render_paused(&self, paused: bool) {
+        let _ = self.commands.send(WorkerCommand::RenderPaused(paused));
+    }
+
     /// 播放是否已到结尾（UI 侧据此自动关闭播放器）。
     pub fn finished(&self) -> bool {
         self.eof.load(Ordering::Relaxed)
     }
 
-    /// 取最新一帧（丢弃中间积压的）。没新帧时返回 `None`。
+    /// 取最新一次投递（丢弃中间积压的）。没有新内容时返回 `None`。
     ///
     /// 无阻塞：UI 线程每帧调用一次，不应该等渲染线程。
-    pub fn latest(&self) -> Option<(CFRetained<CVPixelBuffer>, f64)> {
+    pub fn latest(&self) -> Option<WorkerFrame> {
         let mut latest = None;
         loop {
             match self.rx.try_recv() {
-                Ok(b) => latest = Some((b.0, b.1)),
+                Ok(frame) => latest = Some(frame),
                 Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }

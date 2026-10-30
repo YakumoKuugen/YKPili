@@ -262,6 +262,48 @@ impl CommentRows {
     }
 }
 
+/// 窗口可见性状态机：失焦 ≠ 不可见。
+///
+/// - **失焦**（点了别的应用）：窗口还在屏幕上，视频必须照常按标准帧率播。
+///   GPUI 默认会把失焦窗口的帧率压到 30fps，这里在 `main.rs` 用
+///   `inactive_frame_interval: None` 关掉。
+/// - **不可见**（最小化 / 被完全遮挡）：画面没人看，视频线程只报播放位置、
+///   不出帧；页面侧的动画与补帧也一并停掉。
+///
+/// 抽成独立结构是为了两边（AppRoot / PlayerView）用同一套判定，
+/// 并且能脱离 GPUI 单测。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisibilityGate {
+    visible: bool,
+}
+
+impl Default for VisibilityGate {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+impl VisibilityGate {
+    /// 记录新的可见性；返回「是否发生了变化」。
+    pub fn set(&mut self, visible: bool) -> bool {
+        if self.visible == visible {
+            return false;
+        }
+        self.visible = visible;
+        true
+    }
+
+    /// 当前是否可见。
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    /// 视频线程是否该停帧（不可见时停）。
+    pub fn render_paused(&self) -> bool {
+        !self.visible
+    }
+}
+
 /// 弹幕数据的加载状态。
 enum DanmakuState {
     /// 还没拿到 cid（取流中 / 失败）。
@@ -496,6 +538,12 @@ pub struct PlayerView {
     activation_observed: bool,
     /// 观察者订阅句柄；随视图析构一起释放。
     activation_observer: Option<gpui::Subscription>,
+    /// 窗口可见性观察者是否已注册（首帧注册一次）。
+    visibility_observed: bool,
+    /// 窗口可见性订阅句柄。
+    visibility_observer: Option<gpui::Subscription>,
+    /// 窗口可见性状态机（失焦与不可见要分开，见 [`VisibilityGate`]）。
+    visibility: VisibilityGate,
 }
 
 /// 进程内 `PlayerView` 实例数。
@@ -633,6 +681,9 @@ impl PlayerView {
             controls_timer_running: false,
             activation_observed: false,
             activation_observer: None,
+            visibility_observed: false,
+            visibility_observer: None,
+            visibility: VisibilityGate::default(),
             state: {
                 let mut st = PlayerState::new();
                 st.duration_secs = 754.0;
@@ -1471,6 +1522,28 @@ impl PlayerView {
         let link = video_page_url(&source.bvid);
         cx.write_to_clipboard(ClipboardItem::new_string(link));
         self.show_interaction_note("链接已复制".into(), false, cx);
+    }
+
+    /// 窗口可见性变化：不可见时让视频线程停帧，可见时恢复。
+    ///
+    /// **只管「看不见」，不管「失焦」**：失焦（点了别的应用）时窗口还在屏幕上，
+    /// 视频必须照常按显示器的标准帧率播 —— 这正是 `inactive_frame_interval: None`
+    /// 想保住的行为。最小化 / 被完全遮挡时画面没人看，解码 + NV12 转换
+    /// 纯属烧电，这时才停。
+    ///
+    /// mpv 本身不暂停：音频继续播，进度继续走，恢复可见后接着出帧。
+    fn set_window_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if !self.visibility.set(visible) {
+            return;
+        }
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(worker) = self.worker.as_ref() {
+            worker.set_render_paused(self.visibility.render_paused());
+        }
+        // 不可见时不必再排下一帧；可见时补一帧把画面拉回来。
+        if visible {
+            cx.notify();
+        }
     }
 
     /// 拉当前分 P 的真实弹幕（`/x/v1/dm/list.so`，按 cid 区分）。
@@ -2946,6 +3019,9 @@ impl Render for PlayerView {
                 // 取流期间用户可能已经按过暂停：新 worker 启动后补发一次状态。
                 if let Some(w) = self.worker.as_ref() {
                     w.set_paused(!self.state.playing);
+                    // 窗口当前不可见（最小化 / 被完全遮挡）：新 worker 直接停帧，
+                    // 别先解码几帧再停。
+                    w.set_render_paused(self.visibility.render_paused());
                 }
                 // 渲染循环已在同一个 render 里、worker 创建之后立即启动；
                 // 这里再 notify 一次，让首帧尽快重绘，而不是等下一次用户事件。
@@ -2967,8 +3043,22 @@ impl Render for PlayerView {
                 let mut received = 0u64;
                 let mut idle_ticks = 0u32;
                 loop {
+                    // 轮询间隔：窗口可见时 16ms（≈60fps）；不可见时 100ms。
+                    //
+                    // 窗口不可见时视频线程本来就只报位置（100ms 一条），
+                    // UI 线程再按 16ms 醒就是纯空转 —— 每秒 60 次定时器唤醒，
+                    // 在电池供电的笔记本上是实打实的耗电。
+                    let tick = this
+                        .update(cx, |view, _| {
+                            if view.visibility.is_visible() {
+                                16
+                            } else {
+                                100
+                            }
+                        })
+                        .unwrap_or(16);
                     cx.background_executor()
-                        .timer(std::time::Duration::from_millis(16))
+                        .timer(std::time::Duration::from_millis(tick))
                         .await;
                     // UI 线程只做「取一帧 + 通知重绘」，不碰任何解码/转换。
                     // 这就是输入与播放互不耦合的关键：即使正在打字，
@@ -2980,23 +3070,37 @@ impl Render for PlayerView {
                             // 结束信号独立于「有没有新帧」读取：
                             // 播到结尾后渲染线程可能不再产出帧。
                             finished = w.finished();
-                            if let Some((buf, t)) = w.latest() {
-                                view.current = Some(buf);
-                                // 拖动 / seek 稳定期内不要让旧帧的 time-pos 把滑块顶回去。
-                                let settling = view
-                                    .seek_settle_until
-                                    .is_some_and(|until| until > std::time::Instant::now());
-                                if !view.scrubbing && !settling {
+                            match w.latest() {
+                                Some(crate::video_worker::WorkerFrame::Frame(buf, t)) => {
+                                    view.current = Some(buf);
+                                    // 拖动 / seek 稳定期内不要让旧帧的 time-pos 把滑块顶回去。
+                                    let settling = view
+                                        .seek_settle_until
+                                        .is_some_and(|until| until > std::time::Instant::now());
+                                    if !view.scrubbing && !settling {
+                                        view.play_time = t;
+                                        view.state.position_secs = t;
+                                        // 播放中定期把进度落盘：进程被杀 / 崩溃时
+                                        // 也不至于丢掉续播位置。
+                                        if t - view.last_resume_save >= 30.0 {
+                                            view.last_resume_save = t;
+                                            view.save_resume_position();
+                                        }
+                                    }
+                                    got = true;
+                                }
+                                // 窗口不可见时视频线程只报位置：进度与续播位置照常推进，
+                                // 只是没有新画面。这里**不** notify：没人看画面，
+                                // 每次位置更新都重绘整窗只是白烧 CPU。
+                                Some(crate::video_worker::WorkerFrame::Position(t)) => {
                                     view.play_time = t;
                                     view.state.position_secs = t;
-                                    // 播放中定期把进度落盘：进程被杀 / 崩溃时
-                                    // 也不至于丢掉续播位置。
                                     if t - view.last_resume_save >= 30.0 {
                                         view.last_resume_save = t;
                                         view.save_resume_position();
                                     }
                                 }
-                                got = true;
+                                None => {}
                             }
                         }
                         // 播完自动收起：开关关掉时只停在最后一帧，等用户自己关。
@@ -3082,6 +3186,19 @@ impl Render for PlayerView {
             self.controls_visible = false;
             self.controls_timer_generation = self.controls_timer_generation.wrapping_add(1);
             self.controls_timer_running = false;
+        }
+        // 窗口可见性（最小化 / 被完全遮挡）：视频线程停帧，UI 也别再空转。
+        //
+        // 失焦**不**走这里：失焦时窗口仍然可见，视频必须照常按标准帧率播，
+        // 否则「点了别的应用之后本应用变卡」。真正看不见了才降载。
+        if !self.visibility_observed {
+            self.visibility_observed = true;
+            cx.defer_in(window, |view, window, cx| {
+                view.visibility_observer =
+                    Some(cx.observe_window_visibility(window, |view, visibility, _window, cx| {
+                        view.set_window_visible(visibility.is_visible(), cx);
+                    }));
+            });
         }
         // 入场目标宽度跟随当前窗口；封面起点仍是点击时冻结的那一份。
         if let Some(source) = self.entrance_source.as_mut() {
@@ -5788,6 +5905,24 @@ mod tests {
         video_page_url, CommentRows, COMMENT_ROW_CHROME, COMMENT_TEXT_LINE_HEIGHT,
     };
     use gpui::{point, px};
+
+    /// 可见性状态机：失焦不算不可见，不可见才停帧。
+    #[test]
+    fn visibility_gate_separates_hidden_from_unfocused() {
+        use super::VisibilityGate;
+
+        let mut gate = VisibilityGate::default();
+        assert!(gate.is_visible(), "初始可见");
+        assert!(!gate.render_paused(), "可见时不该停帧");
+
+        // 重复设置同一个状态不算变化（不该重复通知 worker）。
+        assert!(!gate.set(true));
+        assert!(gate.set(false), "可见 → 不可见应当算变化");
+        assert!(gate.render_paused(), "不可见时视频线程要停帧");
+
+        assert!(gate.set(true), "不可见 → 可见应当算变化");
+        assert!(!gate.render_paused(), "恢复可见后要继续出帧");
+    }
 
     #[test]
     fn cursor_local_matches_primary_screen() {

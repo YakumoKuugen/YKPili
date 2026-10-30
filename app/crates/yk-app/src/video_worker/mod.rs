@@ -1,7 +1,7 @@
 //! 视频渲染线程（平台分派）。
 //!
 //! 两个平台共用同一套公开接口（`FrameWorker::{spawn_with_audio, set_paused,
-//! seek, finished, latest}`），但帧的形态完全不同：
+//! set_render_paused, seek, finished, latest}`），但帧的形态完全不同：
 //!
 //! - **macOS**：mpv → RGBA → NV12 → IOSurface-backed `CVPixelBuffer`，
 //!   交给 GPUI 的 `surface()` 与控件同管线合成（零拷贝）；
@@ -15,6 +15,6 @@ mod macos;
 mod windows;
 
 #[cfg(target_os = "macos")]
-pub use macos::FrameWorker;
+pub use macos::{FrameWorker, WorkerFrame};
 #[cfg(target_os = "windows")]
-pub use windows::{FrameWorker, VideoFrame};
+pub use windows::{FrameWorker, VideoFrame, WorkerFrame};

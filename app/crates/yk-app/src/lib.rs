@@ -127,6 +127,15 @@ pub struct AppRoot {
     active_images: Rc<RefCell<ImageResidency>>,
     /// 滚动监测：滚轮不会触发 AppRoot render，需要轮询偏移量后 notify。
     scroll_watchdog_started: bool,
+    /// 窗口可见性状态机（失焦与不可见要分开，见 `player::VisibilityGate`）。
+    ///
+    /// 不可见时：页面动画、平滑滚动、滚动补帧这些「没人看」的活全部停掉，
+    /// 只保留播放器的音频与进度。
+    visibility: player::VisibilityGate,
+    /// 窗口可见性观察者是否已注册。
+    visibility_observed: bool,
+    /// 窗口可见性订阅句柄。
+    visibility_observer: Option<gpui::Subscription>,
     last_scroll_offset_y: f32,
     /// 最近一次真实滚动的时间。
     ///
@@ -1719,6 +1728,24 @@ impl AppRoot {
         }
     }
 
+    /// 窗口可见性变化。
+    ///
+    /// 不可见（最小化 / 被完全遮挡）时把平滑滚动动画停掉：它的每一步都会
+    /// `notify()` 触发整窗重绘，而没人看画面。恢复可见后重新滚一次即可。
+    ///
+    /// **不管失焦**：失焦时窗口还在屏幕上，内容必须照常刷新。
+    fn set_window_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
+        if !self.visibility.set(visible) {
+            return;
+        }
+        if !visible {
+            self.cancel_smooth_scroll();
+        } else {
+            // 恢复可见：补一帧，把停住期间的画面拉回来。
+            cx.notify();
+        }
+    }
+
     /// 8ms 一步，把 offset 以指数缓动推向目标；到点后停。
     fn start_smooth_scroll(&mut self, cx: &mut Context<Self>) {
         self.smooth_scroll_animating = true;
@@ -1745,7 +1772,10 @@ impl AppRoot {
                     return false;
                 }
                 handle.set_offset(point(px(0.), px(current + diff * 0.22)));
-                cx.notify();
+                // 窗口不可见时不重绘：offset 照样推进，恢复可见后一次性补上。
+                if view.visibility.is_visible() {
+                    cx.notify();
+                }
                 true
             });
             if !matches!(keep, Ok(true)) {
@@ -1791,6 +1821,9 @@ impl AppRoot {
             page_image_cache: None,
             active_images: Rc::new(RefCell::new(ImageResidency::default())),
             scroll_watchdog_started: false,
+            visibility: player::VisibilityGate::default(),
+            visibility_observed: false,
+            visibility_observer: None,
             last_scroll_offset_y: 0.0,
             last_scroll_at: None,
             scroll_render_pending: false,
@@ -1855,14 +1888,44 @@ impl Render for AppRoot {
             self.dynamic_detail = None;
         }
         self.prune_page_images(window, cx);
+        // 窗口可见性：最小化 / 被完全遮挡时停掉页面侧的动画与补帧。
+        // 失焦不算 —— 窗口还在屏幕上，内容该照常刷新。
+        if !self.visibility_observed {
+            self.visibility_observed = true;
+            cx.defer_in(window, |view, window, cx| {
+                view.visibility_observer =
+                    Some(cx.observe_window_visibility(window, |view, visibility, _window, cx| {
+                        view.set_window_visible(visibility.is_visible(), cx);
+                    }));
+            });
+        }
         if !self.scroll_watchdog_started {
             self.scroll_watchdog_started = true;
             cx.spawn(async move |this, cx| {
                 loop {
+                    // 窗口不可见时没必要 60ms 醒一次：那一圈本来就会立刻返回，
+                    // 只是白白唤醒 UI 线程。降到 500ms，恢复可见后再切回来。
+                    let tick = this
+                        .update(cx, |view, _| {
+                            if view.visibility.is_visible() {
+                                60
+                            } else {
+                                500
+                            }
+                        })
+                        .unwrap_or(60);
                     cx.background_executor()
-                        .timer(std::time::Duration::from_millis(60))
+                        .timer(std::time::Duration::from_millis(tick))
                         .await;
                     let alive = this.update(cx, |view, cx| {
+                        // 窗口不可见（最小化 / 被完全遮挡）：这一圈做的全是
+                        // 「给人看的」事（补帧、触底加载、回顶刷新），先跳过。
+                        // 消息页的自动加载更多保留 —— 那是数据，不是画面。
+                        if !view.visibility.is_visible()
+                            && view.page != Some(pages::PageKind::Messages)
+                        {
+                            return;
+                        }
                         // 滚动停下后补一帧：滚动期间卡片 hover 视觉被暂停，
                         // 若没有后续鼠标事件，指针下的卡片会一直停在静态态。
                         // 同时清掉收尾态，避免滚回来的卡片重新挂载时重播 1→0。

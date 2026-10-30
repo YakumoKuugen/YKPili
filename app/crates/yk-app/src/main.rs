@@ -86,6 +86,13 @@ fn main() {
                     // 而且内容区也会跟系统拖拽争同一串鼠标事件。
                     // Windows 由 `begin_window_drag` 走 WM_NCLBUTTONDOWN 拖动。
                     app_owns_titlebar_drag: true,
+                    // 失焦不降帧：GPUI 默认在窗口失去焦点时把帧率压到 30fps
+                    // （gpui-pre 的 `inactive_frame_interval` 默认 33.3ms），
+                    // 表现就是「点了别的应用之后本应用变卡」。
+                    // 这里关掉这层节流：视频播放必须按显示器的标准帧率继续，
+                    // 窗口不可见（最小化）时的省电由 `observe_window_visibility`
+                    // 单独处理（见 lib.rs 的 `visibility_observer`）。
+                    inactive_frame_interval: None,
                     ..Default::default()
                 },
                 cx,
