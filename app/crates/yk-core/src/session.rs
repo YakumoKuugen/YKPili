@@ -80,6 +80,7 @@ impl AppShell {
 /// `session.json` 的路径。
 ///
 /// macOS：`~/Library/Application Support/YKPili/session.json`
+/// Windows：`%APPDATA%\YKPili\session.json`
 /// 其它平台：系统临时目录下的 `YKPili/session.json`（够用，且不污染用户目录）
 pub fn session_path() -> PathBuf {
     // 测试/便携启动可显式指定；正常桌面端仍走 Application Support。
@@ -88,13 +89,7 @@ pub fn session_path() -> PathBuf {
             return PathBuf::from(path);
         }
     }
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join("Library/Application Support/YKPili/session.json");
-        }
-    }
-    std::env::temp_dir().join("YKPili").join("session.json")
+    crate::platform::config_file("session.json")
 }
 
 /// 写入会话。失败不致命（下次大不了重新登录）。

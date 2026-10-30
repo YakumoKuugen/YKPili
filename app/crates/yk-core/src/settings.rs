@@ -41,21 +41,15 @@ impl AppSettings {
     /// 默认存储路径。
     ///
     /// 优先 `YK_SETTINGS_PATH`（测试 / 便携模式），其次 macOS 的
-    /// Application Support，最后退回系统临时目录。
+    /// Application Support / Windows 的 `%APPDATA%\YKPili`，
+    /// 最后退回系统临时目录。
     pub fn default_path() -> PathBuf {
         if let Ok(path) = std::env::var("YK_SETTINGS_PATH") {
             if !path.trim().is_empty() {
                 return PathBuf::from(path);
             }
         }
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(home) = std::env::var("HOME") {
-                return PathBuf::from(home)
-                    .join("Library/Application Support/YKPili/settings.json");
-            }
-        }
-        std::env::temp_dir().join("YKPili").join("settings.json")
+        crate::platform::config_file("settings.json")
     }
 
     /// 从磁盘加载。文件不存在 / json 损坏 / 字段缺失都退回默认值。

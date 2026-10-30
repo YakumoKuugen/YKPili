@@ -938,6 +938,7 @@ pub const HISTORY_LIMIT: usize = 8;
 
 impl SearchHistory {
     /// 默认路径：macOS 写 `~/Library/Application Support/YKPili/search_history.json`，
+    /// Windows 写 `%APPDATA%\YKPili\search_history.json`；
     /// 测试 / 验收可用 `YK_SEARCH_HISTORY_PATH` 覆盖。
     pub fn default_path() -> PathBuf {
         if let Ok(path) = std::env::var("YK_SEARCH_HISTORY_PATH") {
@@ -945,16 +946,7 @@ impl SearchHistory {
                 return PathBuf::from(path);
             }
         }
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(home) = std::env::var("HOME") {
-                return PathBuf::from(home)
-                    .join("Library/Application Support/YKPili/search_history.json");
-            }
-        }
-        std::env::temp_dir()
-            .join("YKPili")
-            .join("search_history.json")
+        crate::platform::config_file("search_history.json")
     }
 
     pub fn load_default() -> Self {

@@ -21,9 +21,10 @@ use std::ffi::{c_char, c_int, c_void, CString};
 use std::path::PathBuf;
 use std::ptr;
 
-use libloading::{Library, Symbol};
+use libloading::Library;
 
 /// libmpv 的常见位置（Homebrew 优先）。
+#[cfg(target_os = "macos")]
 const CANDIDATES: [&str; 4] = [
     "/opt/homebrew/lib/libmpv.2.dylib",
     "/usr/local/lib/libmpv.2.dylib",
@@ -31,20 +32,36 @@ const CANDIDATES: [&str; 4] = [
     "libmpv.2.dylib",
 ];
 
-/// 加载顺序：环境变量 > .app 内置 > Homebrew 安装位置。
+/// Windows：优先包内 `libmpv-2.dll`，其次常见安装位置。
+#[cfg(target_os = "windows")]
+const CANDIDATES: [&str; 3] = [
+    "libmpv-2.dll",
+    "C:\\Program Files\\mpv\\libmpv-2.dll",
+    "C:\\Program Files (x86)\\mpv\\libmpv-2.dll",
+];
+
+/// 加载顺序：环境变量 > 包内目录 > 系统安装位置。
 ///
 /// 打包后的 .app 会把 libmpv 及其依赖放进 `Contents/Frameworks`，
-/// 这里按可执行文件位置反推 —— 否则会优先命中开发机上的 Homebrew 副本，
-/// 在别人机器上直接播不了视频。
+/// Windows 包则把 `libmpv-2.dll` 放在 exe 同目录；这里按可执行文件位置反推 ——
+/// 否则会优先命中开发机上的副本，在别人机器上直接播不了视频。
 fn candidate_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(explicit) = std::env::var_os("YK_LIBMPV") {
         out.push(PathBuf::from(explicit));
     }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(macos_dir) = exe.parent() {
+        if let Some(dir) = exe.parent() {
+            #[cfg(target_os = "macos")]
             for name in ["libmpv.2.dylib", "libmpv.dylib"] {
-                let path = macos_dir.join("../Frameworks").join(name);
+                let path = dir.join("../Frameworks").join(name);
+                if path.exists() {
+                    out.push(path);
+                }
+            }
+            #[cfg(target_os = "windows")]
+            for name in ["libmpv-2.dll", "mpv\\libmpv-2.dll"] {
+                let path = dir.join(name);
                 if path.exists() {
                     out.push(path);
                 }
@@ -193,13 +210,31 @@ impl MpvPlayer {
             }
 
             // 离屏：不要窗口、不要音频设备（音频后续由 AVSampleBufferAudioRenderer 承担）
+            // AO 按平台选：macOS 用 avfoundation（coreaudio 在本机会初始化失败），
+            // Windows 用 wasapi。两边都可以用 YK_AO 覆盖。
+            let default_ao = if cfg!(target_os = "windows") {
+                "wasapi"
+            } else {
+                "avfoundation"
+            };
+            // Windows 的 SW 渲染路径必须用 copy-back 硬解；auto 可能选到无法
+            // 回读的 d3d11va，表现是渲染上下文报错 / 黑屏。macOS 保持 auto。
+            let hwdec = if cfg!(target_os = "windows") {
+                "auto-copy-safe"
+            } else {
+                "auto"
+            };
+            let default_ua = if cfg!(target_os = "windows") {
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            } else {
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            };
             for (k, v) in [
                 ("vo", "libmpv"), // 用 render API 必须 libmpv，不能 null
                 // 音频交给 mpv 自己播。
                 //
-                // AO 选 avfoundation 而不是 coreaudio：本机实测 coreaudio
-                // 初始化失败（`unable to set the input channel layout`,
-                // OSStatus -50），avfoundation 正常。可用 YK_AO 覆盖。
                 // libmpv **没有**音频回调 API —— render API 只管视频，
                 // 所以不能像 AVFoundation 那样把音频包喂给自定义渲染器。
                 // 让 mpv 播音频的好处：音画同步由它的 playloop 保证，
@@ -207,22 +242,18 @@ impl MpvPlayer {
                 (
                     "ao",
                     std::env::var("YK_AO")
-                        .unwrap_or_else(|_| "avfoundation".into())
+                        .unwrap_or_else(|_| default_ao.into())
                         .leak(),
                 ),
                 // 把 mpv 自己的日志打到 stderr，便于确认 AO 是否初始化成功
                 ("terminal", "yes"),
                 ("msg-level", "ao=info,vo=info,cplayer=warn"),
                 ("vid", "1"),
-                ("hwdec", "auto"),
+                ("hwdec", hwdec),
                 ("keep-open", "yes"),
                 // B 站 CDN 对 Referer/UA 有要求；直接交给 mpv 的 HTTP 层，
                 // 避免 m4s 请求 403。
-                (
-                    "user-agent",
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
-                     (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-                ),
+                ("user-agent", default_ua),
                 ("http-header-fields", "Referer: https://www.bilibili.com/"),
             ] {
                 let ck = CString::new(k).unwrap();
@@ -489,10 +520,23 @@ impl MpvPlayer {
     }
 
     pub fn render_frame(&mut self) -> Result<RgbaFrame, MpvError> {
+        self.render_with_format("rgb0")
+    }
+
+    /// 同 [`MpvPlayer::render_frame`]，但直接要 **BGRA**。
+    ///
+    /// GPUI 的 `RenderImage` / 贴图图集吃的是 BGRA 字节序（Windows 后端是
+    /// `DXGI_FORMAT_B8G8R8A8_UNORM`），所以 Windows 视频链路用这个入口，
+    /// 省掉 UI 线程里每帧一次 92 万像素的通道交换。
+    pub fn render_frame_bgra(&mut self) -> Result<RgbaFrame, MpvError> {
+        self.render_with_format("bgra")
+    }
+
+    fn render_with_format(&mut self, format: &str) -> Result<RgbaFrame, MpvError> {
         // MPV_RENDER_PARAM_SW_SIZE 要的是 `int[2]`，不是两个独立 int ——
         // 传单个 int 时 mpv 会把相邻栈内存当作高度，直接触发 mp_image_set_size 断言。
         let mut size = [self.width as c_int, self.height as c_int];
-        let c_format = CString::new("rgb0").unwrap();
+        let c_format = CString::new(format).unwrap();
         let mut stride = self.stride;
 
         let mut params = [

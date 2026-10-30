@@ -765,6 +765,145 @@ fn card(
         }))
 }
 
+/// 可复用的「临时卡片」。
+///
+/// 动态详情展开动画里，它作为「上一界面」的快照放在最上层：
+/// 前 30% 与真实详情页同步缩放，自身 100% → 0 淡出，详情页 0 → 100 淡入；
+/// 动画结束后调用方直接不挂它即可。
+///
+/// 结构与 feed 的卡片一致（材质 / 内边距 / 头部 / 正文 / 媒体 / 底栏），
+/// 但不带 hover、点击和任何事件，避免在动画里抢交互。
+pub(crate) fn card_ghost(
+    t: &YkTheme,
+    item: &DynamicItem,
+    width: f32,
+    height: f32,
+    scale_factor: f32,
+) -> AnyElement {
+    let s = &t.surfaces;
+    let inner = (width - CARD_PADDING * 2.0).max(1.0);
+    let active = Rc::new(RefCell::new(ImageResidency::default()));
+
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .child(header(t, item, scale_factor, true, active.clone()));
+
+    let title = card_text(&item.title);
+    if !title.is_empty() {
+        body = body.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(FONT_SIZE_BODY))
+                .line_height(px(TITLE_LINE_HEIGHT))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(s.text_primary)
+                .line_clamp(2)
+                .child(title),
+        );
+    }
+
+    let text = card_text(&item.text);
+    if !text.is_empty() {
+        body = body.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(FONT_SIZE_CONTROL))
+                .line_height(px(BODY_LINE_HEIGHT))
+                .text_color(s.text_secondary)
+                .line_clamp(4)
+                .child(text),
+        );
+    }
+
+    match item.kind {
+        DynamicKind::Video => {
+            if let Some(video) = item.video.as_ref() {
+                body = body.child(video_block(
+                    t,
+                    video,
+                    inner,
+                    scale_factor,
+                    true,
+                    active.clone(),
+                    Rc::new(Cell::new(None)),
+                    Rc::new(Cell::new(None)),
+                ));
+            }
+        }
+        DynamicKind::Images => {
+            if !item.images.is_empty() {
+                body = body.child(image_grid(
+                    t,
+                    &item.images,
+                    inner,
+                    scale_factor,
+                    true,
+                    active.clone(),
+                ));
+            }
+        }
+        DynamicKind::Forward => {
+            if let Some(origin) = item.origin.as_ref() {
+                body = body.child(quote_block(t, origin));
+            }
+        }
+        DynamicKind::Link => {
+            if let Some(link) = item.link.as_ref() {
+                body = body.child(link_block(
+                    t,
+                    link,
+                    inner,
+                    scale_factor,
+                    true,
+                    active.clone(),
+                ));
+            }
+        }
+        DynamicKind::Text => {}
+    }
+
+    let stat = |icon: IconName, count: u64| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .child(Icon::new(icon).size(px(13.)).text_color(s.text_tertiary))
+            .child(format::count(count))
+    };
+    body = body.child(
+        div()
+            .mt_auto()
+            .pt(px(10.))
+            .border_t_1()
+            .border_color(s.border_subtle)
+            .flex()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .text_size(px(FONT_SIZE_CAPTION))
+            .text_color(s.text_tertiary)
+            .child(stat(IconName::Share2, item.stats.forward))
+            .child(stat(IconName::MessageCircle, item.stats.comment))
+            .child(stat(IconName::ThumbsUp, item.stats.like)),
+    );
+
+    div()
+        .w(px(width))
+        .h(px(height))
+        .flex()
+        .flex_col()
+        .p(px(CARD_PADDING))
+        .rounded(px(RADIUS_XL))
+        .overflow_hidden()
+        .bg(s.surface_content)
+        .border_1()
+        .border_color(s.border_subtle)
+        .child(body)
+        .into_any_element()
+}
+
 fn header(
     t: &YkTheme,
     item: &DynamicItem,

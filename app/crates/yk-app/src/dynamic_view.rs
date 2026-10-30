@@ -2,12 +2,14 @@
 //!
 //! 交互与首页封面卡的播放器一致：
 //! - 从被点击的卡片矩形**连续展开**到浮层目标框（280ms，同一缓动）；
-//! - 点浮层外部（遮罩）/ 右上角 × / Esc 关闭，260ms 缩回原卡片位置；
-//! - 展开期间只画海报，到终点才挂完整内容，避免控件被塞进小盒子重排。
+//! - 前 30% 用临时卡片与详情页交叉淡化，后 70% 详情页缩放到正常大小；
+//! - 点浮层外部（遮罩）/ 右上角 × / Esc 关闭，260ms 缩回原卡片位置。
 
 use gpui::assets::IconName;
+use gpui::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui::component::Icon;
 use gpui::prelude::*;
+use gpui::TestSupportExt as _;
 use gpui::*;
 use std::time::Duration;
 use yk_core::api::client::{fetch_dynamic_comments, ReqwestClient};
@@ -17,6 +19,7 @@ use yk_core::dynamic::{
 use yk_core::format;
 use yk_ui::theme::*;
 
+use crate::dynamic_feed::card_ghost;
 use crate::placeholder_gradient;
 
 /// 与播放器保持同一节奏。
@@ -56,6 +59,11 @@ pub struct DynamicDetailView {
     close_handler: Option<Box<dyn Fn(&mut App, bool)>>,
     focus_handle: FocusHandle,
     needs_focus: bool,
+    /// 图片复制请求进行中（按钮显示「复制中」）。
+    copying_image: bool,
+    /// 底部轻提示（复制成功 / 失败），`notice_generation` 防止旧定时器误清。
+    notice: Option<String>,
+    notice_generation: u64,
 }
 
 static ENTRANCE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -85,6 +93,9 @@ impl DynamicDetailView {
             close_handler: None,
             focus_handle: cx.focus_handle().tab_stop(true),
             needs_focus: true,
+            copying_image: false,
+            notice: None,
+            notice_generation: 0,
         };
         view.spawn_comments(cx);
         view
@@ -134,6 +145,56 @@ impl DynamicDetailView {
             return;
         }
         self.spawn_comments(cx);
+    }
+
+    /// 底部轻提示：1.8s 后自动消失，重复触发会重置计时。
+    fn show_notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        self.notice = Some(text.into());
+        self.notice_generation = self.notice_generation.wrapping_add(1);
+        let generation = self.notice_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1800))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.notice_generation == generation {
+                    view.notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 复制当前左侧大图：先读原始字节（磁盘缓存优先），再写成图片剪贴板。
+    fn copy_image(&mut self, url: String, cx: &mut Context<Self>) {
+        if self.copying_image || url.trim().is_empty() {
+            return;
+        }
+        self.copying_image = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::http::read_image_bytes(&url) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.copying_image = false;
+                match result {
+                    Ok((bytes, format)) => {
+                        cx.write_to_clipboard(crate::http::clipboard_image(bytes, format));
+                        view.show_notice("图片已复制", cx);
+                    }
+                    Err(error) => {
+                        eprintln!("[dynamic] 复制图片失败：{error}");
+                        view.show_notice("图片复制失败", cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn begin_close(&mut self, cx: &mut Context<Self>) {
@@ -305,7 +366,7 @@ impl DynamicDetailView {
                 .child(div().flex_1().h_full().min_w(px(0.)).child(right))
                 .into_any_element()
         } else {
-            let left = self.text_column(t, false);
+            let left = self.text_column(t, cx);
             let right = self.comments_column(t, true, cx);
             div()
                 .flex()
@@ -319,14 +380,17 @@ impl DynamicDetailView {
                 .into_any_element()
         };
 
-        div()
+        let mut root = div()
             .flex()
             .flex_col()
             .h_full()
             .w_full()
             .child(header)
-            .child(body)
-            .into_any_element()
+            .child(body);
+        if let Some(text) = self.notice.clone() {
+            root = root.child(notice_chip(t, &text));
+        }
+        root.into_any_element()
     }
 
     fn media_column(
@@ -470,13 +534,69 @@ impl DynamicDetailView {
             column = column.child(strip);
         }
 
+        // 右下角「复制图片」：半透明材质浮在大图上，多图时抬到缩略图条上方。
+        let copy_url = if len > 0 {
+            images[current].fit_url(media_w, scale_factor)
+        } else {
+            cover_url.to_string()
+        };
+        if !copy_url.is_empty() {
+            column = column.child(self.image_copy_button(t, copy_url, len > 1, cx));
+        }
+
         column.into_any_element()
+    }
+
+    /// 图片右下角的半透明复制按钮。
+    fn image_copy_button(
+        &self,
+        t: &YkTheme,
+        url: String,
+        above_gallery: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let copying = self.copying_image;
+        let bottom = if above_gallery {
+            SPACE_4 + 34.0 + SPACE_2
+        } else {
+            SPACE_4
+        };
+        div()
+            .id("dynamic-image-copy")
+            .debug_selector(|| "dynamic-image-copy".into())
+            .absolute()
+            .right(px(SPACE_4))
+            .bottom(px(bottom))
+            .h(px(32.))
+            .px(px(SPACE_3))
+            .flex()
+            .items_center()
+            .gap(px(SPACE_1 + 2.0))
+            .rounded_full()
+            .bg(rgba(0x00000099))
+            .border_1()
+            .border_color(rgba(0xFFFFFF33))
+            .shadow(t.shadows.shadow_2.clone())
+            .text_size(px(FONT_SIZE_CAPTION))
+            .text_color(rgb(0xFFFFFF))
+            .cursor_pointer()
+            .hover(|style| style.bg(rgba(0x000000CC)))
+            .when(copying, |el| el.opacity(0.65))
+            .child(Icon::new(IconName::Copy).size(px(14.)))
+            .child(if copying { "复制中…" } else { "复制" })
+            .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                cx.stop_propagation();
+                view.copy_image(url.clone(), cx);
+            }))
+            .test_support()
+            .into_any_element()
     }
 
     /// 媒体右侧：正文 + 操作 + 评论。
     fn article_column(&mut self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
         let s = &t.surfaces;
-        let body = self.article_body(t);
+        let weak = cx.entity().downgrade();
+        let body = self.article_body(t, &weak);
         div()
             .id("dynamic-detail-article")
             .flex()
@@ -494,27 +614,40 @@ impl DynamicDetailView {
             .into_any_element()
     }
 
-    fn article_body(&self, t: &YkTheme) -> AnyElement {
+    /// 标题 + 正文 + 转发引用。
+    ///
+    /// 每段文字都挂同一个右键菜单（只有「复制文本」一项），复制内容跟随
+    /// 被点击的那一段；评论正文在 `comment_row` 里单独挂。
+    fn article_body(&self, t: &YkTheme, weak: &WeakEntity<Self>) -> AnyElement {
         let s = &t.surfaces;
         let item = &self.item;
         let mut col = div().flex().flex_col().gap(px(SPACE_3)).w_full();
         if !item.title.trim().is_empty() {
+            let title = item.title.clone();
             col = col.child(
                 div()
+                    .id("dynamic-detail-title")
+                    .debug_selector(|| "dynamic-detail-title".into())
                     .text_size(px(FONT_SIZE_HEADING))
                     .line_height(px(LINE_HEIGHT_HEADING))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(s.text_primary)
-                    .child(item.title.clone()),
+                    .child(title.clone())
+                    .context_menu(copy_text_menu(title, weak.clone())),
             );
         }
         if !item.text.trim().is_empty() {
+            let text = item.text.clone();
             col = col.child(
-                div()
-                    .text_size(px(FONT_SIZE_BODY))
-                    .line_height(px(LINE_HEIGHT_BODY))
-                    .text_color(s.text_secondary)
-                    .child(item.text.clone()),
+                div().id("dynamic-detail-body").test_support().child(
+                    div()
+                        .id("dynamic-detail-body-text")
+                        .text_size(px(FONT_SIZE_BODY))
+                        .line_height(px(LINE_HEIGHT_BODY))
+                        .text_color(s.text_secondary)
+                        .child(text.clone())
+                        .context_menu(copy_text_menu(text, weak.clone())),
+                ),
             );
         }
 
@@ -547,10 +680,12 @@ impl DynamicDetailView {
                     )
                     .child(
                         div()
+                            .id("dynamic-origin-text")
                             .text_size(px(FONT_SIZE_CONTROL))
                             .line_height(px(LINE_HEIGHT_CONTROL))
                             .text_color(s.text_secondary)
-                            .child(quote_text),
+                            .child(quote_text.clone())
+                            .context_menu(copy_text_menu(quote_text, weak.clone())),
                     ),
             );
         }
@@ -600,8 +735,9 @@ impl DynamicDetailView {
     }
 
     /// 纯文字模式的左栏：标题 + 正文，可滚动。
-    fn text_column(&mut self, t: &YkTheme, _with_header: bool) -> AnyElement {
+    fn text_column(&mut self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
         let s = &t.surfaces;
+        let weak = cx.entity().downgrade();
         div()
             .id("dynamic-detail-text")
             .flex()
@@ -617,7 +753,7 @@ impl DynamicDetailView {
                     .w_full()
                     .px(px(SPACE_6))
                     .py(px(SPACE_5))
-                    .child(self.article_body(t)),
+                    .child(self.article_body(t, &weak)),
             )
             .child(self.action_row(t))
             .child(div().mx(px(SPACE_6)).h(px(1.)).bg(s.border_subtle))
@@ -636,6 +772,7 @@ impl DynamicDetailView {
     ) -> AnyElement {
         let s = &t.surfaces;
         let count = self.item.stats.comment;
+        let weak = cx.entity().downgrade();
         let mut list = div().flex().flex_col().w_full();
         match &self.comments {
             CommentState::None => {}
@@ -721,7 +858,7 @@ impl DynamicDetailView {
                     );
                 } else {
                     for comment in comments {
-                        list = list.child(comment_row(t, comment));
+                        list = list.child(comment_row(t, comment, &weak));
                     }
                 }
             }
@@ -861,14 +998,24 @@ impl RenderOnce for DetailShell {
             focus_handle,
         } = self;
         let raw = progress.clamp(0.0, 1.0);
-        let eased = ease_entrance()(raw);
         let scale_factor = window.scale_factor();
-        let media_w = target.size.width.as_f32() * 0.56;
-        let p = if closing { 1.0 - eased } else { eased };
+        // 打开 / 关闭共用一套「30% 交叉淡化 + 70% 缩放」：
+        // - 打开：临时卡片(原卡尺寸) 1→0，详情页 0→1，同时外壳放大；
+        // - 关闭：临时卡片(详情尺寸) 0→1，详情页 1→0，同时外壳缩小。
+        let (pos, swap) = if closing {
+            let pos = detail_entrance_position(1.0 - raw).0;
+            (pos, detail_swap(raw))
+        } else {
+            detail_entrance_position(raw)
+        };
+        let p = pos.clamp(0.0, 1.0);
         let bounds = lerp_bounds(start, target, p);
+        let content_opacity = if closing { 1.0 - swap } else { swap };
+        let ghost_opacity = if closing { swap } else { 1.0 - swap };
+        let scrim_t = if closing { 1.0 - raw } else { raw };
 
         let mut scrim_color = theme.surfaces.overlay_scrim;
-        scrim_color.a = (scrim_color.a * 0.82 * p).clamp(0.0, 0.82);
+        scrim_color.a = (scrim_color.a * 0.82 * scrim_t).clamp(0.0, 0.82);
         let scrim = div()
             .id("dynamic-detail-scrim")
             .absolute()
@@ -878,6 +1025,9 @@ impl RenderOnce for DetailShell {
             .on_click({
                 let weak = weak.clone();
                 move |_: &ClickEvent, _window, cx| {
+                    // 关闭这一拍不要再传给下层 feed 卡片，否则浮层刚开始
+                    // 缩回就又打开了下一张动态。
+                    cx.stop_propagation();
                     let _ = weak.update(cx, |view, cx| view.begin_close(cx));
                 }
             });
@@ -901,11 +1051,39 @@ impl RenderOnce for DetailShell {
             .on_key_down(detail_escape_handler(weak.clone()))
             .on_click(|_: &ClickEvent, _window, cx| cx.stop_propagation());
 
-        if p >= 1.0 {
-            shell = shell.child(content.expect("详情展开结束时必须挂上完整内容"));
-        } else {
-            shell = shell.child(detail_poster(&theme, &item, media_w, scale_factor));
+        // 详情页按最终尺寸排版，由正在缩放的外壳裁剪；临时卡片填满外壳，
+        // 因此关闭时它从「详情页同尺寸」开始，随外壳一起缩回原卡片位置。
+        let content = content.expect("详情浮层必须有完整内容");
+        let mut layer = shell.child(
+            div()
+                .absolute()
+                .left_0()
+                .top_0()
+                .w(px(target.size.width.as_f32()))
+                .h(px(target.size.height.as_f32()))
+                .opacity(content_opacity)
+                .child(content),
+        );
+
+        if ghost_opacity > 0.0 {
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .opacity(ghost_opacity)
+                    // 临时卡片与 feed 卡片同材质、同结构，可被其它
+                    // 展开 / 收起动画复用；透明度归零时直接不挂。
+                    .child(card_ghost(
+                        &theme,
+                        &item,
+                        bounds.size.width.as_f32().max(1.0),
+                        bounds.size.height.as_f32().max(1.0),
+                        scale_factor,
+                    )),
+            );
         }
+
+        shell = layer;
 
         // 关闭按钮固定在浮层右上角，不随内容滚动。
         shell = shell.child(
@@ -974,6 +1152,27 @@ fn fallback_origin(target: Bounds<Pixels>) -> Bounds<Pixels> {
     }
 }
 
+/// 详情浮层的空间进度与「临时卡片 / 详情页」互换进度。
+///
+/// 前 30%：临时卡片与详情页透明度互换；后 70%：外壳缩放到目标 / 原卡片。
+/// 空间进度走完整段缓动，不在前 30% 抢跑，否则详情页会在几帧内
+/// 就铺满屏幕，看起来反而是「突然出现」。
+fn detail_entrance_position(raw: f32) -> (f32, f32) {
+    let pos = ease_entrance()(raw.clamp(0.0, 1.0));
+    (pos, detail_swap(raw))
+}
+
+/// 前 30% 的透明度互换进度（平滑 0 → 1）。
+fn detail_swap(raw: f32) -> f32 {
+    const PHASE: f32 = 0.30;
+    if raw < PHASE {
+        let k = (raw / PHASE).clamp(0.0, 1.0);
+        k * k * (3.0 - 2.0 * k)
+    } else {
+        1.0
+    }
+}
+
 fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
     let mix = |a: Pixels, b: Pixels| px(a.as_f32() + (b.as_f32() - a.as_f32()) * t);
     Bounds {
@@ -988,6 +1187,7 @@ fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
 /// 展开/收起期间的过渡海报：封面 + 作者 + 两行摘要。
 ///
 /// 只用来避免完整布局被塞进卡片大小；到终点就换成真正的内容。
+#[allow(dead_code)] // 无卡片来源时的降级海报，保留给后续入口
 fn detail_poster(
     theme: &YkTheme,
     item: &DynamicItem,
@@ -1157,9 +1357,14 @@ fn detail_action(t: &YkTheme, icon: IconName, label: &'static str, count: u64) -
         )
 }
 
-fn comment_row(t: &YkTheme, comment: &DynamicComment) -> impl IntoElement {
+fn comment_row(
+    t: &YkTheme,
+    comment: &DynamicComment,
+    view: &WeakEntity<DynamicDetailView>,
+) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
+    let text = comment.text.clone();
     div()
         .flex()
         .items_start()
@@ -1204,10 +1409,14 @@ fn comment_row(t: &YkTheme, comment: &DynamicComment) -> impl IntoElement {
                 )
                 .child(
                     div()
+                        .id(ElementId::Name(
+                            format!("dynamic-comment-text-{}", comment.rpid).into(),
+                        ))
                         .text_size(px(FONT_SIZE_CONTROL))
                         .line_height(px(LINE_HEIGHT_CONTROL))
                         .text_color(s.text_secondary)
-                        .child(comment.text.clone()),
+                        .child(text.clone())
+                        .context_menu(copy_text_menu(text, view.clone())),
                 )
                 .child(
                     div()
@@ -1226,4 +1435,57 @@ fn comment_row(t: &YkTheme, comment: &DynamicComment) -> impl IntoElement {
                 .child(Icon::new(IconName::ThumbsUp).size(px(12.)))
                 .child(format::count(comment.like)),
         )
+}
+
+/// 正文 / 评论共用的右键菜单：只放「复制文本」一项。
+///
+/// 菜单项用闭包直接写剪贴板，不依赖全局 action；同时把结果回传给详情页，
+/// 让底部轻提示显示「已复制」。
+fn copy_text_menu(
+    text: String,
+    view: WeakEntity<DynamicDetailView>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    move |menu, _, _| {
+        let view = view.clone();
+        let text = text.clone();
+        menu.item(
+            PopupMenuItem::new("复制文本")
+                .icon(Icon::new(IconName::Copy))
+                .on_click(move |_, _, cx| {
+                    if text.trim().is_empty() {
+                        return;
+                    }
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                    let _ = view.update(cx, |view, cx| view.show_notice("已复制", cx));
+                }),
+        )
+    }
+}
+
+/// 详情页底部的轻提示（复制成功 / 失败）。
+fn notice_chip(t: &YkTheme, text: &str) -> AnyElement {
+    let s = &t.surfaces;
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(SPACE_4))
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .h(px(32.))
+                .px(px(SPACE_4))
+                .flex()
+                .items_center()
+                .rounded_full()
+                .bg(s.surface_elevated_strong)
+                .border_1()
+                .border_color(s.border_popover)
+                .shadow(t.shadows.shadow_2.clone())
+                .text_size(px(FONT_SIZE_CAPTION))
+                .text_color(s.text_secondary)
+                .child(text.to_string()),
+        )
+        .into_any_element()
 }

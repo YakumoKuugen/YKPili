@@ -6,6 +6,13 @@
 //!    `base::Root` —— 视图直接挂到 `cx.open_window` 上会缺少 Root 提供的
 //!    事件与图层管理。
 
+// release 下不要给 Windows 用户弹一个黑色控制台窗口；debug 构建保留，
+// 方便看 `[player]` / `[mpv]` 日志。
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 use gpui::*;
 use yk_app::AppRoot;
 
@@ -63,21 +70,29 @@ fn main() {
                     })),
                     titlebar: Some(TitlebarOptions {
                         title: Some("YKPili".into()),
-                        // 原生标题栏透明 + FullSizeContentView：去掉白色标题条，
-                        // 红黄绿按钮直接压在应用顶栏上；顶栏左侧为按钮让出空间。
-                        // y = 26 让 12px 按钮的中心落在 64 高顶栏的 32 中线，
-                        // 与左右两组 46 高胶囊垂直对齐（参考稿即居中对齐）。
+                        // macOS：原生标题栏透明 + FullSizeContentView，红黄绿按钮
+                        // 直接压在应用顶栏上；y = 26 让按钮中心落在 64 高顶栏中线。
+                        // Windows：同样隐藏系统标题栏，由应用顶栏自绘
+                        // 最小化 / 最大化 / 关闭，并把整条顶栏作为拖动区。
                         appears_transparent: true,
-                        traffic_light_position: Some(point(px(20.), px(26.))),
+                        traffic_light_position: if cfg!(target_os = "macos") {
+                            Some(point(px(20.), px(26.)))
+                        } else {
+                            None
+                        },
                     }),
                     // 顶栏自己接管拖动（见 lib.rs `top_bar`）：不交出这一项，
                     // AppKit 只让原生 titlebar 那条窄带可拖，顶栏下半部分按不住，
                     // 而且内容区也会跟系统拖拽争同一串鼠标事件。
+                    // Windows 由 `begin_window_drag` 走 WM_NCLBUTTONDOWN 拖动。
                     app_owns_titlebar_drag: true,
                     ..Default::default()
                 },
                 cx,
                 |window, cx| {
+                    // Windows：隐藏系统标题栏后保留深色边框。
+                    #[cfg(target_os = "windows")]
+                    apply_dark_titlebar(window);
                     // M4：主题覆盖必须发生在**窗口创建之后**。
                     // `init` 只装了组件库默认主题；窗口创建时会再走一次
                     // Theme::change，把默认色值装回来 —— 在 init 之后、
@@ -179,4 +194,50 @@ fn main() {
 #[cfg(target_os = "ios")]
 fn main() {
     eprintln!("[ios] YKPili 由原生宿主启动（M8 待接入 UIWindow）");
+}
+
+/// 把 Windows 原生标题栏切成深色。
+///
+/// 应用内容是深色主题，系统默认的浅色标题栏会显得割裂。
+/// `DWMWA_USE_IMMERSIVE_DARK_MODE` 在 Win10 2004+ 是 20，旧版本是 19，
+/// 两个都试一次，失败也不影响主流程（Win7/8 没有这个属性）。
+#[cfg(target_os = "windows")]
+fn apply_dark_titlebar(window: &Window) {
+    use raw_window_handle::RawWindowHandle;
+
+    // 注意：`Window` 自己也有一个 `window_handle()`（返回 GPUI 的
+    // `AnyWindowHandle`），这里必须走 trait 的全限定调用，否则类型对不上。
+    let Ok(handle) = raw_window_handle::HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get() as *mut core::ffi::c_void;
+    let enabled: i32 = 1;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            20,
+            &enabled as *const i32 as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            19,
+            &enabled as *const i32 as *const core::ffi::c_void,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "dwmapi")]
+extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: *mut core::ffi::c_void,
+        attribute: u32,
+        value: *const core::ffi::c_void,
+        size: u32,
+    ) -> i32;
 }

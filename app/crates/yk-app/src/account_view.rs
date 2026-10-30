@@ -428,20 +428,19 @@ impl Render for AccountView {
                     .child("退出账号"),
             );
 
-        let width = window.viewport_size().width.as_f32();
+        // 头像已经挪到顶栏左上：macOS 要让出红黄绿（76），Windows 只有左内边距。
+        let left = if cfg!(target_os = "macos") {
+            SPACE_5 + 76.0
+        } else {
+            SPACE_5
+        };
         let source = Bounds {
-            // 头像现在收在右侧工具栏胶囊里：窗口右内边距 20 + 胶囊内边距 6。
-            origin: point(
-                px(width - SPACE_5 - 6. - 34.),
-                px((TOP_BAR_HEIGHT - 34.) / 2.),
-            ),
+            // 胶囊内边距 6，头像本体 34。
+            origin: point(px(left + 6.), px((TOP_BAR_HEIGHT - 34.) / 2.)),
             size: size(px(34.), px(34.)),
         };
         let target = Bounds {
-            origin: point(
-                px(width - SPACE_4 - ACCOUNT_PANEL_W),
-                px(TOP_BAR_HEIGHT + SPACE_4),
-            ),
+            origin: point(px(left), px(TOP_BAR_HEIGHT + SPACE_4)),
             size: size(px(ACCOUNT_PANEL_W), px(ACCOUNT_PANEL_H)),
         };
         let popover = AccountPopover {

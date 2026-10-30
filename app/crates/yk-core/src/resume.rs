@@ -63,20 +63,15 @@ impl ResumeStore {
     /// 默认存储路径。
     ///
     /// macOS：`~/Library/Application Support/YKPili/resume.json`；
-    /// 其它平台退回系统临时目录。测试可用 `YK_RESUME_PATH` 覆盖。
+    /// Windows：`%APPDATA%\YKPili\resume.json`；其它平台退回系统临时目录。
+    /// 测试可用 `YK_RESUME_PATH` 覆盖。
     pub fn default_path() -> PathBuf {
         if let Ok(path) = std::env::var("YK_RESUME_PATH") {
             if !path.trim().is_empty() {
                 return PathBuf::from(path);
             }
         }
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(home) = std::env::var("HOME") {
-                return PathBuf::from(home).join("Library/Application Support/YKPili/resume.json");
-            }
-        }
-        std::env::temp_dir().join("YKPili").join("resume.json")
+        crate::platform::config_file("resume.json")
     }
 
     /// 从磁盘加载；文件不存在 / 损坏都当作空表（不能让续播功能拖垮播放）。

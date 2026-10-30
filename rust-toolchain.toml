@@ -1,0 +1,8 @@
+# 固定编译工具链。
+#
+# gpui-fast 0.1.10 使用了 std::hint::cold_path（Rust 1.95 起稳定），
+# 1.94 及更早的 stable 会直接编译失败；这里锁定一个已经验证过的版本，
+# 避免「同一份源码在不同机器上有的能编、有的不能」。
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"

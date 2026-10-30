@@ -50,6 +50,16 @@ use page_image_cache::PageImageCache;
 use yk_ui::status::SKELETON_PULSE_MS;
 use yk_ui::theme::*;
 
+/// 退出确认提示文案。
+///
+/// 行为是「再次按下」而不是「按住」：第一次只提示，3 秒内再按一次才退出。
+/// Windows 用 Alt+Q（Win+Q 被系统搜索占用），macOS 用 ⌘Q。
+pub const QUIT_HINT_TEXT: &str = if cfg!(target_os = "windows") {
+    "再次按下 Alt+Q 键即可退出"
+} else {
+    "再次按下 ⌘Q 键即可退出"
+};
+
 /// 一次 ⌘Q 的判定结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuitDecision {
@@ -508,19 +518,19 @@ impl AppRoot {
 
     /// 处理一次 ⌘Q。
     ///
-    /// 第一次只展示「按住 ⌘Q 键即可退出」提示，返回 `false`；
+    /// 第一次只展示「再次按下 ⌘Q / Alt+Q 键即可退出」提示，返回 `false`；
     /// 提示还在（3 秒内）且不是按住产生的首个重复键，再按一次返回 `true`，
     /// 由调用方执行 `cx.quit()`。这样误触不会直接杀掉窗口。
     pub fn request_quit(&mut self, cx: &mut Context<Self>) -> bool {
         let now = std::time::Instant::now();
         match self.quit_decision(now) {
             QuitDecision::Quit => {
-                eprintln!("[quit] 再次按下 ⌘Q，正式退出");
+                eprintln!("[quit] 再次按下退出快捷键，正式退出");
                 true
             }
             QuitDecision::Wait => false,
             QuitDecision::Show => {
-                eprintln!("[quit] 第一次 ⌘Q：显示退出提示");
+                eprintln!("[quit] 第一次按下退出快捷键：显示退出提示");
                 self.quit_hint_generation = self.quit_hint_generation.wrapping_add(1);
                 let generation = self.quit_hint_generation;
                 cx.notify();
@@ -592,7 +602,7 @@ impl AppRoot {
                                 .font_weight(FontWeight::BOLD)
                                 .text_color(rgb(0xFFFFFF))
                                 .text_center()
-                                .child("按住 ⌘Q 键即可退出"),
+                                .child(QUIT_HINT_TEXT),
                         ),
                 )
                 .into_any_element(),
@@ -2034,7 +2044,14 @@ impl Render for AppRoot {
             .capture_key_down(cx.listener(
                 |view, event: &KeyDownEvent, _window, cx| {
                     let keystroke = &event.keystroke;
-                    if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("q") {
+                    // macOS 的「平台键」是 Command；Windows 用 Alt+Q：
+                    // Win+Q 会被系统搜索抢走，Ctrl+Q 又容易和输入框快捷键混淆。
+                    // 两边都走同一套「第一次提示、3 秒内再按一次才退出」的状态机。
+                    #[cfg(target_os = "windows")]
+                    let quit_modifier = keystroke.modifiers.alt;
+                    #[cfg(not(target_os = "windows"))]
+                    let quit_modifier = keystroke.modifiers.platform;
+                    if quit_modifier && keystroke.key.eq_ignore_ascii_case("q") {
                         // 按住不放产生的自动重复不算「再按一次」：忽略，
                         // 必须松开后重新按下才确认退出。
                         if !event.is_held && view.request_quit(cx) {
@@ -2323,27 +2340,31 @@ fn top_bar(
     cx: &mut Context<AppRoot>,
 ) -> impl IntoElement {
     let s = &t.surfaces;
-    div()
+    let bar = div()
         .id("topbar-drag")
         .relative()
-        // 整条顶栏都能按住拖动窗口。原生透明标题栏只让顶部那条 titlebar
-        // 高度参与拖动，顶栏下半部分实测按不住 —— 在用户眼里就是 bug。
-        // 控件组各自截住 mouse_down，所以点胶囊 / 输入框不会误拖窗口。
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
+        // 整条顶栏都能按住拖动窗口。控件组各自截住 mouse_down，
+        // 所以点头像 / 输入框 / 窗口按钮不会误拖窗口。
+        .on_mouse_down(MouseButton::Left, |_, window, _| begin_window_drag(window))
         .flex()
         .items_center()
         .w_full()
         .h(px(TOP_BAR_HEIGHT))
         // 窗口再矮也不能把工具栏压扁：内容区自己滚动 / 留白。
         .flex_shrink_0()
-        // macOS 透明标题栏的红黄绿压在顶栏左上：按钮占 20..72，品牌胶囊从 96
-        // 开始，留出 24px 呼吸位（参考稿里红黄绿与第一个胶囊之间也是大留白）。
+        // macOS 透明标题栏的红黄绿压在顶栏左上：按钮占 20..72，头像胶囊从 92
+        // 开始，留出呼吸位。Windows 没有红黄绿，头像直接贴左内边距。
         .pl(px(if cfg!(target_os = "macos") {
             SPACE_5 + 76.0
         } else {
             SPACE_5
         }))
-        .pr(px(SPACE_5))
+        // Windows 的三个窗口按钮贴右边缘，方便按角落关闭；macOS 保留右边距。
+        .pr(px(if cfg!(target_os = "windows") {
+            0.0
+        } else {
+            SPACE_5
+        }))
         .gap(px(SPACE_4))
         // 比卡片 / 浮层更暗、带一点透明：工具栏是「窗口的外壳」，不抢内容的视觉重量。
         // 内容不与顶栏重叠（顶栏是 flex 列的第一个 child），所以这里可以放心用
@@ -2351,7 +2372,8 @@ fn top_bar(
         .bg(s.surface_toolbar)
         .border_b_1()
         .border_color(s.border_subtle)
-        .child(brand_pill(t, cx))
+        // 头像从右上角挪到原来品牌胶囊的位置；右上角让给窗口按钮。
+        .child(toolbar_group(t, face_url, hide_avatar, cx))
         .child(
             div()
                 .flex_1()
@@ -2360,61 +2382,17 @@ fn top_bar(
                 .items_center()
                 .justify_center()
                 .child(search_view::search_bar(t, search, window, cx)),
-        )
-        .child(toolbar_group(t, face_url, hide_avatar, cx))
+        );
+
+    #[cfg(target_os = "windows")]
+    let bar = bar.child(window_controls(t, window, cx));
+
+    bar
 }
 
-/// 左侧品牌胶囊：点一下回首页。整块是一个可点击目标，也负责截住窗口拖拽。
-fn brand_pill(t: &YkTheme, cx: &mut Context<AppRoot>) -> impl IntoElement {
-    let s = &t.surfaces;
-    let p = &t.palette;
-    let hover = s.fill_3;
-    div()
-        .id("topbar-home")
-        .h(px(TOP_BAR_CONTROL_HEIGHT))
-        .px(px(SPACE_3))
-        .flex()
-        .items_center()
-        .gap(px(SPACE_2))
-        .flex_shrink_0()
-        .rounded_full()
-        .bg(s.fill_2)
-        .border_1()
-        .border_color(s.border_strong)
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-        .occlude()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
-            // 回首页：不重拉推荐流（Dock 的「个性推荐」同款行为），只切页 + 回顶。
-            view.search.open = false;
-            view.search.selected = None;
-            view.page = None;
-            view.reset_card_hover();
-            view.top_refresh_armed = false;
-            view.pull_refresh_triggered = false;
-            view.scroll_content_to_top();
-            window.refresh();
-            cx.stop_propagation();
-            cx.notify();
-        }))
-        .child(
-            Icon::new(IconName::Tv)
-                .size(px(22.))
-                .text_color(p.theme_primary),
-        )
-        .child(
-            div()
-                .text_size(px(15.))
-                .font_weight(FontWeight::BOLD)
-                .text_color(s.text_primary)
-                .child("YKPili"),
-        )
-}
-
-/// 右上角头像胶囊。
+/// 左上角头像胶囊。
 ///
-/// 2026-10-27 反馈：暂时只保留头像，不放假设置入口；胶囊只作为材质容器，
+/// 暂时只保留头像，不放假设置入口；胶囊只作为材质容器，
 /// 等有真实功能（设置 / 通知等）再往里加图标。容器截住 mouse_down，
 /// 点头像不会误拖窗口。
 fn toolbar_group(
@@ -2438,6 +2416,152 @@ fn toolbar_group(
         .occlude()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(avatar(t, face_url, hide_avatar, cx))
+}
+
+// ================= Windows 自绘标题栏 =================
+
+/// 取当前窗口的 HWND（Win32）。
+#[cfg(target_os = "windows")]
+fn window_hwnd(window: &Window) -> Option<*mut core::ffi::c_void> {
+    use raw_window_handle::RawWindowHandle;
+
+    // `Window` 自己也有 `window_handle()`（返回 `AnyWindowHandle`），
+    // 必须走 trait 的全限定调用。
+    let handle = raw_window_handle::HasWindowHandle::window_handle(window).ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(win32) => Some(win32.hwnd.get() as *mut core::ffi::c_void),
+        _ => None,
+    }
+}
+
+/// 按住顶栏拖动窗口。
+///
+/// Windows 的 GPUI 后端没有实现 `start_window_move`，这里用 Win32 标准做法：
+/// 释放鼠标捕获后向窗口发 `WM_NCLBUTTONDOWN` + `HTCAPTION`，
+/// 由系统进入原生的窗口移动循环（和标题栏拖动完全一致）。
+fn begin_window_drag(window: &Window) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(hwnd) = window_hwnd(window) {
+            unsafe {
+                ReleaseCapture();
+                // 必须用 PostMessage：SendMessage 会在当前 mouse_down 处理函数里
+                // 同步进入系统移动循环，GPUI 的窗口过程被重入，App 的 RefCell
+                // 会直接 panic（already borrowed）。Post 出去等这一拍处理完再拖动。
+                PostMessageW(hwnd, 0x00A1, 2, 0);
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    window.start_window_move();
+}
+
+#[cfg(target_os = "windows")]
+fn is_window_zoomed(window: &Window) -> bool {
+    window_hwnd(window).is_some_and(|hwnd| unsafe { IsZoomed(hwnd) != 0 })
+}
+
+#[cfg(target_os = "windows")]
+fn toggle_maximize(window: &Window) {
+    if let Some(hwnd) = window_hwnd(window) {
+        // 同样不能同步 ShowWindow：它会在 on_click 里立刻发 WM_SIZE，
+        // GPUI 重入后拿不到新视口，画面会停在旧的 1280x820（右侧留白）。
+        // 交给消息队列，等当前事件处理完再最大化 / 还原。
+        let command = if is_window_zoomed(window) {
+            0xF120 // SC_RESTORE
+        } else {
+            0xF030 // SC_MAXIMIZE
+        };
+        unsafe {
+            PostMessageW(hwnd, 0x0112, command, 0);
+        }
+    }
+}
+
+/// 标题栏右侧的最小化 / 最大化（还原）/ 关闭。
+#[cfg(target_os = "windows")]
+fn window_controls(t: &YkTheme, window: &Window, cx: &mut Context<AppRoot>) -> impl IntoElement {
+    let s = &t.surfaces;
+    let close_hover: Hsla = rgb(0xC42B1C).into();
+    let maximize_icon = if is_window_zoomed(window) {
+        IconName::WindowRestore
+    } else {
+        IconName::WindowMaximize
+    };
+
+    div()
+        .flex()
+        .items_center()
+        .h_full()
+        .flex_shrink_0()
+        .child(caption_button(
+            "win-minimize",
+            IconName::WindowMinimize,
+            s.fill_3,
+            s.text_primary,
+            cx,
+            |window, _| window.minimize_window(),
+        ))
+        .child(caption_button(
+            "win-maximize",
+            maximize_icon,
+            s.fill_3,
+            s.text_primary,
+            cx,
+            |window, _| toggle_maximize(window),
+        ))
+        .child(caption_button(
+            "win-close",
+            IconName::WindowClose,
+            close_hover,
+            s.text_primary,
+            cx,
+            |_, cx| cx.quit(),
+        ))
+}
+
+#[cfg(target_os = "windows")]
+fn caption_button(
+    id: &'static str,
+    icon: IconName,
+    hover_bg: Hsla,
+    icon_color: Hsla,
+    cx: &mut Context<AppRoot>,
+    action: impl Fn(&mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(46.))
+        .h_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .occlude()
+        // 点按钮不能触发顶栏拖动。
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |_view, _: &ClickEvent, window, cx| {
+            eprintln!("[window] 标题栏按钮：{id}");
+            action(window, cx);
+            // 最大化 / 还原后重绘，图标与悬停态立即切过去。
+            cx.notify();
+            cx.stop_propagation();
+        }))
+        .hover(move |style| style.bg(hover_bg))
+        .child(Icon::new(icon).size(px(13.)).text_color(icon_color))
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+extern "system" {
+    fn ReleaseCapture() -> i32;
+    fn PostMessageW(
+        hwnd: *mut core::ffi::c_void,
+        msg: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> i32;
+    fn IsZoomed(hwnd: *mut core::ffi::c_void) -> i32;
 }
 
 fn avatar(

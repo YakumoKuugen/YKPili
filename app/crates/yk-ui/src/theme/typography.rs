@@ -16,6 +16,14 @@
 /// 此处统一为单一来源。
 ///
 /// 注意：Inter 只提供拉丁字形且不含 CJK，放在中文之前会导致中文回退到系统衬线体。
+/// GPUI 的 `font_family` 只认**单一** family（不做 CSS 式逗号回退），所以按平台
+/// 各取一个系统自带的中文字体；Windows 用微软雅黑 UI。
+#[cfg(target_os = "macos")]
+pub const FONT_FAMILY_UI: &str =
+    "PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Source Han Sans SC, sans-serif";
+#[cfg(target_os = "windows")]
+pub const FONT_FAMILY_UI: &str = "Microsoft YaHei UI";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub const FONT_FAMILY_UI: &str =
     "PingFang SC, Microsoft YaHei, Noto Sans CJK SC, Source Han Sans SC, sans-serif";
 

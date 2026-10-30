@@ -23,6 +23,7 @@ pub mod login;
 pub mod messages;
 pub mod models;
 pub mod playback;
+pub mod platform;
 pub mod player;
 pub mod ranking;
 pub mod resume;

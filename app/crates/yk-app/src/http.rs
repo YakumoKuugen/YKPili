@@ -25,6 +25,7 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use gpui::http_client::http::{HeaderValue, Request, Response};
 use gpui::http_client::{AsyncBody, HttpClient, Url};
+use gpui::{Image as GpuiImage, ImageFormat};
 use yk_core::image_cache::ImageDiskCache;
 
 /// 浏览器 UA。B 站图床对空 UA 也放行，但带上更稳（部分 CDN 会拦）。
@@ -151,6 +152,69 @@ fn fetch_with_cache(uri: &str, cache: &ImageDiskCache) -> anyhow::Result<Respons
     Ok(builder.body(AsyncBody::from_bytes(bytes.into()))?)
 }
 
+/// 读取一张图片的原始字节，并识别出 GPUI 能写进剪贴板的格式。
+///
+/// 优先命中磁盘缓存（和 `img()` 共用同一份），未命中时走一次阻塞请求。
+/// 供「复制图片」这类需要原始压缩数据的场景使用；解码后的 `RenderImage`
+/// 仍然由 `img()` / 页面图片缓存管理。
+pub fn read_image_bytes(uri: &str) -> anyhow::Result<(Vec<u8>, ImageFormat)> {
+    let uri = uri.trim();
+    if uri.is_empty() {
+        anyhow::bail!("图片地址为空");
+    }
+    let cache = image_cache();
+    let bytes = match cache.get(uri) {
+        Some(bytes) => bytes,
+        None => {
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(20))
+                .build()?;
+            let resp = client.get(uri).header("User-Agent", UA).send()?;
+            let status = resp.status();
+            if !status.is_success() {
+                anyhow::bail!("图片请求返回 HTTP {status}");
+            }
+            let bytes = resp.bytes()?.to_vec();
+            if bytes.is_empty() {
+                anyhow::bail!("图片内容为空");
+            }
+            cache.put(uri, &bytes);
+            bytes
+        }
+    };
+    let format = sniff_image_format(&bytes)
+        .ok_or_else(|| anyhow::anyhow!("无法识别的图片格式（可能是 AVIF）"))?;
+    Ok((bytes, format))
+}
+
+/// 按文件头识别图片格式。
+///
+/// B 站图床加 `@480w.webp` 后缀后一般返回 WebP，但原图也可能是 PNG / JPEG / GIF；
+/// 剪贴板需要准确的格式标记，不能只看 URL 后缀。
+pub fn sniff_image_format(bytes: &[u8]) -> Option<ImageFormat> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) {
+        Some(ImageFormat::Png)
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(ImageFormat::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(ImageFormat::Gif)
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(ImageFormat::Webp)
+    } else if bytes.starts_with(b"BM") {
+        Some(ImageFormat::Bmp)
+    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        Some(ImageFormat::Tiff)
+    } else {
+        None
+    }
+}
+
+/// 把原始图片字节包装成剪贴板条目（由平台层写系统剪贴板）。
+pub fn clipboard_image(bytes: Vec<u8>, format: ImageFormat) -> gpui::ClipboardItem {
+    let image = GpuiImage::from_bytes(format, bytes);
+    gpui::ClipboardItem::new_image(&image)
+}
+
 fn resp_status_is_success(status: reqwest::StatusCode) -> bool {
     status.is_success()
 }
@@ -164,4 +228,28 @@ fn response_from_bytes(
         builder = builder.header("Content-Type", content_type);
     }
     Ok(builder.body(AsyncBody::from_bytes(bytes.into()))?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sniffs_common_image_headers() {
+        assert_eq!(
+            sniff_image_format(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0]),
+            Some(ImageFormat::Png)
+        );
+        assert_eq!(
+            sniff_image_format(&[0xFF, 0xD8, 0xFF, 0xE0]),
+            Some(ImageFormat::Jpeg)
+        );
+        assert_eq!(sniff_image_format(b"GIF89a...."), Some(ImageFormat::Gif));
+        assert_eq!(
+            sniff_image_format(b"RIFF\0\0\0\0WEBPVP8 "),
+            Some(ImageFormat::Webp)
+        );
+        assert_eq!(sniff_image_format(b"BM...."), Some(ImageFormat::Bmp));
+        assert_eq!(sniff_image_format(b"not an image"), None);
+    }
 }

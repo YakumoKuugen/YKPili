@@ -38,7 +38,12 @@ pub fn apply(cx: &mut gpui::App, t: &YkTheme) {
         // 字号按项目字号阶给基准 15；组件内部按需用 text_size 覆盖。
         th.font_family = FONT_FAMILY_UI.into();
         th.font_size = px(FONT_SIZE_BODY);
-        th.mono_font_family = "Menlo, Consolas, DejaVu Sans Mono, monospace".into();
+        // 同 FONT_FAMILY_UI：GPUI 不做逗号回退，Windows 直接用 Consolas。
+        th.mono_font_family = if cfg!(target_os = "windows") {
+            "Consolas".into()
+        } else {
+            "Menlo, Consolas, DejaVu Sans Mono, monospace".into()
+        };
         th.mono_font_size = px(FONT_SIZE_CAPTION);
         th.radius = px(INTERACTIVE_RADIUS); // 8
         th.radius_lg = px(CARD_RADIUS); // 12

@@ -42,6 +42,13 @@ use yk_ui::theme::*;
 
 use crate::video::TestFrame;
 
+/// 当前帧的类型按平台分派：macOS 是 IOSurface-backed `CVPixelBuffer`，
+/// Windows 是 mpv 直接出的 BGRA 缓冲区。两者都只经 `video_worker` 产出。
+#[cfg(target_os = "macos")]
+type CurrentFrame = objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>;
+#[cfg(target_os = "windows")]
+type CurrentFrame = crate::video_worker::VideoFrame;
+
 /// 真实视频源（libmpv 解一帧）。拿到就用它，拿不到退回测试帧。
 #[cfg(target_os = "macos")]
 pub struct MpvFrameSource {
@@ -126,6 +133,10 @@ const PLAYER_BOTTOM_INSET: f32 = 92.0;
 /// 从封面展开：一条连续曲线走完，避免两段缓动在交界处出现速度断点。
 /// 280ms 向 macOS Quick Look 的快速预览节奏靠拢，尾部只留很短的过冲回弹。
 const PLAYER_ENTRANCE_MS: u64 = 280;
+/// 入场后段开始把「封面海报」交叉淡化成交互界面。
+const ENTRANCE_CONTENT_FADE_START: f32 = 0.58;
+/// 播放器外侧的页面遮罩最终不透明度（0 = 不遮，1 = 全黑）。
+const PLAYER_SCRIM_OPACITY: f32 = 0.62;
 /// 关闭缩回封面；Quick Look 收回通常比展开更短，这里 260ms。
 const PLAYER_EXIT_MS: u64 = 260;
 
@@ -302,13 +313,23 @@ pub struct PlayerView {
     theme: YkTheme,
     frame: TestFrame,
     /// 视频渲染线程（解码与转换都在它上面，UI 线程只收帧）
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     worker: Option<crate::video_worker::FrameWorker>,
     /// 最近一帧（由 worker 产出）
-    #[cfg(target_os = "macos")]
-    current: Option<objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    current: Option<CurrentFrame>,
+    /// Windows：当前帧对应的 GPUI 贴图。换帧时先 `drop_image` 旧的，
+    /// 否则每个帧号都会在图集里留一张纹理，几分钟就把显存吃满。
+    #[cfg(target_os = "windows")]
+    current_image: Option<std::sync::Arc<RenderImage>>,
+    /// Windows：当前贴图对应的帧号。
+    #[cfg(target_os = "windows")]
+    current_image_serial: Option<u64>,
+    /// Windows：换源时下一帧 render 把旧贴图从图集里摘掉。
+    #[cfg(target_os = "windows")]
+    needs_image_clear: bool,
     /// 播放循环是否已启动（worker 创建后同帧启动一次，不能等下一次 render）
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     loop_started: bool,
     /// 面板是否展开（hover 唤起）。
     expanded: bool,
@@ -521,7 +542,7 @@ impl PlayerView {
             // 放到首次 render（见 render 里的 tried_worker）。
             // 动机是「构造保持无副作用」这条约束，而不是 cx.new 会重试 ——
             // `Context::new` 收的是 FnOnce，只调用一次。
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             worker: None,
             tried_worker: false,
             source: None,
@@ -529,9 +550,15 @@ impl PlayerView {
             source_error: None,
             history_report: None,
             load_generation: 0,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             current: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(target_os = "windows")]
+            current_image: None,
+            #[cfg(target_os = "windows")]
+            current_image_serial: None,
+            #[cfg(target_os = "windows")]
+            needs_image_clear: false,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             loop_started: false,
             // 沉浸优先：播放浮窗默认收起信息面板（鼠标进入右侧 200 面板时展开）。
             expanded: false,
@@ -550,7 +577,9 @@ impl PlayerView {
             escape_hint: false,
             escape_hint_generation: 0,
             entrance_source: None,
-            entrance_generation: 0,
+            // 每个播放器实例一个唯一 id：即使没有封面入场（YK_BVID 直开），
+            // 页面遮罩也能从 0 淡入，而不是复用上一实例已经跑完的动画。
+            entrance_generation: ENTRANCE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             closing: false,
             closing_generation: 0,
             finish_handled: false,
@@ -649,10 +678,14 @@ impl PlayerView {
         self.loading_source = true;
         self.source_error = None;
         self.source = None;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             self.worker = None;
             self.current = None;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            self.needs_image_clear = true;
         }
         self.tried_worker = false;
         self.play_time = 0.0;
@@ -1675,6 +1708,7 @@ impl PlayerView {
             return;
         }
         self.scrubbing = false;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(worker) = self.worker.as_ref() {
             worker.seek(self.state.position_secs);
         }
@@ -1702,6 +1736,7 @@ impl PlayerView {
                 .last_scrub_seek
                 .is_none_or(|at| at.elapsed() >= std::time::Duration::from_millis(50));
         if due {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             if let Some(worker) = self.worker.as_ref() {
                 worker.seek(self.state.position_secs);
             }
@@ -2306,6 +2341,50 @@ impl PlayerView {
         ((available_w - width) / 2.0, width)
     }
 
+    /// Windows：把最新一帧 BGRA 包成 GPUI 的 `RenderImage`。
+    ///
+    /// 两个必须做的收尾：
+    /// 1. 每帧新建 `RenderImage` 会拿到新 `ImageId`，GPUI 的 DirectX 图集会为它
+    ///    分配一张纹理；不显式 `drop_image` 旧图，显存会随播放时间线性上涨。
+    /// 2. 同一帧号不重复建图：render 可能被 hover / 动画触发多次，
+    ///    但视频帧（16ms 一条）并没有变。
+    #[cfg(target_os = "windows")]
+    fn sync_video_image(&mut self, window: &mut Window) {
+        if self.needs_image_clear {
+            self.needs_image_clear = false;
+            if let Some(old) = self.current_image.take() {
+                let _ = window.drop_image(old);
+            }
+            self.current_image_serial = None;
+        }
+
+        let Some(serial) = self.current.as_ref().map(|frame| frame.serial) else {
+            return;
+        };
+        if self.current_image_serial == Some(serial) {
+            return;
+        }
+
+        let frame = self.current.take().expect("上面刚确认过 current 存在");
+        let Some(buffer) = image::RgbaImage::from_raw(frame.width, frame.height, frame.bgra) else {
+            eprintln!(
+                "[player] 视频帧尺寸不匹配：{}x{} / {} 字节",
+                frame.width,
+                frame.height,
+                frame.width as usize * frame.height as usize * 4
+            );
+            return;
+        };
+        // 字节序已经是 BGRA（mpv 的 `bgra` 格式），而 `image::Frame` 只是
+        // 一个「RgbaImage 容器」；GPUI 的 `paint_image` 原样上传，
+        // 所以这里不需要再做通道交换。
+        let image = std::sync::Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+        if let Some(old) = self.current_image.replace(image) {
+            let _ = window.drop_image(old);
+        }
+        self.current_image_serial = Some(serial);
+    }
+
     /// 当前视频的像素尺寸：优先用已解码帧，其次用 playurl 返回的分辨率。
     fn video_pixel_size(&self) -> (f32, f32) {
         #[cfg(target_os = "macos")]
@@ -2521,7 +2600,37 @@ impl RenderOnce for PlayerEntrance {
             return shell.child(content.expect("入场结束时必须挂上播放器内容"));
         }
 
-        shell.child(cover_poster(&theme, &source))
+        // 后段交叉淡化：海报淡出、交互界面淡入；前半段仍只挂海报，
+        // 避免控制栏/侧栏被塞进 192×108 的盒子逐帧重排。
+        let fade = ((p - ENTRANCE_CONTENT_FADE_START) / (1.0 - ENTRANCE_CONTENT_FADE_START))
+            .clamp(0.0, 1.0);
+        let fade = fade * fade * (3.0 - 2.0 * fade);
+
+        let mut shell = shell.child(
+            div()
+                .absolute()
+                .inset_0()
+                .opacity(1.0 - fade)
+                .child(cover_poster(&theme, &source)),
+        );
+
+        if fade > 0.0 {
+            let content = content.expect("开始淡入后必须有播放器内容");
+            shell = shell.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    // 交互界面直接按最终尺寸排版，外形交给 shell 的
+                    // overflow_hidden 裁剪：盒子变大时控件不跟着重排。
+                    .w(px(destination.size.width.as_f32()))
+                    .h(px(destination.size.height.as_f32()))
+                    .opacity(fade)
+                    .child(content),
+            );
+        }
+
+        shell
     }
 }
 
@@ -2812,7 +2921,7 @@ impl Render for PlayerView {
         // 渲染线程：有播放源才启动；换源时 open_bvid 会把 tried_worker 复位。
         // 没有播放源时只有 YK_VIDEO 验收入口会退回本地测试文件，
         // 正常点卡片期间（loading_source）绝不先播测试视频。
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if !self.tried_worker {
             let source = self
                 .source
@@ -2850,8 +2959,8 @@ impl Render for PlayerView {
         // **必须放在 worker 创建之后**：以前放在 render 开头，靠 cx.notify()
         // 等下一轮 render 才启动；窗口未激活/被遮挡时下一轮可能永远不来，
         // 表现就是音频在播、画面不出，点一下播放器触发 render 后才出首帧。
-        // libmpv 已在自动播放，这里只负责「把当前帧搬到 surface 上」。
-        #[cfg(target_os = "macos")]
+        // libmpv 已在自动播放，这里只负责「把当前帧搬到 UI 上」。
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if !self.loop_started && self.worker.is_some() {
             self.loop_started = true;
             cx.spawn(async move |this, cx| {
@@ -2950,6 +3059,9 @@ impl Render for PlayerView {
         }
 
         let t = self.theme.clone();
+        // Windows：把最新一帧包成 GPUI 贴图，并回收上一张纹理。
+        #[cfg(target_os = "windows")]
+        self.sync_video_image(window);
         // 窗口失焦：立即收起，不依赖「下一帧」（暂停时没有视频帧驱动 render）。
         if !self.activation_observed {
             self.activation_observed = true;
@@ -3024,7 +3136,11 @@ impl Render for PlayerView {
                         {
                             video_layer(&self.frame, self.current.as_ref())
                         }
-                        #[cfg(not(target_os = "macos"))]
+                        #[cfg(target_os = "windows")]
+                        {
+                            video_layer(&self.frame, self.current_image.as_ref())
+                        }
+                        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                         {
                             video_layer(&self.frame)
                         }
@@ -3121,6 +3237,35 @@ impl Render for PlayerView {
                 this.request_close(window, cx);
             }));
 
+        // 页面遮罩：入场时从透明压到 62%，把「旧页面」压暗；
+        // 播放器内容同时在后段淡入，避免卡片放大结束的一瞬间硬切界面。
+        // 关闭时反向淡出，页面重新亮起。
+        let scrim = div()
+            .absolute()
+            .top(px(TOP_BAR_HEIGHT))
+            .left_0()
+            .right_0()
+            // 底边停在播放器下沿，Dock 保持原亮度。
+            .bottom(px(PLAYER_BOTTOM_INSET))
+            .bg(rgb(0x000000));
+        let scrim = if self.closing {
+            scrim
+                .with_animation(
+                    format!("player-scrim-close-{}", self.closing_generation),
+                    Animation::new(std::time::Duration::from_millis(PLAYER_EXIT_MS)),
+                    |el, p| el.opacity(PLAYER_SCRIM_OPACITY * (1.0 - p)),
+                )
+                .into_any_element()
+        } else {
+            scrim
+                .with_animation(
+                    format!("player-scrim-{}", self.entrance_generation),
+                    Animation::new(std::time::Duration::from_millis(PLAYER_ENTRANCE_MS)),
+                    |el, p| el.opacity(PLAYER_SCRIM_OPACITY * p),
+                )
+                .into_any_element()
+        };
+
         // 关闭缩回时只保留画面：当前视频帧优先，没有帧就用封面海报。
         // 控制栏/面板不挂树，窗口缩小时不会被重排得乱跳。
         let closing_visual: Option<AnyElement> = if self.closing {
@@ -3134,7 +3279,17 @@ impl Render for PlayerView {
                         .map(|source| cover_poster(&t, source))
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            {
+                if self.current_image.is_some() {
+                    Some(video_layer(&self.frame, self.current_image.as_ref()).into_any_element())
+                } else {
+                    self.entrance_source
+                        .as_ref()
+                        .map(|source| cover_poster(&t, source))
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             {
                 self.entrance_source
                     .as_ref()
@@ -3226,6 +3381,7 @@ impl Render for PlayerView {
             .absolute()
             .inset_0()
             .child(backdrop)
+            .child(scrim)
             .child(window)
             // 第一次 Esc 提示放在浮窗之外：顶栏右侧。
             .children(self.escape_hint_overlay(&t, cx))
@@ -3476,7 +3632,7 @@ impl PlayerView {
         // 点播放 = 放弃输入焦点，恢复渲染循环。
         self.input_focused = false;
         self.state.toggle_play();
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(worker) = self.worker.as_ref() {
             worker.set_paused(!self.state.playing);
         }
@@ -5293,7 +5449,35 @@ fn video_layer(
         .child(surface(buffer).object_fit(ObjectFit::Contain).size_full())
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Windows：BGRA 帧包成 `RenderImage`，用 `img()` 贴到播放层。
+///
+/// 视频帧按 Contain 等比缩放；容器满尺寸并居中，和 macOS 的 `surface()`
+/// 保持同一套 letterbox 行为。
+#[cfg(target_os = "windows")]
+fn video_layer(
+    _frame: &TestFrame,
+    current: Option<&std::sync::Arc<RenderImage>>,
+) -> AnyElement {
+    let content = match current {
+        Some(image) => img(ImageSource::Render(image.clone()))
+            .object_fit(ObjectFit::Contain)
+            .size_full()
+            .into_any_element(),
+        None => div().size_full().bg(rgb(0x101014)).into_any_element(),
+    };
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(content)
+        .into_any_element()
+}
+
+/// 其它平台（含 iOS）：`surface()` 在 gpui-pre 0.3.9 里只在 Apple 桌面端可用，
+/// Windows 走上面的贴图路径，其余平台先渲染占位。
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn video_layer(_frame: &TestFrame) -> impl IntoElement {
     div().absolute().inset_0().bg(rgb(0x101014)).child(
         div()
@@ -5306,7 +5490,7 @@ fn video_layer(_frame: &TestFrame) -> impl IntoElement {
             .bg(rgba(0x000000AA))
             .text_size(px(FONT_SIZE_MICRO))
             .text_color(rgb(0xFFFFFF))
-            .child("视频层占位 · iOS 待接 libmpv"),
+            .child("视频层占位 · 该平台待接 libmpv"),
     )
 }
 

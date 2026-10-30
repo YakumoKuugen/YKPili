@@ -84,15 +84,10 @@ impl CacheManager {
     }
 
     /// 平台默认缓存根目录：
-    /// macOS `~/Library/Caches/YKPili`，其它平台退回系统临时目录下的 `ykpili`。
+    /// macOS `~/Library/Caches/YKPili`，Windows `%LOCALAPPDATA%\YKPili\Cache`，
+    /// 其它平台退回系统临时目录下的 `ykpili-cache`。
     pub fn default_root() -> PathBuf {
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(home) = std::env::var("HOME") {
-                return PathBuf::from(home).join("Library/Caches/YKPili");
-            }
-        }
-        std::env::temp_dir().join("ykpili-cache")
+        crate::platform::cache_dir()
     }
 
     pub fn root(&self) -> &Path {
