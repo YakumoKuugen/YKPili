@@ -81,6 +81,7 @@ fn video(index: usize, title: &str) -> SearchVideo {
         description: "一段用于验收的搜索视频结果。".into(),
         author: "测试 UP 主".into(),
         mid: 900 + index as i64,
+        up_face: String::new(),
         cover_url: String::new(),
         view_count: 123_000 + index as u64 * 1000,
         danmaku_count: 400 + index as u64,

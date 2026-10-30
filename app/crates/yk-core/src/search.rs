@@ -149,6 +149,8 @@ pub struct SearchVideo {
     pub description: String,
     pub author: String,
     pub mid: i64,
+    /// UP 主头像（搜索接口的 `upic`）。
+    pub up_face: String,
     pub cover_url: String,
     pub view_count: u64,
     pub danmaku_count: u64,
@@ -172,7 +174,7 @@ impl SearchVideo {
             bvid: self.bvid.clone(),
             cid: 0,
             up_name: self.author.clone(),
-            up_face: String::new(),
+            up_face: self.up_face.clone(),
             view_count: self.view_count,
             danmaku_count: self.danmaku_count,
             duration_secs: self.duration_secs,
@@ -700,6 +702,16 @@ fn push_span(spans: &mut Vec<HighlightSpan>, buf: &mut String, highlighted: bool
 }
 
 fn parse_video(item: &Value) -> SearchVideo {
+    // UP 主头像在搜索结果里是 `upic`（`pic` 是封面）。少数条目只给 `uface`，
+    // 两个都接，避免卡片署名行退回渐变占位。
+    let up_face = {
+        let upic = image_url(&str_of(item, "upic"));
+        if upic.is_empty() {
+            image_url(&str_of(item, "uface"))
+        } else {
+            upic
+        }
+    };
     SearchVideo {
         bvid: str_of(item, "bvid"),
         aid: num(item, "aid"),
@@ -707,6 +719,7 @@ fn parse_video(item: &Value) -> SearchVideo {
         description: clean_text(&str_of(item, "description")),
         author: clean_text(&str_of(item, "author")),
         mid: num(item, "mid") as i64,
+        up_face,
         cover_url: image_url(&str_of(item, "pic")),
         view_count: num(item, "play"),
         danmaku_count: num(item, "video_review").max(num(item, "danmaku")),
@@ -1131,7 +1144,8 @@ mod tests {
             "result": [
               {"result_type":"video","data":[
                 {"type":"video","bvid":"BV1xx","aid":1,"title":"<em>原神</em>攻略",
-                 "author":"UP","mid":9,"pic":"//i0.hdslb.com/a.jpg","play":"12000",
+                 "author":"UP","mid":9,"pic":"//i0.hdslb.com/a.jpg",
+                 "upic":"//i0.hdslb.com/face.jpg","play":"12000",
                  "video_review":30,"favorites":5,"duration":"11:7","pubdate":1790000000,
                  "typename":"游戏","description":"desc"},
                 {"type":"live_room","roomid":555,"title":"直播","uname":"主播",
@@ -1166,6 +1180,15 @@ mod tests {
         assert_eq!(page.results.videos.len(), 1);
         assert_eq!(page.results.videos[0].title, "原神攻略");
         assert_eq!(page.results.videos[0].duration_secs, 667);
+        // UP 主头像走 `upic`（`pic` 是封面），并且要带进首页卡片模型。
+        assert_eq!(
+            page.results.videos[0].up_face,
+            "https://i0.hdslb.com/face.jpg"
+        );
+        assert_eq!(
+            page.results.videos[0].to_cover_item(0).up_face,
+            "https://i0.hdslb.com/face.jpg"
+        );
         assert_eq!(page.results.live.len(), 1);
         assert_eq!(page.results.films.len(), 1);
         assert_eq!(page.results.films[0].score, Some(9.6));
@@ -1175,6 +1198,32 @@ mod tests {
         assert_eq!(page.results.users[0].previews.len(), 1);
         assert_eq!(page.results.articles.len(), 1);
         assert!(!page.results.is_empty());
+    }
+
+    #[test]
+    fn video_avatar_falls_back_to_uface() {
+        // 线上少数视频条目只给 `uface` 不给 `upic`；不能因此退回渐变占位。
+        let body = r#"{
+          "code": 0,
+          "data": {
+            "result": [
+              {"result_type":"video","data":[
+                {"type":"video","bvid":"BV1zz","title":"无 upic","author":"UP","mid":1,
+                 "pic":"//i0.hdslb.com/c.jpg","uface":"//i1.hdslb.com/fallback.jpg",
+                 "play":1,"duration":"01:00","pubdate":1790000000}
+              ]}
+            ]
+          }
+        }"#;
+        let page = parse_search_page(body).unwrap();
+        assert_eq!(
+            page.results.videos[0].up_face,
+            "https://i1.hdslb.com/fallback.jpg"
+        );
+        assert_eq!(
+            page.results.videos[0].to_cover_item(0).up_face,
+            "https://i1.hdslb.com/fallback.jpg"
+        );
     }
 
     #[test]
