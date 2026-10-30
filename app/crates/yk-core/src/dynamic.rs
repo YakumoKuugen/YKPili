@@ -529,6 +529,8 @@ fn parse_pub_ts(modules: &DynamicModules) -> u64 {
 /// 详情浮层里的一条评论（已收敛）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DynamicComment {
+    /// 评论 id。翻页去重、虚拟列表的稳定 key 都用它。
+    pub rpid: i64,
     pub author: String,
     pub face: String,
     pub text: String,
@@ -545,6 +547,7 @@ impl DynamicComment {
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| format::relative_time(raw.ctime));
         Self {
+            rpid: raw.rpid,
             author: format::html_decode(raw.member.uname.trim()),
             // 线上 `/x/v2/reply` 的用户头像在 `member.avatar`，旧字段 `face`
             // 经常是空的；优先取非空的 face，再回退 avatar。

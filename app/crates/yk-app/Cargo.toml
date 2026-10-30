@@ -42,6 +42,12 @@ harness = false
 name = "topbar_visual"
 path = "tests/topbar_visual.rs"
 harness = false
+
+[[test]]
+name = "player_visual"
+path = "tests/player_visual.rs"
+harness = false
+
 [[test]]
 name = "player_hover"
 path = "tests/player_hover.rs"
@@ -52,3 +58,7 @@ name = "danmaku_visual"
 path = "tests/danmaku_visual.rs"
 harness = false
 
+[[test]]
+name = "comments_visual"
+path = "tests/comments_visual.rs"
+harness = false

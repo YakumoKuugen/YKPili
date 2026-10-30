@@ -17,6 +17,7 @@ pub mod feed_cache;
 pub mod format;
 pub mod history;
 pub mod image_cache;
+pub mod interaction;
 pub mod login;
 pub mod messages;
 pub mod models;
@@ -36,6 +37,7 @@ pub use dynamic::{
 pub use feed::{Feed, MAX_ITEMS};
 pub use history::{HistoryCursor, HistoryDay, HistoryEntry};
 pub use image_cache::ImageDiskCache;
+pub use interaction::{FavFolder, InteractionState};
 pub use login::{LoginFlow, PollAction, POLL_INTERVAL_MS};
 pub use messages::{
     ChatKind, ChatMessage, Conversation, InboxCursor, MessageChannel, MessageEntry, MessageTarget,

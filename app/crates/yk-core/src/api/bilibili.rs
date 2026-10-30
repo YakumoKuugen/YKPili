@@ -226,6 +226,24 @@ pub fn dynamic_comments(oid: &str, kind: i64, cookie: &str, pn: u32, ps: u32) ->
     }
 }
 
+/// 评论分页（`/x/v2/reply/main`，游标翻页）。
+///
+/// 旧接口的 `pn` 翻页在线上已经失效（第 2 页起 `replies` 恒空），
+/// 新版把游标放在 `cursor.next`，原样回传给 `next`；`cursor.is_end`
+/// 表示「真的到底了」。
+///
+/// `ps` 线上上限是 30（再大也会被截到 30），所以「一次要 100 条」
+/// 要靠上层拼多页，而不是把 `ps` 调大。
+pub fn comment_main(oid: &str, kind: i64, cookie: &str, next: u64, ps: u32) -> Request {
+    Request {
+        url: format!(
+            "{API_BASE}/x/v2/reply/main?oid={oid}&type={kind}&mode=3&next={next}&ps={ps}&web_location=1315875"
+        ),
+        cookie: cookie.to_string(),
+        name: "comment_main",
+    }
+}
+
 /// 视频弹幕 XML（`/x/v1/dm/list.so`）。
 ///
 /// `oid` 是视频当前分 P 的 cid。响应固定带 `Content-Encoding: deflate`，

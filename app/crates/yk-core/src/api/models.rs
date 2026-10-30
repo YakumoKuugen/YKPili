@@ -582,6 +582,40 @@ pub struct ReplyResponse {
     pub data: Option<ReplyData>,
 }
 
+/// 评论分页（`/x/v2/reply/main`）。
+///
+/// 旧接口 `/x/v2/reply` 只能稳定翻第 1 页（第 2 页起 `replies` 恒为空），
+/// 且 `ps` 最大 20；新版 `main` 走游标翻页，`cursor.is_end` 就是
+/// 「真的没有更多评论了」的唯一权威信号。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplyMainResponse {
+    pub code: i64,
+    #[serde(default)]
+    pub message: String,
+    pub data: Option<ReplyMainData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ReplyMainData {
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub replies: Vec<ReplyRaw>,
+    pub cursor: Option<ReplyCursorRaw>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ReplyCursorRaw {
+    /// 下一页游标（原样回传给 `next`）。
+    #[serde(deserialize_with = "de_u64_or_string")]
+    pub next: u64,
+    /// 是否已经到底。
+    pub is_end: bool,
+    /// 评论总数。
+    #[serde(deserialize_with = "de_u64_or_string")]
+    pub all_count: u64,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
 pub struct ReplyData {

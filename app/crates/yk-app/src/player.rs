@@ -27,6 +27,7 @@
 
 use gpui::assets::IconName;
 use gpui::component::input::{Input, InputEvent, InputState};
+use gpui::component::kbd::Kbd;
 use gpui::component::Icon;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -162,8 +163,92 @@ enum CommentState {
     /// 还没有播放源（取流中 / 失败），不显示评论态。
     Idle,
     Loading,
-    Ready(Vec<DynamicComment>),
+    /// 首批已经回来；具体条目在 `PlayerView::comment_items` 里。
+    Ready,
     Error(String),
+}
+
+/// 评论一次「加载更多」要多少条。
+///
+/// 线上单页上限 30，由 `yk_core::api::client::fetch_comment_batch` 拼页凑满。
+const COMMENT_PAGE_SIZE: u32 = 100;
+/// 评论行里除正文之外的高度：上下 padding 16 + 作者行 16 + 两个 2px 间距
+/// + 时间行 14。正文另算：行数 × [`COMMENT_TEXT_LINE_HEIGHT`]。
+const COMMENT_ROW_CHROME: f32 = 50.0;
+const COMMENT_TEXT_LINE_HEIGHT: f32 = 20.0;
+/// 正文最多 3 行（与 `comment_item` 的 `line_clamp` 对齐）。
+const COMMENT_MAX_LINES: usize = 3;
+/// 虚拟滚动时在可见区上下各多画这么多像素。
+///
+/// 评论行的行高由我们自己算、并且渲染时强制同高，所以偏移是精确的；
+/// 多画一段只是为了让滚动过程中不会出现「一帧空白」。
+const COMMENT_OVERSCAN: f32 = 1200.0;
+
+/// 评论行的排布缓存：每条评论的高度 + 前缀和。
+///
+/// 评论区是窗口化渲染（只创建可见行），所以必须提前知道每一行多高才能算
+/// 出总高度和每行的位置。行高由正文折行数决定，折行数用文本系统的
+/// `shape_text` 按面板可用宽度算一次，之后缓存。
+#[derive(Default)]
+struct CommentRows {
+    /// 每条评论的行高。
+    heights: Vec<f32>,
+    /// 前缀和：`offsets[i]` 是第 i 行的顶部，最后一项是内容总高。
+    offsets: Vec<f32>,
+    /// 算行高时用的正文宽度；面板宽度变了要整表重算。
+    width: f32,
+}
+
+impl CommentRows {
+    /// 已排布的内容总高。
+    fn total(&self) -> f32 {
+        *self.offsets.last().unwrap_or(&0.0)
+    }
+
+    /// 保证缓存覆盖 `items`，返回是否有变化（需要重新算偏移）。
+    fn ensure(
+        &mut self,
+        items: &[DynamicComment],
+        width: f32,
+        mut lines_of: impl FnMut(&str) -> usize,
+    ) {
+        if (self.width - width).abs() > 0.5 {
+            self.width = width;
+            self.heights.clear();
+            self.offsets.clear();
+        }
+        if self.heights.len() > items.len() {
+            self.heights.truncate(items.len());
+            self.offsets.truncate(self.heights.len() + 1);
+        }
+        if self.offsets.is_empty() {
+            self.offsets.push(0.0);
+        }
+        for comment in &items[self.heights.len()..] {
+            let lines = lines_of(&comment.text).clamp(1, COMMENT_MAX_LINES);
+            let height = COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32;
+            let top = *self.offsets.last().unwrap_or(&0.0);
+            self.heights.push(height);
+            self.offsets.push(top + height);
+        }
+    }
+
+    /// `y`（相对评论列表顶部）处的第一条可见行。
+    fn first_row_at(&self, y: f32) -> usize {
+        // offsets[i] <= y 的最大 i；offsets 比 heights 多一项。
+        let rows = self.heights.len();
+        let mut lo = 0usize;
+        let mut hi = rows;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.offsets[mid + 1] <= y {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo.min(rows)
+    }
 }
 
 /// 弹幕数据的加载状态。
@@ -299,14 +384,52 @@ pub struct PlayerView {
     last_resume_save: f64,
     /// 信息面板标签（标签接口异步填充；失败时用分区名兜底）。
     tags: Vec<String>,
-    /// 评论加载状态（打开视频后异步拉第一页）。
+    /// 评论加载状态（打开视频后异步拉首批）。
     comments: CommentState,
+    /// 已加载的全部评论（按服务端返回顺序；翻页追加，按 rpid 去重）。
+    comment_items: Vec<DynamicComment>,
+    /// 下一页游标（`/x/v2/reply/main` 的 `cursor.next`）。
+    comment_next: u64,
+    /// 服务端说「真的没有更多了」；只有它为真才显示「没有更多评论」。
+    comments_is_end: bool,
+    /// 正在拉下一批（100 条）。
+    comments_loading_more: bool,
+    /// 下一批失败原因；失败后等用户点重试，不自动重试。
+    comments_load_error: Option<String>,
+    /// 评论总数（服务端 `all_count`）。
+    comments_total: u64,
+    /// 评论行高缓存（窗口化渲染用）。
+    comment_rows: CommentRows,
+    /// 最近一帧实际创建的评论行数（窗口化渲染的验收指标）。
+    rendered_comment_rows: usize,
     /// 元数据请求代次：换源后旧请求的结果直接丢弃。
     meta_generation: u64,
     /// 左下角眼睛按钮：关掉后不再绘制弹幕层。
     danmaku_visible: bool,
     /// 关注按钮的本地态（本轮不写服务端，只做视觉反馈）。
     followed: bool,
+    /// 互动状态：是否已点赞 / 已投币 / 已收藏（打开视频时读一次）。
+    interaction: yk_core::InteractionState,
+    /// 互动写操作进行中：按钮置灰，避免重复提交。
+    interaction_busy: bool,
+    /// 投币面板是否展开。
+    coin_panel_open: bool,
+    /// 投币面板里的「同时点赞」勾选。
+    coin_also_like: bool,
+    /// 收藏夹面板是否展开。
+    fav_panel_open: bool,
+    /// 分享面板是否展开。
+    share_panel_open: bool,
+    /// 自己的收藏夹列表（打开收藏面板时拉）。
+    fav_folders: Vec<yk_core::FavFolder>,
+    /// 收藏夹列表是否在加载。
+    fav_loading: bool,
+    /// 互动提示（成功 / 失败），显示在互动行下面，几秒后自动消失。
+    interaction_note: Option<(String, bool)>,
+    /// 互动提示代次：旧定时器不能把新提示收走。
+    interaction_note_generation: u64,
+    /// 互动状态请求代次：换源后旧响应直接丢弃。
+    interaction_generation: u64,
     /// 信息面板的唯一滚动区：顶部信息与评论一起滚。
     /// 右下角「回到顶部」按钮直接读它的 offset，滚过阈值才出现。
     panel_scroll: ScrollHandle,
@@ -439,9 +562,28 @@ impl PlayerView {
             last_resume_save: 0.0,
             tags: Vec::new(),
             comments: CommentState::Idle,
+            comment_items: Vec::new(),
+            comment_next: 0,
+            comments_is_end: false,
+            comments_loading_more: false,
+            comments_load_error: None,
+            comments_total: 0,
+            comment_rows: CommentRows::default(),
+            rendered_comment_rows: 0,
             meta_generation: 0,
             danmaku_visible: true,
             followed: false,
+            interaction: yk_core::InteractionState::default(),
+            interaction_busy: false,
+            coin_panel_open: false,
+            coin_also_like: false,
+            fav_panel_open: false,
+            share_panel_open: false,
+            fav_folders: Vec::new(),
+            fav_loading: false,
+            interaction_note: None,
+            interaction_note_generation: 0,
+            interaction_generation: 0,
             panel_collapse_generation: 0,
             panel_scroll: ScrollHandle::new(),
             scrubbing: false,
@@ -535,6 +677,14 @@ impl PlayerView {
         // 滚动位置也回到顶部，否则新视频一打开就停在旧视频的评论高度。
         self.tags.clear();
         self.comments = CommentState::Idle;
+        self.comment_items.clear();
+        self.comment_next = 0;
+        self.comments_is_end = false;
+        self.comments_loading_more = false;
+        self.comments_load_error = None;
+        self.comments_total = 0;
+        self.comment_rows = CommentRows::default();
+        self.rendered_comment_rows = 0;
         // 弹幕跟着换源清空：旧视频的弹幕不能落在新视频的画面上。
         self.danmaku.clear();
         self.danmaku_all.clear();
@@ -547,6 +697,17 @@ impl PlayerView {
         self.seek_settle_until = None;
         self.meta_generation = self.meta_generation.wrapping_add(1);
         self.followed = false;
+        // 互动状态跟着换源重置：上一个视频的点赞 / 投币 / 收藏不能带过来。
+        self.interaction = yk_core::InteractionState::default();
+        self.interaction_busy = false;
+        self.coin_panel_open = false;
+        self.coin_also_like = false;
+        self.fav_panel_open = false;
+        self.share_panel_open = false;
+        self.fav_folders.clear();
+        self.fav_loading = false;
+        self.interaction_note = None;
+        self.interaction_note_generation = self.interaction_note_generation.wrapping_add(1);
         // 本地没有记录、也没有历史页带来的进度时，才去服务端历史里找一次
         // （别的设备 / 别的客户端看过，本地不知道）。
         let need_remote_history =
@@ -641,8 +802,10 @@ impl PlayerView {
                         view.source = Some(src);
                         view.begin_history_report(aid, bvid.clone(), cid, start);
                         // 标签 / 评论 / 弹幕不阻塞起播：源挂上之后再拉，回来一轮重绘。
-                        view.spawn_video_meta(aid, bvid, cx);
+                        view.spawn_video_meta(aid, bvid.clone(), cx);
                         view.spawn_danmaku(cid, cx);
+                        // 互动状态（已点赞 / 已投币 / 已收藏）也放后台：按钮高亮晚一拍无妨。
+                        view.spawn_interaction_state(aid, bvid, cx);
                     }
                     Err(e) => {
                         eprintln!("[player] 取流失败：{e}");
@@ -655,19 +818,30 @@ impl PlayerView {
         .detach();
     }
 
-    /// 拉信息面板的标签与评论第一页。
+    /// 拉信息面板的标签与首批评论（100 条）。
     ///
     /// 起播不依赖这两个请求：取流成功、面板已有标题/UP 主之后再后台补。
     /// 失败只影响面板里的对应区块，不把整个播放器打成错误态。
     fn spawn_video_meta(&mut self, aid: i64, bvid: String, cx: &mut Context<Self>) {
         if aid <= 0 && bvid.trim().is_empty() {
-            self.comments = CommentState::Ready(Vec::new());
+            self.comments = CommentState::Ready;
+            self.comments_is_end = true;
             return;
         }
         self.meta_generation = self.meta_generation.wrapping_add(1);
         let generation = self.meta_generation;
         self.comments = CommentState::Loading;
+        self.comment_items.clear();
+        self.comment_next = 0;
+        self.comments_is_end = false;
+        self.comments_loading_more = false;
+        self.comments_load_error = None;
+        self.comment_rows = CommentRows::default();
+        self.rendered_comment_rows = 0;
         let cookie = current_session_cookie();
+        // 没有 aid 的视频（动态 / 直播回放）不请求评论，直接判「到底」，
+        // 否则空列表会被当成「还没加载完」。
+        let comments_available = aid > 0;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -686,15 +860,21 @@ impl PlayerView {
                             }
                         }
                     };
-                    // 评论 oid 用 aid；没有 aid 的视频不请求，直接给空列表。
+                    // 评论 oid 用 aid；没有 aid 的视频不请求。
                     let comments = if aid > 0 {
                         let target = CommentTarget {
                             oid: aid.to_string(),
                             kind: 1,
                         };
-                        yk_core::api::client::fetch_dynamic_comments(&client, &cookie, &target)
+                        yk_core::api::client::fetch_comment_batch(
+                            &client,
+                            &cookie,
+                            &target,
+                            0,
+                            COMMENT_PAGE_SIZE,
+                        )
                     } else {
-                        Ok(Vec::new())
+                        Ok(Default::default())
                     };
                     Ok::<_, String>((tags, comments))
                 })
@@ -704,17 +884,29 @@ impl PlayerView {
                     return;
                 }
                 match result {
-                    Ok((tags, comments)) => {
+                    Ok((tags, page)) => {
                         if !tags.is_empty() {
                             view.tags = tags;
                         }
-                        view.comments = match comments {
-                            Ok(list) => CommentState::Ready(list),
+                        match page {
+                            Ok(page) => {
+                                view.comment_items = page.items;
+                                view.comment_next = page.next;
+                                view.comments_is_end = page.is_end || !comments_available;
+                                view.comments_total = page.total;
+                                view.comments = CommentState::Ready;
+                                eprintln!(
+                                    "[comments] 首批 {} 条，总数 {}，到底={}",
+                                    view.comment_items.len(),
+                                    view.comments_total,
+                                    view.comments_is_end
+                                );
+                            }
                             Err(error) => {
                                 eprintln!("[player] 评论加载失败：{error}");
-                                CommentState::Error(error)
+                                view.comments = CommentState::Error(error);
                             }
-                        };
+                        }
                     }
                     Err(error) => {
                         eprintln!("[player] 评论加载失败：{error}");
@@ -725,6 +917,527 @@ impl PlayerView {
             });
         })
         .detach();
+    }
+
+    /// 评论列表离底部不足这个距离时，自动拉下一批。
+    const COMMENT_LOAD_MORE_GAP: f32 = 240.0;
+
+    /// 滚到底部附近就再拉 100 条。
+    ///
+    /// 触发点有两处：滚轮事件（`on_scroll_wheel`）与每帧渲染
+    /// （首屏不够一屏时也能继续补）。这里只做判定与去重，真正发请求在
+    /// [`Self::spawn_more_comments`]。
+    fn maybe_load_more_comments(&mut self, cx: &mut Context<Self>) {
+        if self.tab != 0 || self.comments_loading_more || self.comments_is_end {
+            return;
+        }
+        if !matches!(self.comments, CommentState::Ready) || self.comments_load_error.is_some() {
+            return;
+        }
+        if comments_need_more(
+            self.panel_scroll.offset().y.as_f32(),
+            self.panel_scroll.max_offset().y.as_f32(),
+            self.panel_scroll.bounds().size.height.as_f32(),
+            self.comment_rows.total(),
+        ) {
+            self.spawn_more_comments(cx);
+        }
+    }
+
+    /// 拉下一批评论（100 条）。
+    fn spawn_more_comments(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.as_ref() else {
+            return;
+        };
+        let aid = source.aid;
+        if aid <= 0 {
+            self.comments_is_end = true;
+            cx.notify();
+            return;
+        }
+        let target = CommentTarget {
+            oid: aid.to_string(),
+            kind: 1,
+        };
+        let cursor = self.comment_next;
+        let generation = self.meta_generation;
+        let cookie = current_session_cookie();
+        self.comments_loading_more = true;
+        self.comments_load_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_core::api::client::fetch_comment_batch(
+                        &client,
+                        &cookie,
+                        &target,
+                        cursor,
+                        COMMENT_PAGE_SIZE,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.meta_generation != generation {
+                    return;
+                }
+                view.comments_loading_more = false;
+                match result {
+                    Ok(page) => {
+                        let before = view.comment_items.len();
+                        merge_comment_page(&mut view.comment_items, page.items);
+                        view.comment_next = page.next;
+                        view.comments_is_end = page.is_end;
+                        if page.total > 0 {
+                            view.comments_total = page.total;
+                        }
+                        eprintln!(
+                            "[comments] 追加 {} 条（共 {}），到底={}",
+                            view.comment_items.len() - before,
+                            view.comment_items.len(),
+                            view.comments_is_end
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("[player] 评论加载更多失败：{error}");
+                        view.comments_load_error = Some(error);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 打开视频后拉一次互动状态：是否已点赞 / 已投币 / 已收藏。
+    ///
+    /// 未登录时直接跳过：这些接口都要登录态，返回的一定是「未互动」。
+    /// 失败只影响按钮的高亮，不影响播放。
+    fn spawn_interaction_state(&mut self, aid: i64, bvid: String, cx: &mut Context<Self>) {
+        if bvid.trim().is_empty() {
+            return;
+        }
+        let cookie = current_session_cookie();
+        if cookie.trim().is_empty() {
+            return;
+        }
+        self.interaction_generation = self.interaction_generation.wrapping_add(1);
+        let generation = self.interaction_generation;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    let liked = yk_core::interaction::fetch_liked(&client, &cookie, aid, &bvid)
+                        .unwrap_or(false);
+                    let coined = yk_core::interaction::fetch_coined(&client, &cookie, aid, &bvid)
+                        .unwrap_or(false);
+                    let favoured = if aid > 0 {
+                        yk_core::interaction::fetch_favoured(&client, &cookie, aid).unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    Ok::<_, String>((liked, coined, favoured))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.interaction_generation != generation {
+                    return;
+                }
+                if let Ok((liked, coined, favoured)) = result {
+                    view.interaction.liked = liked;
+                    view.interaction.coined = coined;
+                    view.interaction.favoured = favoured;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 在互动区下面弹一条提示（成功 / 失败），2.6 秒后自动收回。
+    fn show_interaction_note(&mut self, text: String, is_error: bool, cx: &mut Context<Self>) {
+        self.interaction_note = Some((text, is_error));
+        self.interaction_note_generation = self.interaction_note_generation.wrapping_add(1);
+        let generation = self.interaction_note_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(2600))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.interaction_note_generation != generation {
+                    return;
+                }
+                view.interaction_note = None;
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 点赞 / 取消点赞。
+    ///
+    /// 先本地翻转（乐观更新），服务端失败再回滚并提示。
+    fn toggle_like(&mut self, cx: &mut Context<Self>) {
+        if self.interaction_busy {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let Some(session) = current_session() else {
+            self.show_interaction_note("请先登录后再点赞".into(), true, cx);
+            return;
+        };
+        if source.bvid.trim().is_empty() {
+            return;
+        }
+        let next = !self.interaction.liked;
+        self.interaction.liked = next;
+        self.interaction_busy = true;
+        if let Some(source) = self.source.as_mut() {
+            source.like_count = if next {
+                source.like_count.saturating_add(1)
+            } else {
+                source.like_count.saturating_sub(1)
+            };
+        }
+        let bvid = source.bvid.clone();
+        let cookie = session.cookie_header();
+        let csrf = session.bili_jct.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_core::interaction::like_video(&client, &cookie, &csrf, &bvid, next)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.interaction_busy = false;
+                match result {
+                    Ok(()) => {
+                        view.show_interaction_note(
+                            if next { "已点赞" } else { "已取消点赞" }.into(),
+                            false,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("[interaction] 点赞失败：{error}");
+                        // 乐观更新回滚：按钮状态和计数都退回去。
+                        view.interaction.liked = !next;
+                        if let Some(source) = view.source.as_mut() {
+                            source.like_count = if next {
+                                source.like_count.saturating_sub(1)
+                            } else {
+                                source.like_count.saturating_add(1)
+                            };
+                        }
+                        view.show_interaction_note(error, true, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 展开 / 收起投币面板。
+    fn toggle_coin_panel(&mut self, cx: &mut Context<Self>) {
+        // 未登录时投不了币：直接提示，不展开一个点不动的面板。
+        if !self.coin_panel_open && current_session().is_none() {
+            self.show_interaction_note("请先登录后再投币".into(), true, cx);
+            return;
+        }
+        self.coin_panel_open = !self.coin_panel_open;
+        self.fav_panel_open = false;
+        self.share_panel_open = false;
+        cx.notify();
+    }
+
+    /// 投币（1 枚 / 2 枚，可同时点赞）。
+    fn do_coin(&mut self, multiply: u8, also_like: bool, cx: &mut Context<Self>) {
+        if self.interaction_busy {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let Some(session) = current_session() else {
+            self.show_interaction_note("请先登录后再投币".into(), true, cx);
+            return;
+        };
+        if source.bvid.trim().is_empty() {
+            return;
+        }
+        // 投币接口只认 av 号（bvid 会被服务端判成 -400 请求错误）。
+        let aid = source.aid;
+        if aid <= 0 {
+            self.show_interaction_note("这个视频没有可投币的信息".into(), true, cx);
+            return;
+        }
+        let coins = multiply.clamp(1, 2);
+        self.interaction_busy = true;
+        self.coin_panel_open = false;
+        let cookie = session.cookie_header();
+        let csrf = session.bili_jct.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_core::interaction::coin_video(
+                        &client, &cookie, &csrf, aid, coins, also_like,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.interaction_busy = false;
+                match result {
+                    Ok(()) => {
+                        view.interaction.coined = true;
+                        if also_like {
+                            view.interaction.liked = true;
+                        }
+                        if let Some(source) = view.source.as_mut() {
+                            source.coin_count = source.coin_count.saturating_add(coins as u64);
+                            if also_like {
+                                source.like_count = source.like_count.saturating_add(1);
+                            }
+                        }
+                        view.show_interaction_note(format!("已投 {coins} 枚硬币"), false, cx);
+                    }
+                    Err(error) => {
+                        eprintln!("[interaction] 投币失败：{error}");
+                        view.show_interaction_note(error, true, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 展开 / 收起收藏夹面板；展开时顺手把收藏夹列表拉回来。
+    fn toggle_fav_panel(&mut self, cx: &mut Context<Self>) {
+        // 未登录时列不出自己的收藏夹：直接提示。
+        if !self.fav_panel_open && current_session().is_none() {
+            self.show_interaction_note("请先登录后再收藏".into(), true, cx);
+            return;
+        }
+        let open = !self.fav_panel_open;
+        self.fav_panel_open = open;
+        self.coin_panel_open = false;
+        self.share_panel_open = false;
+        cx.notify();
+        if open && self.fav_folders.is_empty() {
+            self.load_fav_folders(cx);
+        }
+    }
+
+    /// 拉自己的收藏夹列表。
+    fn load_fav_folders(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = current_session() else {
+            self.show_interaction_note("请先登录后再收藏".into(), true, cx);
+            return;
+        };
+        self.fav_loading = true;
+        let cookie = session.cookie_header();
+        let mid = session.dede_user_id;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_core::interaction::fetch_fav_folders(&client, &cookie, mid)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.fav_loading = false;
+                match result {
+                    Ok(folders) => {
+                        view.fav_folders = folders;
+                    }
+                    Err(error) => {
+                        eprintln!("[interaction] 收藏夹加载失败：{error}");
+                        view.show_interaction_note(error, true, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 收藏到指定收藏夹 / 从收藏夹移除。
+    fn do_fav(&mut self, folder_id: i64, add: bool, cx: &mut Context<Self>) {
+        if self.interaction_busy {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let Some(session) = current_session() else {
+            self.show_interaction_note("请先登录后再收藏".into(), true, cx);
+            return;
+        };
+        if source.aid <= 0 {
+            return;
+        }
+        self.interaction_busy = true;
+        let aid = source.aid;
+        let cookie = session.cookie_header();
+        let csrf = session.bili_jct.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_core::interaction::fav_video(&client, &cookie, &csrf, aid, folder_id, add)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.interaction_busy = false;
+                match result {
+                    Ok(()) => {
+                        view.interaction.favoured = add;
+                        if let Some(source) = view.source.as_mut() {
+                            source.favorite_count = if add {
+                                source.favorite_count.saturating_add(1)
+                            } else {
+                                source.favorite_count.saturating_sub(1)
+                            };
+                        }
+                        view.show_interaction_note(
+                            if add { "已收藏" } else { "已取消收藏" }.into(),
+                            false,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("[interaction] 收藏失败：{error}");
+                        view.show_interaction_note(error, true, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 展开 / 收起分享面板。
+    fn toggle_share_panel(&mut self, cx: &mut Context<Self>) {
+        self.share_panel_open = !self.share_panel_open;
+        self.coin_panel_open = false;
+        self.fav_panel_open = false;
+        cx.notify();
+    }
+
+    /// 分享到哔哩哔哩动态：转发视频，配文用标题。
+    fn share_to_dynamic(&mut self, cx: &mut Context<Self>) {
+        if self.interaction_busy {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let Some(session) = current_session() else {
+            self.show_interaction_note("请先登录后再分享".into(), true, cx);
+            return;
+        };
+        if source.aid <= 0 {
+            self.show_interaction_note("这个视频没有可转发的信息".into(), true, cx);
+            return;
+        }
+        self.interaction_busy = true;
+        self.share_panel_open = false;
+        // 正文 = 标题 + 视频链接：B 站会把链接解析成视频卡片，
+        // 解析不了也至少是一条能点进视频的动态。
+        let content = format!("{} {}", source.title, video_page_url(&source.bvid));
+        let cookie = session.cookie_header();
+        let csrf = session.bili_jct.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_core::interaction::share_to_dynamic(&client, &cookie, &csrf, &content)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.interaction_busy = false;
+                match result {
+                    Ok(dynamic_id) => {
+                        eprintln!("[interaction] 已转发到动态：{dynamic_id}");
+                        if let Some(source) = view.source.as_mut() {
+                            source.share_count = source.share_count.saturating_add(1);
+                        }
+                        view.show_interaction_note("已分享到哔哩哔哩动态".into(), false, cx);
+                    }
+                    Err(error) => {
+                        eprintln!("[interaction] 分享到动态失败：{error}");
+                        view.show_interaction_note(error, true, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 分享到 QQ：打开腾讯的 QQ 分享卡片页（默认浏览器）。
+    ///
+    /// QQ 桌面版注册的 `tencent://` / `mqqapi://` 只能跳到指定聊天对象，
+    /// 没有「选好友分享」的入口；网页端的分享卡片才是腾讯官方给的那条路。
+    fn share_to_qq(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        if source.bvid.trim().is_empty() {
+            self.show_interaction_note("这个视频没有可分享的链接".into(), true, cx);
+            return;
+        }
+        self.share_panel_open = false;
+        let link = video_page_url(&source.bvid);
+        let title = source.title.clone();
+        let desc = source.desc.clone();
+        let qq_url = qq_share_url(&link, &title, &desc);
+        if open_in_browser(&qq_url) {
+            if let Some(source) = self.source.as_mut() {
+                source.share_count = source.share_count.saturating_add(1);
+            }
+            self.show_interaction_note("已打开 QQ 分享卡片".into(), false, cx);
+        } else {
+            self.show_interaction_note("打开 QQ 分享卡片失败".into(), true, cx);
+        }
+        cx.notify();
+    }
+
+    /// 复制视频链接。
+    fn copy_video_link(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        self.share_panel_open = false;
+        let link = video_page_url(&source.bvid);
+        cx.write_to_clipboard(ClipboardItem::new_string(link));
+        self.show_interaction_note("链接已复制".into(), false, cx);
     }
 
     /// 拉当前分 P 的真实弹幕（`/x/v1/dm/list.so`，按 cid 区分）。
@@ -1311,6 +2024,57 @@ impl PlayerView {
     }
 
     /// AppRoot 注入：关闭时把自己的 `playing` 置空。
+    /// 测试入口：读侧栏（信息面板）当前是否展开。
+    pub fn panel_expanded(&self) -> bool {
+        self.expanded
+    }
+
+    /// 测试入口：读三个互动面板的展开状态（投币 / 收藏 / 分享）。
+    pub fn action_panels_open(&self) -> (bool, bool, bool) {
+        (
+            self.coin_panel_open,
+            self.fav_panel_open,
+            self.share_panel_open,
+        )
+    }
+
+    /// 测试 / 截图入口：直接灌一批评论（不走网络），评论 Tab 走真实渲染路径。
+    ///
+    /// `is_end = false` 时列表底部显示「正在加载更多评论…」之外的正常态，
+    /// 可以配合 [`Self::set_test_scroll`] 目检窗口化渲染。
+    #[doc(hidden)]
+    pub fn with_comments(
+        mut self,
+        items: Vec<DynamicComment>,
+        total: u64,
+        is_end: bool,
+    ) -> Self {
+        self.comment_items = items;
+        self.comments_total = total;
+        self.comments_is_end = is_end;
+        self.comments = CommentState::Ready;
+        self.tab = 0;
+        self
+    }
+
+    /// 测试 / 截图入口：把信息面板滚到指定位置（负数向下滚）。
+    #[doc(hidden)]
+    pub fn set_test_scroll(&mut self, y: f32) {
+        self.panel_scroll.set_offset(point(px(0.), px(y)));
+    }
+
+    /// 测试入口：最近一帧实际创建了几个评论行（窗口化渲染验收）。
+    #[doc(hidden)]
+    pub fn rendered_comment_rows(&self) -> usize {
+        self.rendered_comment_rows
+    }
+
+    /// 测试 / 截图入口：把侧栏切到展开态（400 宽）。
+    pub fn with_expanded(mut self, expanded: bool) -> Self {
+        self.expanded = expanded;
+        self
+    }
+
     /// 测试 / 截图入口：直接灌一批弹幕（不走网络请求），并把播放位置拨到
     /// `at` 秒。弹幕排布与绘制和真实数据走完全同一条路径，用来目检
     /// 「弹幕层是不是跟播放层对齐」。
@@ -1321,6 +2085,36 @@ impl PlayerView {
         self.install_danmaku(set);
         self
     }
+
+    /// 测试 / 截图入口：把互动区的展开面板预先打开。
+    ///
+    /// 分享面板是这次新增的面板，截图验收时用它检查排版；
+    /// 传 `("", false, false)` 就全部收起。
+    pub fn with_open_panels(mut self, share: bool, coin: bool, fav: bool) -> Self {
+        self.share_panel_open = share;
+        self.coin_panel_open = coin;
+        self.fav_panel_open = fav;
+        if fav {
+            self.fav_folders = vec![
+                yk_core::FavFolder {
+                    id: 1,
+                    title: "默认收藏夹".into(),
+                    media_count: 265,
+                    attr: 1,
+                    fav_state: 0,
+                },
+                yk_core::FavFolder {
+                    id: 2,
+                    title: "硬件".into(),
+                    media_count: 12,
+                    attr: 0,
+                    fav_state: 1,
+                },
+            ];
+        }
+        self
+    }
+
     pub fn set_close_handler(&mut self, handler: impl Fn(&mut App, bool) + 'static) {
         self.close_handler = Some(Box::new(handler));
     }
@@ -1611,6 +2405,18 @@ fn player_escape_handler(
             }
         });
         cx.stop_propagation();
+    }
+}
+
+/// 回车键位提示（分享面板「复制链接」行尾）。
+///
+/// 用组件库的 `Kbd`：macOS 上渲染成 `⏎`，别的平台渲染成 `Enter` ——
+/// 平台自带的键位符号，比自己拼一个文本胶囊更贴手。
+fn enter_key_hint() -> AnyElement {
+    match Keystroke::parse("enter") {
+        Ok(stroke) => Kbd::new(stroke).into_any_element(),
+        // 解析不出来就不画提示：宁可没有，也不能画一个假的键位。
+        Err(_) => div().into_any_element(),
     }
 }
 
@@ -2263,7 +3069,7 @@ impl Render for PlayerView {
             .children(bar)
             .children(mini_progress)
             // ④ 信息面板：通高浮层，从播放页层顶一直到底
-            .child(self.info_panel(&t, window.scale_factor(), cx))
+            .child(self.info_panel(&t, window, cx))
             // ⑤ 骑边界按钮：面板之后挂载 → 压在面板之上（GPUI 没有 z-index）
             .child(self.panel_toggle(&t, cx))
             // 鼠标移动 / 点击都算活动：把控制栏叫回来并重新计时 5 秒。
@@ -2394,15 +3200,23 @@ impl Render for PlayerView {
                 .key_context("Player")
                 .track_focus(&self.focus_handle)
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.key != "escape" {
-                        return;
+                    match event.keystroke.key.as_str() {
+                        // 回车：分享面板开着时复制链接（面板上有对应的键位提示）。
+                        "enter" => {
+                            if this.handle_enter(cx) {
+                                cx.stop_propagation();
+                            }
+                        }
+                        "escape" => {
+                            if this.escape_hint {
+                                this.request_close(window, cx);
+                            } else {
+                                this.arm_escape_hint(cx);
+                            }
+                            cx.stop_propagation();
+                        }
+                        _ => {}
                     }
-                    if this.escape_hint {
-                        this.request_close(window, cx);
-                    } else {
-                        this.arm_escape_hint(cx);
-                    }
-                    cx.stop_propagation();
                 }))
                 .child(content)
                 .into_any_element()
@@ -2883,7 +3697,8 @@ impl PlayerView {
     /// 信息面板：标题 → 元信息 → UP 主 → 互动 → 标签 → Tab → 内容。
     ///
     /// 内容按 400px 排版，收起态只把右半裁掉（D-05：收起仍是 200px 半宽）。
-    fn info_panel(&self, t: &YkTheme, scale_factor: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn info_panel(&mut self, t: &YkTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let scale_factor = window.scale_factor();
         let s = &t.surfaces;
         let p = &t.palette;
         let source = self.source.as_ref();
@@ -3075,52 +3890,93 @@ impl PlayerView {
                 )
         });
 
-        let actions = source.map(|source| {
-            div()
-                .flex()
-                .items_center()
-                .justify_around()
-                .px(px(SPACE_4))
-                .py(px(2.))
-                .border_t_1()
-                .border_color(s.border_subtle)
-                .child(panel_action(
-                    t,
-                    IconName::ThumbsUp,
-                    if source.like_count > 0 {
-                        format::count(source.like_count)
-                    } else {
-                        "点赞".to_string()
-                    },
-                ))
-                .child(panel_action(
-                    t,
-                    IconName::Coins,
-                    if source.coin_count > 0 {
-                        format::count(source.coin_count)
-                    } else {
-                        "投币".to_string()
-                    },
-                ))
-                .child(panel_action(
-                    t,
-                    IconName::Star,
-                    if source.favorite_count > 0 {
-                        format::count(source.favorite_count)
-                    } else {
-                        "收藏".to_string()
-                    },
-                ))
-                .child(panel_action(
-                    t,
-                    IconName::Share,
-                    if source.share_count > 0 {
-                        format::count(source.share_count)
-                    } else {
-                        "分享".to_string()
-                    },
-                ))
-        });
+        // 互动行：点赞 / 投币 / 收藏 / 分享。
+        // 计数为 0 时显示动作名（B 站的做法），有计数时只显示数字。
+        let like_count = source.map(|source| source.like_count).unwrap_or(0);
+        let coin_count = source.map(|source| source.coin_count).unwrap_or(0);
+        let fav_count = source.map(|source| source.favorite_count).unwrap_or(0);
+        let share_count = source.map(|source| source.share_count).unwrap_or(0);
+        let like_label = if like_count > 0 {
+            format::count(like_count)
+        } else {
+            "点赞".to_string()
+        };
+        let coin_label = if coin_count > 0 {
+            format::count(coin_count)
+        } else {
+            "投币".to_string()
+        };
+        let fav_label = if fav_count > 0 {
+            format::count(fav_count)
+        } else {
+            "收藏".to_string()
+        };
+        let share_label = if share_count > 0 {
+            format::count(share_count)
+        } else {
+            "分享".to_string()
+        };
+        let actions = div()
+            // 顶边线按 400 宽铺满（面板内容就是 400 宽排版），按钮区另外
+            // 固定 200 —— 见下面的说明。
+            .w(px(PLAYER_INFO_PANEL_WIDTH))
+            .border_t_1()
+            .border_color(s.border_subtle)
+            .child(
+                div()
+                    // 按钮区固定 200 宽：面板内容按 400 宽排版，收起态右半
+                    // 会被裁掉；按钮区若跟着 400 排，收藏 / 分享两个按钮就整排
+                    // 落在窗口外，点了没反应。
+                    // 宽度也**不能**跟着展开态变：侧栏一 hover 展开，四个按钮
+                    // 就会重新均分、整体挪位，用户瞄准的按钮会从指针下滑走，
+                    // 一点就点空（甚至点到隔壁按钮）。
+                    .w(px(INFO_PANEL_COLLAPSED))
+                    .flex()
+                    .items_center()
+                    .justify_around()
+                    .px(px(SPACE_2))
+                    .py(px(2.))
+                    .child(panel_action_button(
+                        t,
+                        "player-action-like",
+                        IconName::ThumbsUp,
+                        like_label,
+                        self.interaction.liked,
+                        cx.listener(|view, _: &ClickEvent, _window, cx| {
+                            view.toggle_like(cx);
+                        }),
+                    ))
+                    .child(panel_action_button(
+                        t,
+                        "player-action-coin",
+                        IconName::Coins,
+                        coin_label,
+                        self.interaction.coined,
+                        cx.listener(|view, _: &ClickEvent, _window, cx| {
+                            view.toggle_coin_panel(cx);
+                        }),
+                    ))
+                    .child(panel_action_button(
+                        t,
+                        "player-action-fav",
+                        IconName::Star,
+                        fav_label,
+                        self.interaction.favoured,
+                        cx.listener(|view, _: &ClickEvent, _window, cx| {
+                            view.toggle_fav_panel(cx);
+                        }),
+                    ))
+                    .child(panel_action_button(
+                        t,
+                        "player-action-share",
+                        IconName::Share,
+                        share_label,
+                        self.share_panel_open,
+                        cx.listener(|view, _: &ClickEvent, _window, cx| {
+                            view.toggle_share_panel(cx);
+                        }),
+                    )),
+            );
 
         let mut tags: Vec<String> = if !self.tags.is_empty() {
             self.tags.clone()
@@ -3202,6 +4058,16 @@ impl PlayerView {
             );
         }
 
+        // 互动区展开的面板（投币 / 收藏夹 / 分享）+ 一行提示。
+        // 这里不加左右外边距：面板本身就按可见宽度排，再加外边距就会
+        // 超出可见区，右边被裁掉一截。
+        let action_panels = div()
+            .pb(px(SPACE_2))
+            .children(self.coin_panel(t, cx))
+            .children(self.fav_panel(t, cx))
+            .children(self.share_panel(t, cx))
+            .children(self.interaction_note_line(t));
+
         // 整个面板只有一个滚动区：图 1 那一段（标题 / UP / 互动 / 标签 / Tab）
         // 不再固定，和下面的评论一起滚。内层单独包一列，避免 flex 子项被压缩后
         // 高度不足、overflow_y_scroll 反而滚不动。
@@ -3212,10 +4078,11 @@ impl PlayerView {
             .child(head)
             .children(meta)
             .children(up)
-            .children(actions)
+            .child(actions)
+            .child(action_panels)
             .children(tags_row)
             .child(tabs_row)
-            .child(self.tab_content(t, active, cx));
+            .child(self.tab_content(t, active, window, cx));
 
         let body = div()
             .id("player-info-scroll")
@@ -3234,6 +4101,13 @@ impl PlayerView {
                 if !view.expanded {
                     view.expanded = true;
                     view.panel_generation = view.panel_generation.wrapping_add(1);
+                    cx.notify();
+                }
+                // 滚到底部附近就补下一批评论（每批 100 条）。
+                view.maybe_load_more_comments(cx);
+                // 评论是窗口化渲染：可见区随滚动变化，每滚一下都要重算窗口，
+                // 否则滚出已创建的 ~27 行之后会看到空白。
+                if view.tab == 0 {
                     cx.notify();
                 }
                 view.note_activity(window, cx);
@@ -3293,6 +4167,357 @@ impl PlayerView {
             .into_any_element()
     }
 
+    /// 互动区展开面板的宽度：固定 200（与互动行同宽）。
+    ///
+    /// 同样不能跟着展开态变 —— 面板宽度一变，它下面的按钮就会挪位，
+    /// 用户刚展开就点会点空。
+    fn action_panel_width(&self) -> f32 {
+        INFO_PANEL_COLLAPSED
+    }
+
+    /// 互动区展开的浮层外壳：圆角卡片 + 细边，压在内容上方一点。
+    ///
+    /// 宽度用**收起态**的 200 而不是 `w_full`：面板内容是按 400 宽排版的，
+    /// 侧栏收起时右半会被裁掉，面板跟着裁就只剩半个字。
+    fn action_popover(
+        t: &YkTheme,
+        id: &'static str,
+        width: f32,
+        content: AnyElement,
+    ) -> AnyElement {
+        let s = &t.surfaces;
+        div()
+            .id(id)
+            .w(px(width))
+            .mb(px(SPACE_2))
+            .px(px(SPACE_3))
+            .py(px(SPACE_2))
+            .rounded(px(RADIUS_MD))
+            .bg(s.fill_2)
+            .border_1()
+            .border_color(s.border_subtle)
+            .child(content)
+            .into_any_element()
+    }
+
+    /// 投币面板：1 枚 / 2 枚 + 「同时点赞」。
+    fn coin_panel(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.coin_panel_open {
+            return None;
+        }
+        let s = &t.surfaces;
+        let p = &t.palette;
+        let busy = self.interaction_busy;
+        let row = div()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_2))
+            .child(
+                div()
+                    .id("player-coin-1")
+                    .flex_1()
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_MD))
+                    .bg(p.theme_primary)
+                    .cursor_pointer()
+                    .hover(|style| style.opacity(0.9))
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xFFFFFF))
+                    .child("投 1 枚")
+                    .when(busy, |el| el.opacity(0.5))
+                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                        let also_like = view.coin_also_like;
+                        view.do_coin(1, also_like, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id("player-coin-2")
+                    .flex_1()
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_MD))
+                    .bg(s.fill_3)
+                    .cursor_pointer()
+                    .hover(|style| style.opacity(0.9))
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(s.text_primary)
+                    .child("投 2 枚")
+                    .when(busy, |el| el.opacity(0.5))
+                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                        let also_like = view.coin_also_like;
+                        view.do_coin(2, also_like, cx);
+                    })),
+            );
+        let also_like = div()
+            .id("player-coin-also-like")
+            .mt(px(SPACE_2))
+            .flex()
+            .items_center()
+            .gap(px(SPACE_2))
+            .cursor_pointer()
+            .text_size(px(FONT_SIZE_MICRO))
+            .text_color(s.text_secondary)
+            .child(
+                div()
+                    .w(px(14.))
+                    .h(px(14.))
+                    .rounded(px(RADIUS_HALF))
+                    .border_1()
+                    .border_color(if self.coin_also_like {
+                        p.theme_primary
+                    } else {
+                        s.border_strong
+                    })
+                    .bg(if self.coin_also_like {
+                        p.theme_primary
+                    } else {
+                        s.fill_3
+                    }),
+            )
+            .child("同时点赞")
+            .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                view.coin_also_like = !view.coin_also_like;
+                cx.notify();
+            }));
+        Some(Self::action_popover(
+            t,
+            "player-coin-panel",
+            self.action_panel_width(),
+            div().child(row).child(also_like).into_any_element(),
+        ))
+    }
+
+    /// 收藏夹面板：列出自己的收藏夹，点一下收藏 / 取消收藏。
+    fn fav_panel(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.fav_panel_open {
+            return None;
+        }
+        let s = &t.surfaces;
+        let busy = self.interaction_busy;
+        let list = if self.fav_loading {
+            div()
+                .py(px(SPACE_2))
+                .text_size(px(FONT_SIZE_CAPTION))
+                .text_color(s.text_tertiary)
+                .child("收藏夹加载中…")
+        } else if self.fav_folders.is_empty() {
+            div()
+                .py(px(SPACE_2))
+                .text_size(px(FONT_SIZE_CAPTION))
+                .text_color(s.text_tertiary)
+                .child("没有可用的收藏夹")
+        } else {
+            let mut list = div().flex().flex_col();
+            for folder in self.fav_folders.clone() {
+                let folder_id = folder.id;
+                let favourited = folder.contains_video();
+                list = list.child(
+                    div()
+                        .id("player-fav-folder")
+                        .h(px(28.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .px(px(SPACE_2))
+                        .rounded(px(RADIUS_SM))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(s.fill_3))
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(s.text_primary)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(SPACE_2))
+                                .child(div().min_w(px(0.)).truncate().child(folder.title.clone()))
+                                .child(
+                                    div()
+                                        .text_size(px(FONT_SIZE_MICRO))
+                                        .text_color(s.text_quaternary)
+                                        .child(format!("{} 个", folder.media_count)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(FONT_SIZE_MICRO))
+                                .text_color(if favourited {
+                                    s.text_primary
+                                } else {
+                                    s.text_quaternary
+                                })
+                                .child(if favourited { "已收藏" } else { "收藏" }),
+                        )
+                        .when(busy, |el| el.opacity(0.5))
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                            view.do_fav(folder_id, !favourited, cx);
+                        })),
+                );
+            }
+            list
+        };
+        Some(Self::action_popover(
+            t,
+            "player-fav-panel",
+            self.action_panel_width(),
+            div().child(list).into_any_element(),
+        ))
+    }
+
+    /// 分享面板：哔哩哔哩动态 / QQ / 复制链接。
+    fn share_panel(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.share_panel_open {
+            return None;
+        }
+        let s = &t.surfaces;
+        let title = self
+            .source
+            .as_ref()
+            .map(|source| source.title.clone())
+            .unwrap_or_default();
+        let list = div()
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_1))
+            .child(
+                div()
+                    .id("player-share-dynamic")
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_2))
+                    .rounded(px(RADIUS_SM))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(s.fill_3))
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .text_color(s.text_primary)
+                    .child(
+                        Icon::new(IconName::Share)
+                            .size(px(ICON_SIZE_SM))
+                            .text_color(s.text_secondary),
+                    )
+                    .child(div().min_w(px(0.)).truncate().child("分享到哔哩哔哩动态"))
+                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                        view.share_to_dynamic(cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id("player-share-qq")
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_2))
+                    .rounded(px(RADIUS_SM))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(s.fill_3))
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .text_color(s.text_primary)
+                    .child(
+                        div()
+                            .w(px(16.))
+                            .h(px(16.))
+                            .rounded(px(RADIUS_HALF))
+                            .bg(rgb(0x12B7F5))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(9.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xFFFFFF))
+                            .child("Q"),
+                    )
+                    .child(div().min_w(px(0.)).truncate().child("分享到 QQ"))
+                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                        view.share_to_qq(cx);
+                    })),
+            )
+            .child(
+                div()
+                    .id("player-share-copy")
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .px(px(SPACE_2))
+                    .rounded(px(RADIUS_SM))
+                    .cursor_pointer()
+                    .hover(|style| style.bg(s.fill_3))
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .text_color(s.text_primary)
+                    .child(
+                        Icon::new(IconName::Link)
+                            .size(px(ICON_SIZE_SM))
+                            .text_color(s.text_secondary),
+                    )
+                    .child(div().min_w(px(0.)).truncate().child("复制链接"))
+                    // 回车键位提示：分享面板开着时回车 = 复制链接。
+                    .child(div().flex_1().min_w(px(0.)))
+                    .child(enter_key_hint())
+                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                        view.copy_video_link(cx);
+                    })),
+            );
+        let head = if title.is_empty() {
+            div().into_any_element()
+        } else {
+            div()
+                .pb(px(SPACE_1))
+                .text_size(px(FONT_SIZE_MICRO))
+                .text_color(s.text_quaternary)
+                .line_clamp(2)
+                .child(title)
+                .into_any_element()
+        };
+        Some(Self::action_popover(
+            t,
+            "player-share-panel",
+            self.action_panel_width(),
+            div().child(head).child(list).into_any_element(),
+        ))
+    }
+
+    /// 分享面板开着时按回车 = 复制链接。
+    ///
+    /// 面板上「复制链接」行尾挂着一个回车键位提示，这个键位得是真的能按 ——
+    /// 键盘可达是设计基线里的硬性底线（见 ux-design-preview 第 13.13 节）。
+    fn handle_enter(&mut self, cx: &mut Context<Self>) -> bool {
+        // 分享面板没开时不抢回车：输入框里的回车（发弹幕）不能被这里截走。
+        if !self.share_panel_open || self.input_focused {
+            return false;
+        }
+        self.copy_video_link(cx);
+        true
+    }
+
+    /// 互动提示行：成功 / 失败各一行小字。
+    fn interaction_note_line(&self, t: &YkTheme) -> Option<AnyElement> {
+        let (text, is_error) = self.interaction_note.clone()?;
+        let s = &t.surfaces;
+        Some(
+            div()
+                .id("player-interaction-note")
+                .pb(px(SPACE_1))
+                .text_size(px(FONT_SIZE_MICRO))
+                .text_color(if is_error {
+                    t.palette.status_error
+                } else {
+                    s.text_secondary
+                })
+                .child(text)
+                .into_any_element(),
+        )
+    }
+
     /// 面板整块滚动后，右下角浮出的「回到顶部」。
     ///
     /// 读的是面板唯一滚动区的 offset；点击直接把 offset 归零，
@@ -3336,29 +4561,46 @@ impl PlayerView {
     }
 
     /// 面板 Tab 内容：评论 / 弹幕 / 选集。
-    fn tab_content(&self, t: &YkTheme, active: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn tab_content(
+        &mut self,
+        t: &YkTheme,
+        active: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match active {
-            0 => self.comments_tab(t, cx),
+            0 => self.comments_tab(t, window, cx),
             1 => self.danmaku_tab(t),
             _ => self.pages_tab(t),
         }
     }
 
-    fn comments_tab(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+    /// 评论 Tab。
+    ///
+    /// **窗口化渲染**：评论行按「行高前缀和」绝对定位，只创建当前可见区
+    /// （上下各多 `COMMENT_OVERSCAN`）内的行。翻到 1000 条也只存在 ~30 行元素，
+    /// 不会因为条目过多在滚动时掉帧。
+    fn comments_tab(
+        &mut self,
+        t: &YkTheme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let s = &t.surfaces;
         let p = &t.palette;
-        let total = self
-            .source
-            .as_ref()
-            .map(|source| source.reply_count)
-            .unwrap_or(0);
+        let total = if self.comments_total > 0 {
+            self.comments_total
+        } else {
+            self.source
+                .as_ref()
+                .map(|source| source.reply_count)
+                .unwrap_or(0)
+        };
         let retry = self
             .source
             .as_ref()
             .map(|source| (source.aid, source.bvid.clone()));
 
-        // 评论不再自己滚：外层 `player-info-scroll` 是唯一滚动区，
-        // 这里只负责把评论排成自然高度的一列。
         let mut list = div().w_full().px(px(SPACE_4)).pb(px(SPACE_4));
         match &self.comments {
             CommentState::Idle => {}
@@ -3405,16 +4647,104 @@ impl PlayerView {
                     );
                 }
             }
-            CommentState::Ready(items) if items.is_empty() => {
-                list = list.child(panel_empty_line(t, "没有更多评论"));
-            }
-            CommentState::Ready(items) => {
-                for comment in items {
-                    list = list.child(comment_item(t, comment));
+            CommentState::Ready => {
+                if self.comment_items.is_empty() {
+                    // 首批都没有：只有服务端明确说到头了，才说「没有更多」。
+                    let text = if self.comments_is_end {
+                        "没有更多评论"
+                    } else {
+                        "评论加载中…"
+                    };
+                    list = list.child(panel_empty_line(t, text));
+                } else {
+                    let text_width = comment_text_width();
+                    // 行高缓存：正文折行数用文本系统按同一宽度算，渲染时再强制同高。
+                    {
+                        let items = &self.comment_items;
+                        let rows = &mut self.comment_rows;
+                        rows.ensure(items, text_width, |text| {
+                            comment_wrapped_lines(window, text, text_width)
+                        });
+                    }
+
+                    let total_height = self.comment_rows.total();
+                    let viewport = self.panel_scroll.bounds().size.height.as_f32();
+                    let scrolled = -self.panel_scroll.offset().y.as_f32();
+                    // 播放层头部（标题 / UP / 互动）的高度取决于内容，这里不猜：
+                    // 上下各多画 `COMMENT_OVERSCAN` 就能把真实可见区盖住。
+                    let lo = (scrolled - COMMENT_OVERSCAN).max(0.0);
+                    let hi = scrolled + viewport + COMMENT_OVERSCAN;
+                    let first = self.comment_rows.first_row_at(lo);
+
+                    let mut stack = div().relative().w_full().h(px(total_height));
+                    let mut index = first;
+                    while index < self.comment_items.len() && self.comment_rows.offsets[index] < hi
+                    {
+                        let top = self.comment_rows.offsets[index];
+                        let height = self.comment_rows.heights[index];
+                        let lines = ((height - COMMENT_ROW_CHROME) / COMMENT_TEXT_LINE_HEIGHT)
+                            .round()
+                            .max(1.0) as usize;
+                        stack = stack.child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top(px(top))
+                                .h(px(height))
+                                .child(comment_item(t, &self.comment_items[index], lines)),
+                        );
+                        index += 1;
+                    }
+                    self.rendered_comment_rows = index.saturating_sub(first);
+                    list = list.child(stack);
+
+                    // 只有服务端真的到底了才显示「没有更多评论」；
+                    // 还在翻页时只显示加载 / 失败重试。
+                    if self.comments_is_end {
+                        list = list.child(panel_empty_line(t, "没有更多评论"));
+                    } else if let Some(error) = self.comments_load_error.clone() {
+                        list = list
+                            .child(panel_empty_line(t, "加载更多评论失败"))
+                            .child(
+                                div().w_full().pb(px(SPACE_3)).flex().justify_center().child(
+                                    div()
+                                        .id("player-comments-more-retry")
+                                        .px(px(SPACE_3))
+                                        .h(px(26.))
+                                        .flex()
+                                        .items_center()
+                                        .rounded(px(RADIUS_MD))
+                                        .bg(s.fill_2)
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(s.fill_3))
+                                        .text_size(px(FONT_SIZE_CAPTION))
+                                        .text_color(p.theme_primary)
+                                        .child("重试加载更多")
+                                        .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                                            view.comments_load_error = None;
+                                            view.spawn_more_comments(cx);
+                                        })),
+                                ),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .pb(px(SPACE_2))
+                                    .flex()
+                                    .justify_center()
+                                    .text_size(px(FONT_SIZE_MICRO))
+                                    .text_color(s.text_quaternary)
+                                    .child(error),
+                            );
+                    } else if self.comments_loading_more {
+                        list = list.child(panel_empty_line(t, "正在加载更多评论…"));
+                    }
                 }
-                list = list.child(panel_empty_line(t, "没有更多评论"));
             }
         }
+
+        self.maybe_load_more_comments(cx);
 
         div()
             .w_full()
@@ -3619,8 +4949,26 @@ fn meta_stat(icon: IconName, text: String) -> impl IntoElement {
 }
 
 /// 互动行的一项：图标在上、计数/文案在下。
-fn panel_action(t: &YkTheme, icon: IconName, label: String) -> impl IntoElement {
+/// 互动按钮：图标 + 数字；已经互动过（点赞 / 投币 / 收藏）用主色高亮。
+fn panel_action_button(
+    t: &YkTheme,
+    id: &'static str,
+    icon: IconName,
+    label: String,
+    active: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    let color = if active {
+        p.theme_primary
+    } else {
+        s.text_tertiary
+    };
     div()
+        // id 必须每个按钮都不同：GPUI 用元素 id 做事件索引，
+        // 四个按钮共用一个 id 会互相覆盖，点击落不到对应的回调上。
+        .id(id)
         .flex()
         .flex_col()
         .items_center()
@@ -3628,14 +4976,60 @@ fn panel_action(t: &YkTheme, icon: IconName, label: String) -> impl IntoElement 
         .px(px(SPACE_2))
         .py(px(SPACE_1))
         .rounded(px(RADIUS_MD))
+        .cursor_pointer()
+        .hover(|style| style.bg(s.fill_2))
         .text_size(px(FONT_SIZE_MICRO))
-        .text_color(t.surfaces.text_tertiary)
-        .child(
-            Icon::new(icon)
-                .size(px(ICON_SIZE_SM))
-                .text_color(t.surfaces.text_tertiary),
-        )
+        .text_color(color)
+        .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color))
         .child(label)
+        .on_click(on_click)
+}
+
+/// 视频页面链接（分享用）。
+fn video_page_url(bvid: &str) -> String {
+    format!("https://www.bilibili.com/video/{}", bvid.trim())
+}
+
+/// 腾讯 QQ 分享卡片链接。
+///
+/// QQ 桌面版注册的 `tencent://` / `mqqapi://` 只能跳到指定聊天对象，
+/// 没有「选好友分享」的入口；网页端的分享卡片才是腾讯官方给的那条路。
+fn qq_share_url(link: &str, title: &str, desc: &str) -> String {
+    format!(
+        "https://connect.qq.com/widget/shareqq/index.html?url={}&title={}&desc={}&summary={}",
+        percent_encode(link),
+        percent_encode(title),
+        percent_encode(desc),
+        percent_encode(desc)
+    )
+}
+
+/// 极简 percent encode：只保留 URL 里的安全字符，其余按字节转义。
+fn percent_encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// 用系统默认程序打开链接（macOS 用 `open`，其它平台用 `xdg-open`）。
+fn open_in_browser(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(not(target_os = "macos"))]
+    let opener = "xdg-open";
+    std::process::Command::new(opener)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }
 
 /// 评论加载骨架：圆头像 + 三行灰条。
@@ -3699,14 +5093,86 @@ fn panel_empty_line(t: &YkTheme, text: &str) -> impl IntoElement {
 }
 
 /// 信息面板的一条评论。
-fn comment_item(t: &YkTheme, comment: &DynamicComment) -> impl IntoElement {
+/// 把新一批评论合并进已加载列表（按 `rpid` 去重），返回实际新增条数。
+///
+/// 跨批重复在线上会出现（置顶评论、翻页边界），UI 不能因此多出一行。
+fn merge_comment_page(items: &mut Vec<DynamicComment>, incoming: Vec<DynamicComment>) -> usize {
+    let before = items.len();
+    for comment in incoming {
+        if items.iter().any(|existing| existing.rpid == comment.rpid) {
+            continue;
+        }
+        items.push(comment);
+    }
+    items.len() - before
+}
+
+/// 评论区是否该「再拉一批」。
+///
+/// 两条触发条件：
+/// ① 已经能滚：离底部不足 [`PlayerView::COMMENT_LOAD_MORE_GAP`]（`max_offset`
+///    在布局后才更新，`max <= -1` 用来排除「还没布局」的 0）；
+/// ② 还不能滚：评论本身连一屏都不到 —— 头部高度未知，按 320 保守估算。
+fn comments_need_more(offset_y: f32, max_offset_y: f32, viewport_h: f32, rows_total: f32) -> bool {
+    let near_bottom =
+        max_offset_y <= -1.0 && offset_y - max_offset_y <= PlayerView::COMMENT_LOAD_MORE_GAP;
+    let short = viewport_h > 0.0 && rows_total + 320.0 < viewport_h;
+    near_bottom || short
+}
+
+/// 评论正文的可用宽度。
+///
+/// 面板内容始终按 400 排版（收起态只是被裁掉右半），所以这个宽度与
+/// 展开 / 收起无关：400 − 左右 padding 32 − 头像 28 − 间距 8。
+fn comment_text_width() -> f32 {
+    PLAYER_INFO_PANEL_WIDTH - SPACE_4 * 2.0 - 28.0 - SPACE_2
+}
+
+/// 评论正文在 `width` 内折成几行（最多 `COMMENT_MAX_LINES` 行）。
+///
+/// 用文本系统的 `shape_text` 按与渲染完全相同的字号 / 宽度 / 行数上限算，
+/// 得到的行数再乘 `COMMENT_TEXT_LINE_HEIGHT` 就是正文高度。
+fn comment_wrapped_lines(window: &mut Window, text: &str, width: f32) -> usize {
+    if text.trim().is_empty() || width <= 0.0 {
+        return 1;
+    }
+    let run = TextRun {
+        len: text.len(),
+        font: gpui::Font::default(),
+        ..Default::default()
+    };
+    match window.text_system().shape_text(
+        text.to_string().into(),
+        px(FONT_SIZE_CONTROL),
+        &[run],
+        Some(px(width)),
+        Some(COMMENT_MAX_LINES),
+    ) {
+        // `shape_text` 返回的是**段落**（按 `\n` 切），折行数要看
+        // 每段的 `wrap_boundaries`：段内折一次就多一行。
+        Ok(paragraphs) => paragraphs
+            .iter()
+            .map(|line| line.wrap_boundaries.len() + 1)
+            .sum::<usize>()
+            .clamp(1, COMMENT_MAX_LINES),
+        Err(_) => 1,
+    }
+}
+
+fn comment_item(t: &YkTheme, comment: &DynamicComment, lines: usize) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
+    // 高度必须与 `CommentRows` 算出来的完全一致（窗口化渲染按它绝对定位）：
+    // padding 16 + 作者行 16 + 两个 2px 间距 + 正文 20×行数 + 时间行 14。
+    let height = COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32;
     div()
+        .w_full()
         .flex()
         .items_start()
         .gap(px(SPACE_2))
         .py(px(SPACE_2))
+        .h(px(height))
+        .overflow_hidden()
         .border_b_1()
         .border_color(s.border_subtle)
         .child(
@@ -3732,32 +5198,40 @@ fn comment_item(t: &YkTheme, comment: &DynamicComment) -> impl IntoElement {
         )
         .child(
             div()
-                .flex_1()
-                .min_w(px(0.))
+                // 正文列给**确定宽度**：GPUI 的文本只在宽度确定时才折行，
+                // `flex_1` 拿到的可用宽度不足以让 shaping 主动换行。
+                // 这个宽度必须与 `comment_text_width()` / `CommentRows` 一致。
+                .w(px(comment_text_width()))
+                .flex_shrink_0()
                 .flex()
                 .flex_col()
                 .gap(px(2.))
                 .child(
                     div()
+                        .h(px(16.))
                         .text_size(px(FONT_SIZE_CAPTION))
+                        .line_height(px(16.))
                         .text_color(s.text_quaternary)
                         .truncate()
                         .child(comment.author.clone()),
                 )
                 .child(
                     div()
+                        .h(px(COMMENT_TEXT_LINE_HEIGHT * lines as f32))
                         .text_size(px(FONT_SIZE_CONTROL))
                         .text_color(s.text_primary)
-                        .line_height(px(20.))
-                        .line_clamp(3)
+                        .line_height(px(COMMENT_TEXT_LINE_HEIGHT))
+                        .line_clamp(COMMENT_MAX_LINES)
                         .child(comment.text.clone()),
                 )
                 .child(
                     div()
+                        .h(px(14.))
                         .flex()
                         .items_center()
                         .gap(px(SPACE_3))
                         .text_size(px(FONT_SIZE_MICRO))
+                        .line_height(px(14.))
                         .text_color(s.text_quaternary)
                         .child(comment.time.clone())
                         .when(comment.like > 0, |el| {
@@ -4121,4 +5595,146 @@ fn ctrl_icon(icon: IconName, color: Hsla) -> impl IntoElement {
         .cursor_pointer()
         .hover(|style| style.bg(rgba(0xFFFFFF1A)))
         .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        comments_need_more, cursor_local, merge_comment_page, percent_encode, qq_share_url,
+        video_page_url, CommentRows, COMMENT_ROW_CHROME, COMMENT_TEXT_LINE_HEIGHT,
+    };
+    use gpui::{point, px};
+
+    #[test]
+    fn cursor_local_matches_primary_screen() {
+        // 主屏：CG 全局坐标与 GPUI 窗口原点本来就同源（屏幕原点 0,0）。
+        let local = cursor_local(
+            point(px(786.9), px(338.4)),
+            point(px(0.), px(0.)),
+            point(px(120.), px(80.)),
+        );
+        assert!((local.x.as_f32() - 666.9).abs() < 0.1);
+        assert!((local.y.as_f32() - 258.4).abs() < 0.1);
+    }
+
+    #[test]
+    fn cursor_local_handles_secondary_screen_origin() {
+        // 左副屏：CGDisplayBounds 原点 (-1613,-1440)，GPUI 的窗口原点是
+        // 「屏幕内」坐标 (108,342)。只减窗口原点会得到负数，侧栏判定失败；
+        // 必须先减屏幕原点。
+        let global = point(px(-231.8), px(-774.8));
+        let window_only = point(px(-231.8 - 108.0), px(-774.8 - 342.0));
+        assert!(window_only.x < px(0.), "旧算法会把光标算到窗口外");
+
+        let local = cursor_local(global, point(px(-1613.), px(-1440.)), point(px(108.), px(342.)));
+        assert!((local.x.as_f32() - 1273.2).abs() < 0.1);
+        assert!((local.y.as_f32() - 323.2).abs() < 0.1);
+    }
+
+    #[test]
+    fn video_page_url_uses_bvid() {
+        assert_eq!(
+            video_page_url("BV1mG1QBNEFN"),
+            "https://www.bilibili.com/video/BV1mG1QBNEFN"
+        );
+        assert_eq!(
+            video_page_url("  BV1x  "),
+            "https://www.bilibili.com/video/BV1x"
+        );
+    }
+
+    #[test]
+    fn percent_encode_escapes_reserved_bytes() {
+        assert_eq!(percent_encode("abc-_.~"), "abc-_.~");
+        assert_eq!(percent_encode("a b&c=d"), "a%20b%26c%3Dd");
+        // 中文按 UTF-8 字节逐个转义
+        assert_eq!(percent_encode("动态"), "%E5%8A%A8%E6%80%81");
+    }
+
+    #[test]
+    fn merge_comment_page_dedupes_across_batches() {
+        let item = |rpid: i64| yk_core::dynamic::DynamicComment {
+            rpid,
+            ..Default::default()
+        };
+        let mut items = vec![item(1), item(2), item(3)];
+        let added = merge_comment_page(&mut items, vec![item(3), item(4), item(5)]);
+        assert_eq!(added, 2, "重复的 rpid 不能算新增");
+        assert_eq!(
+            items.iter().map(|c| c.rpid).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn comments_need_more_only_near_bottom_or_when_short() {
+        // 长列表、停在顶部：不能补页。
+        assert!(!comments_need_more(0.0, -10_000.0, 650.0, 21_000.0));
+        // 长列表、离底部还有 1000px：不补。
+        assert!(!comments_need_more(-9_000.0, -10_000.0, 650.0, 21_000.0));
+        // 长列表、离底部 200px：补。
+        assert!(comments_need_more(-9_800.0, -10_000.0, 650.0, 21_000.0));
+        // 短列表（几条评论，连头部一起算都不到一屏）：即使还没布局也要补。
+        assert!(comments_need_more(0.0, 0.0, 650.0, 200.0));
+        // 还没布局（viewport=0）：不要误触发。
+        assert!(!comments_need_more(0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn comment_rows_offsets_and_window_lookup() {
+        let items: Vec<yk_core::dynamic::DynamicComment> = (0..4)
+            .map(|i| yk_core::dynamic::DynamicComment {
+                rpid: i as i64 + 1,
+                text: "x".repeat(i as usize + 1),
+                ..Default::default()
+            })
+            .collect();
+        let mut rows = CommentRows::default();
+        // 第 i 条折 1/2/3/3 行（3 行封顶）。
+        rows.ensure(&items, 332.0, |text| text.len());
+        assert_eq!(rows.heights.len(), 4);
+        assert_eq!(
+            rows.heights[0],
+            COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT
+        );
+        assert_eq!(
+            rows.heights[1],
+            COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * 2.0
+        );
+        assert_eq!(
+            rows.heights[3],
+            COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * 3.0,
+            "正文最多 3 行"
+        );
+        let total: f32 = rows.heights.iter().sum();
+        assert!((rows.total() - total).abs() < 0.01);
+        // 追加不重算前面的行。
+        let mut more = items.clone();
+        more.push(yk_core::dynamic::DynamicComment {
+            rpid: 5,
+            text: "x".into(),
+            ..Default::default()
+        });
+        rows.ensure(&more, 332.0, |_| 1);
+        assert_eq!(rows.heights.len(), 5);
+        assert!((rows.total() - (total + COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT)).abs() < 0.01);
+
+        // 窗口查找：y=0 从 0 开始；越过前两行后从第 2 行开始。
+        assert_eq!(rows.first_row_at(0.0), 0);
+        assert_eq!(rows.first_row_at(rows.offsets[2] + 1.0), 2);
+        assert_eq!(rows.first_row_at(rows.total()), 5);
+    }
+
+    #[test]
+    fn qq_share_url_carries_link_and_title() {
+        let url = qq_share_url(
+            "https://www.bilibili.com/video/BV1x",
+            "标题 空格",
+            "简介&更多",
+        );
+        assert!(url.starts_with("https://connect.qq.com/widget/shareqq/index.html?url="));
+        assert!(url.contains("url=https%3A%2F%2Fwww.bilibili.com%2Fvideo%2FBV1x"));
+        assert!(url.contains("title=%E6%A0%87%E9%A2%98%20%E7%A9%BA%E6%A0%BC"));
+        assert!(url.contains("desc=%E7%AE%80%E4%BB%8B%26%E6%9B%B4%E5%A4%9A"));
+    }
 }

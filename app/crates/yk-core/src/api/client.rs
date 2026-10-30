@@ -10,7 +10,8 @@
 use crate::api::bilibili::{self, HttpClient, Request};
 use crate::api::models::{
     DynamicFeedResponse, HistoryResponse, MsgfeedInboxResponse, MsgfeedUnreadResponse, PlayUrlData,
-    RecommendResponse, RecommendVideoItem, RelationFriendsResponse, RelationResponse, ReplyResponse,
+    RecommendResponse, RecommendVideoItem, RelationFriendsResponse, RelationResponse, ReplyMainResponse,
+    ReplyResponse,
     SessionListResponse, SessionMsgsResponse, UserCardsResponse, UserInfoResponse, VideoInfoData,
     VideoInfoResponse, VideoPlayUrlResponse, VideoTagsResponse,
 };
@@ -32,6 +33,12 @@ const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/53
 
 /// 默认请求超时（秒）。与旧 `ApiManager` 一致：15s。
 pub const REQUEST_TIMEOUT_SECS: u64 = 15;
+
+/// 写操作的来源站点。
+///
+/// B 站的写接口会拿 `Origin` 和 `Referer` 的域名做一致性校验，
+/// 缺 `Origin` 会被当成可疑请求。两者都填同一个域名，和浏览器一致。
+const ORIGIN: &str = "https://www.bilibili.com";
 
 /// 基于 `reqwest::blocking` 的客户端。
 pub struct ReqwestClient {
@@ -70,6 +77,7 @@ impl ReqwestClient {
             .post(url)
             .header("User-Agent", UA)
             .header("Referer", "https://www.bilibili.com/")
+            .header("Origin", ORIGIN)
             .header("Accept", "application/json, text/plain, */*");
         if !cookie.is_empty() {
             rb = rb.header("Cookie", cookie);
@@ -86,6 +94,41 @@ impl ReqwestClient {
             return Err(format!("写操作返回 HTTP {status}"));
         }
         Ok(body)
+    }
+
+    /// 提交 JSON 请求体（动态发布这类接口要 JSON，不是表单）。
+    ///
+    /// CSRF token 走 query（`?csrf=`），body 是 JSON —— B 站的
+    /// `x/dynamic/feed/create/dyn` 就是这个约定。
+    pub fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+        cookie: &str,
+    ) -> Result<String, String> {
+        let mut rb = self
+            .inner
+            .post(url)
+            .header("User-Agent", UA)
+            .header("Referer", "https://www.bilibili.com/")
+            .header("Origin", ORIGIN)
+            .header("Accept", "application/json, text/plain, */*")
+            .header("Content-Type", "application/json");
+        if !cookie.is_empty() {
+            rb = rb.header("Cookie", cookie);
+        }
+        let resp = rb
+            .json(body)
+            .send()
+            .map_err(|e| format!("JSON 写操作请求失败：{e}"))?;
+        let status = resp.status();
+        let text = resp
+            .text()
+            .map_err(|e| format!("JSON 写操作读取响应失败：{e}"))?;
+        if !status.is_success() {
+            return Err(format!("JSON 写操作返回 HTTP {status}"));
+        }
+        Ok(text)
     }
 
     /// 读二进制响应（弹幕 XML 是 deflate 压缩体，不能先按 UTF-8 解码）。
@@ -521,6 +564,141 @@ where
         .unwrap_or_default())
 }
 
+/// 一页评论（游标翻页）。
+#[derive(Debug, Clone, Default)]
+pub struct CommentPage {
+    pub items: Vec<DynamicComment>,
+    /// 下一页游标；原样回传给 [`fetch_comment_page`]。
+    pub next: u64,
+    /// 服务端说「真的没有更多了」。这是唯一权威的到底信号 ——
+    /// 不能用「本页不满 ps」推断：置顶评论、被过滤的评论都会让页条数变少。
+    pub is_end: bool,
+    /// 评论总数（`cursor.all_count`）。
+    pub total: u64,
+}
+
+impl CommentPage {
+    /// 把两页合成一页，保留游标 / 到底标志，并按 `rpid` 去重。
+    ///
+    /// 跨页重复在线上会出现：置顶评论可能同时出现在第 1 页与后续页里。
+    fn merge(&mut self, other: CommentPage) {
+        for item in other.items {
+            if !self.items.iter().any(|existing| existing.rpid == item.rpid) {
+                self.items.push(item);
+            }
+        }
+        self.next = other.next;
+        self.is_end = other.is_end;
+        if other.total > 0 {
+            self.total = other.total;
+        }
+    }
+}
+
+/// 拉一页评论（`/x/v2/reply/main`），游标翻页。
+pub fn fetch_comment_page<C>(
+    client: &C,
+    cookie: &str,
+    target: &CommentTarget,
+    next: u64,
+    size: u32,
+) -> Result<CommentPage, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if target.oid.is_empty() || target.kind <= 0 {
+        return Ok(CommentPage {
+            is_end: true,
+            ..Default::default()
+        });
+    }
+    let req = bilibili::comment_main(&target.oid, target.kind, cookie, next, size.clamp(1, 30));
+    let body = client.get(&req)?;
+    let parsed: ReplyMainResponse =
+        serde_json::from_str(&body).map_err(|e| format!("评论响应解析失败：{e}"))?;
+    if parsed.code != 0 {
+        let message = if parsed.message.is_empty() {
+            String::new()
+        } else {
+            format!("：{}", parsed.message)
+        };
+        return Err(format!("评论接口返回 code={}{message}", parsed.code));
+    }
+    let data = parsed
+        .data
+        .ok_or_else(|| "评论响应缺少 data".to_string())?;
+    let cursor = data.cursor.clone().unwrap_or_default();
+    let mut seen = HashSet::new();
+    let items = data
+        .replies
+        .iter()
+        .filter(|raw| seen.insert(raw.rpid))
+        .map(DynamicComment::from_raw)
+        .collect();
+    Ok(CommentPage {
+        items,
+        next: cursor.next,
+        is_end: cursor.is_end,
+        total: cursor.all_count,
+    })
+}
+
+/// 一次拉够 `want` 条评论。
+///
+/// 线上单页上限是 30（`ps` 给多大都会被截到 30），所以「一次要 100 条」
+/// 只能在这里拼 4 页；`is_end` 为真时提前收手，并把真实游标带回去。
+pub fn fetch_comment_batch<C>(
+    client: &C,
+    cookie: &str,
+    target: &CommentTarget,
+    next: u64,
+    want: u32,
+) -> Result<CommentPage, String>
+where
+    C: HttpClient<Error = String>,
+{
+    const PAGE_MAX: u32 = 30;
+    let want = want.max(1);
+    let mut cursor = next;
+    let mut page = CommentPage {
+        next: cursor,
+        ..Default::default()
+    };
+    let mut got = 0u32;
+    loop {
+        let remaining = want.saturating_sub(got);
+        if remaining == 0 {
+            break;
+        }
+        let fetched = fetch_comment_page(
+            client,
+            cookie,
+            target,
+            cursor,
+            remaining.min(PAGE_MAX),
+        )?;
+        let before = page.items.len();
+        let fetched_end = fetched.is_end;
+        let fetched_next = fetched.next;
+        page.merge(fetched);
+        got += (page.items.len() - before) as u32;
+        // 游标没有前进 + 没有新条目：再请求也是同一页，直接收手，
+        // 免得网络异常时把 UI 卡在这个循环里。
+        if fetched_next == cursor && page.items.len() == before {
+            page.is_end = fetched_end;
+            break;
+        }
+        cursor = fetched_next;
+        page.next = fetched_next;
+        if fetched_end {
+            page.is_end = true;
+            break;
+        }
+    }
+    page.next = cursor;
+    Ok(page)
+}
+
 /// 拉取一个视频（当前分 P）的全部弹幕。
 ///
 /// 走 `/x/v1/dm/list.so`：返回 deflate 压缩的 XML，包含滚动 / 顶部 / 底部
@@ -672,7 +850,7 @@ pub fn clear_history(client: &ReqwestClient, cookie: &str, csrf: &str) -> Result
     check_write_code(&body, "清空历史")
 }
 
-fn check_write_code(body: &str, action: &str) -> Result<(), String> {
+pub(crate) fn check_write_code(body: &str, action: &str) -> Result<(), String> {
     let parsed: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("{action}响应解析失败：{e}"))?;
     let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
@@ -1237,6 +1415,102 @@ mod tests {
         assert_eq!(items[0].duration, 60);
         // HTML 实体在 CoverItem::from_recommend 里解码，这里应保持原文
         assert_eq!(items[0].title, "A &amp; B");
+    }
+
+    /// 评论分页假客户端：按 `next` 游标吐页，模拟线上「单页最多 30 条」。
+    struct CommentClient {
+        /// 每一页（按请求顺序）实际返回的条数；`None` = 该页 is_end。
+        pages: Vec<usize>,
+        calls: std::cell::RefCell<Vec<u64>>,
+    }
+
+    impl HttpClient for CommentClient {
+        type Error = String;
+        fn get(&self, req: &Request) -> Result<String, String> {
+            assert_eq!(req.name, "comment_main", "评论分页必须走 main 接口");
+            let next: u64 = req
+                .url
+                .split("next=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .and_then(|v| v.parse().ok())
+                .unwrap();
+            let ps: usize = req
+                .url
+                .split("ps=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .and_then(|v| v.parse().ok())
+                .unwrap();
+            self.calls.borrow_mut().push(next);
+            let page_ix = next as usize;
+            let total = self.pages.get(page_ix).copied().unwrap_or(0).min(ps);
+            let last = page_ix + 1 >= self.pages.len();
+            // rpid 全局连续，便于检查去重；第 2 页故意重复上一页的最后一条。
+            let mut start = 1 + page_ix * 30;
+            if page_ix == 1 {
+                start -= 1;
+            }
+            let replies: Vec<String> = (start..start + total)
+                .map(|rpid| {
+                    format!(
+                        r#"{{"rpid":{rpid},"like":0,"ctime":1700000000,"member":{{"uname":"u{rpid}"}},"content":{{"message":"m{rpid}"}}}}"#
+                    )
+                })
+                .collect();
+            Ok(format!(
+                r#"{{"code":0,"data":{{"replies":[{}],"cursor":{{"next":{},"is_end":{},"all_count":500}}}}}}"#,
+                replies.join(","),
+                page_ix + 1,
+                last
+            ))
+        }
+    }
+
+    #[test]
+    fn comment_batch_fetches_100_across_30_item_pages() {
+        // 线上 ps 上限 30：要 100 条要拼 4 页（30+30+30+10）。
+        // 第 2 页重复 1 条 → 只有 99 条唯一，必须再补 1 页才够 100。
+        let client = CommentClient {
+            pages: vec![30, 30, 30, 10, 30, 30],
+            calls: Default::default(),
+        };
+        let target = CommentTarget {
+            oid: "123".into(),
+            kind: 1,
+        };
+        let page = fetch_comment_batch(&client, "", &target, 0, 100).unwrap();
+        assert_eq!(page.items.len(), 100, "去重后不够 100 条要自动补页");
+        assert_eq!(
+            *client.calls.borrow(),
+            vec![0, 1, 2, 3, 4],
+            "必须按游标逐页翻、并能补页"
+        );
+        assert!(!page.is_end, "服务端没说到底，就不能标成到底");
+        assert_eq!(page.next, 5, "游标要停在服务端给的下一页");
+        assert_eq!(page.total, 500);
+        // 第 2 页重复了上一页末条：不能出现重复 rpid。
+        let mut ids: Vec<i64> = page.items.iter().map(|c| c.rpid).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "跨页重复评论必须去重");
+    }
+
+    #[test]
+    fn comment_batch_stops_when_server_says_end() {
+        let client = CommentClient {
+            pages: vec![12],
+            calls: Default::default(),
+        };
+        let target = CommentTarget {
+            oid: "123".into(),
+            kind: 1,
+        };
+        let page = fetch_comment_batch(&client, "", &target, 0, 100).unwrap();
+        assert_eq!(page.items.len(), 12);
+        assert_eq!(*client.calls.borrow(), vec![0], "is_end 之后不能再发请求");
+        assert!(page.is_end);
     }
 
     #[test]
