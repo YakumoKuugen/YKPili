@@ -119,7 +119,11 @@ pub fn asset_url(url: &str, width: u32) -> String {
     if url.is_empty() {
         return String::new();
     }
+    // 协议相对地址（`//i0.hdslb.com/...`）很常见：不补 scheme 的话
+    // `img()` 拿到的不是绝对 URL，图会加载不出来。
     let mut out = if let Some(rest) = url.strip_prefix("http://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = url.strip_prefix("//") {
         format!("https://{rest}")
     } else {
         url.to_string()
@@ -512,6 +516,8 @@ fn normalize_image_host(url: &str, width: u32) -> String {
         let url = url.trim();
         if let Some(rest) = url.strip_prefix("http://") {
             format!("https://{rest}")
+        } else if let Some(rest) = url.strip_prefix("//") {
+            format!("https://{rest}")
         } else {
             url.to_string()
         }
@@ -536,6 +542,8 @@ pub struct DynamicComment {
     pub text: String,
     pub time: String,
     pub like: u64,
+    /// 评论附图（最多几张由接口决定，视图侧一般只展示前 3 张）。
+    pub pictures: Vec<DynamicImage>,
 }
 
 impl DynamicComment {
@@ -567,6 +575,19 @@ impl DynamicComment {
             text: format::html_decode(raw.content.message.trim()),
             time,
             like: raw.like,
+            pictures: raw
+                .content
+                .pictures
+                .iter()
+                .filter(|picture| !picture.img_src.trim().is_empty())
+                .map(|picture| DynamicImage {
+                    // 缩略图 / 查看器都按宽度取图，统一走 asset_url（会补 https、
+                    // 并对 hdslb 域名加 `@Nw.webp`）。
+                    url: normalize_image_host(&picture.img_src, 0),
+                    width: picture.img_width.min(u32::MAX as u64) as u32,
+                    height: picture.img_height.min(u32::MAX as u64) as u32,
+                })
+                .collect(),
         }
     }
 }
@@ -763,6 +784,39 @@ mod tests {
         .unwrap();
         let comment = DynamicComment::from_raw(&parsed.data.unwrap().replies[0]);
         assert!(comment.face.ends_with("old.jpg@64w.webp"));
+    }
+
+    #[test]
+    fn comment_pictures_are_parsed_and_normalized() {
+        // `pictures` 是 `/x/v2/reply/main` 里评论附图的位置；`img_src` 常见是
+        // 协议相对地址（`//i0.hdslb.com/...`），必须补成 https 才能加载。
+        let parsed: ReplyResponse = serde_json::from_str(
+            r#"{"code":0,"data":{"replies":[{
+                "rpid":42,"like":3,"ctime":1700000000,
+                "member":{"uname":"A"},
+                "content":{"message":"看图",
+                    "pictures":[
+                        {"img_src":"//i0.hdslb.com/bfs/a.jpg","img_width":"1200","img_height":"800"}
+                    ]}
+            }]}}"#,
+        )
+        .unwrap();
+        let comment = DynamicComment::from_raw(&parsed.data.unwrap().replies[0]);
+        assert_eq!(comment.pictures.len(), 1);
+        assert!(
+            comment.pictures[0].url.starts_with("https://i0.hdslb.com/"),
+            "url={}",
+            comment.pictures[0].url
+        );
+        assert_eq!(comment.pictures[0].width, 1200);
+        assert_eq!(comment.pictures[0].height, 800);
+        // 空地址的图片条目要丢掉，别在 UI 上留一个空框。
+        assert!(DynamicComment::from_raw(&serde_json::from_value::<ReplyRaw>(
+            serde_json::json!({"content":{"pictures":[{"img_src":""}]}})
+        )
+        .unwrap())
+        .pictures
+        .is_empty());
     }
 
     #[test]

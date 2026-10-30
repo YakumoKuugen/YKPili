@@ -52,6 +52,18 @@ fn comments(count: usize) -> Vec<DynamicComment> {
                 text,
                 time: format!("{} 天前", i % 30 + 1),
                 like: (i as u64) % 900,
+                // 每 7 条带 2 张图，顺便验收缩略图条对行高的影响。
+                pictures: if i % 7 == 3 {
+                    (0..2)
+                        .map(|k| yk_core::dynamic::DynamicImage {
+                            url: format!("https://example.invalid/{i}-{k}.jpg"),
+                            width: 800,
+                            height: 600,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
             }
         })
         .collect()

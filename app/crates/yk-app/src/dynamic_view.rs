@@ -57,6 +57,8 @@ pub struct DynamicDetailView {
     closing: bool,
     closing_generation: u64,
     close_handler: Option<Box<dyn Fn(&mut App, bool)>>,
+    /// 「点大图放大」回调：把整组图片与当前序号交给宿主（AppRoot 的查看器）。
+    image_open_handler: Option<Box<dyn Fn(&mut App, &mut Window, Vec<String>, usize)>>,
     focus_handle: FocusHandle,
     needs_focus: bool,
     /// 图片复制请求进行中（按钮显示「复制中」）。
@@ -91,6 +93,7 @@ impl DynamicDetailView {
             closing: false,
             closing_generation: 0,
             close_handler: None,
+            image_open_handler: None,
             focus_handle: cx.focus_handle().tab_stop(true),
             needs_focus: true,
             copying_image: false,
@@ -99,6 +102,14 @@ impl DynamicDetailView {
         };
         view.spawn_comments(cx);
         view
+    }
+
+    /// 设置「点大图放大」回调。
+    pub fn set_image_open_handler(
+        &mut self,
+        handler: impl Fn(&mut App, &mut Window, Vec<String>, usize) + 'static,
+    ) {
+        self.image_open_handler = Some(Box::new(handler));
     }
 
     pub fn set_close_handler(&mut self, handler: impl Fn(&mut App, bool) + 'static) {
@@ -418,15 +429,30 @@ impl DynamicDetailView {
             .bg(rgb(0x101216));
 
         if len > 0 {
+            // 点大图 → 打开查看器（滚轮缩放 / 拖动 / 左右切换）。
+            let urls: Vec<String> = images.iter().map(|image| image.detail_url()).collect();
             column = column.child(
-                img(ImageSource::from(
-                    images[current].fit_url(media_w, scale_factor),
-                ))
-                .absolute()
-                .inset_0()
-                .w_full()
-                .h_full()
-                .object_fit(ObjectFit::Contain),
+                div()
+                    .id("dynamic-detail-image")
+                    .absolute()
+                    .inset_0()
+                    .cursor_pointer()
+                    .child(
+                        img(ImageSource::from(
+                            images[current].fit_url(media_w, scale_factor),
+                        ))
+                        .absolute()
+                        .inset_0()
+                        .w_full()
+                        .h_full()
+                        .object_fit(ObjectFit::Contain),
+                    )
+                    .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                        if let Some(handler) = view.image_open_handler.as_ref() {
+                            handler(cx, window, urls.clone(), current);
+                        }
+                        cx.stop_propagation();
+                    })),
             );
             if len > 1 {
                 let prev_len = len;

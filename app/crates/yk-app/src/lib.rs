@@ -35,6 +35,7 @@ pub mod dynamic_feed;
 pub mod dynamic_view;
 pub mod favorites_view;
 pub mod history_view;
+pub mod image_viewer;
 pub mod http;
 pub mod login_view;
 pub mod messages_view;
@@ -136,6 +137,9 @@ pub struct AppRoot {
     visibility_observed: bool,
     /// 窗口可见性订阅句柄。
     visibility_observer: Option<gpui::Subscription>,
+    /// 图片查看器（点击关注页图片打开；支持滚轮缩放 / 拖动 / 多图切换）。
+    /// 首次打开时才创建，避免没点过图片也挂一个空视图。
+    image_viewer: Option<gpui::Entity<crate::image_viewer::ImageViewer>>,
     last_scroll_offset_y: f32,
     /// 最近一次真实滚动的时间。
     ///
@@ -1746,6 +1750,29 @@ impl AppRoot {
         }
     }
 
+    /// 打开图片查看器。
+    ///
+    /// `urls` 是这一组图片（按展示顺序），`index` 是点中的那张。
+    /// 查看器自己处理缩放 / 平移 / 左右切换 / 还原，宿主只需在元素树末尾挂它。
+    pub(crate) fn open_image_viewer(
+        &mut self,
+        urls: Vec<String>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let viewer = match self.image_viewer.as_ref() {
+            Some(viewer) => viewer.clone(),
+            None => {
+                let viewer = cx.new(crate::image_viewer::ImageViewer::new);
+                self.image_viewer = Some(viewer.clone());
+                viewer
+            }
+        };
+        viewer.update(cx, |viewer, cx| viewer.open(urls, index, window, cx));
+        cx.notify();
+    }
+
     /// 8ms 一步，把 offset 以指数缓动推向目标；到点后停。
     fn start_smooth_scroll(&mut self, cx: &mut Context<Self>) {
         self.smooth_scroll_animating = true;
@@ -1824,6 +1851,7 @@ impl AppRoot {
             visibility: player::VisibilityGate::default(),
             visibility_observed: false,
             visibility_observer: None,
+            image_viewer: None,
             last_scroll_offset_y: 0.0,
             last_scroll_at: None,
             scroll_render_pending: false,
@@ -2301,6 +2329,8 @@ impl Render for AppRoot {
             .children(self.account.clone())
             // 设置浮层再压一层；从个人面板进入。
             .children(self.settings.clone())
+            // 图片查看器压在页面 / 播放器之上，但仍在退出确认之下。
+            .children(self.image_viewer.clone())
             // ⌘Q 退出确认压在全部内容之上。
             .children(self.quit_hint(t))
     }

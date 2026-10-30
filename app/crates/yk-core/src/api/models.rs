@@ -658,6 +658,21 @@ pub struct ReplyMemberRaw {
 #[serde(default)]
 pub struct ReplyContentRaw {
     pub message: String,
+    /// 评论里附的图片（`/x/v2/reply/main` 放在 `content.pictures`）。
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub pictures: Vec<ReplyPictureRaw>,
+}
+
+/// 评论图片。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ReplyPictureRaw {
+    /// 原图地址（通常是 `//i0.hdslb.com/...`）。
+    pub img_src: String,
+    #[serde(deserialize_with = "de_u64_or_string")]
+    pub img_width: u64,
+    #[serde(deserialize_with = "de_u64_or_string")]
+    pub img_height: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

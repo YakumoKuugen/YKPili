@@ -189,6 +189,14 @@ const COMMENT_ROW_CHROME: f32 = 50.0;
 const COMMENT_TEXT_LINE_HEIGHT: f32 = 20.0;
 /// 正文最多 3 行（与 `comment_item` 的 `line_clamp` 对齐）。
 const COMMENT_MAX_LINES: usize = 3;
+/// 评论附图条：缩略图 72 高 + 与正文之间的 6px 间距 + 1 个 2px 列间距。
+///
+/// 高度写死，才能让窗口化渲染的前缀和保持精确；缩略图按 72×72 裁切。
+const COMMENT_IMAGE_ROW_HEIGHT: f32 = 80.0;
+/// 一条评论最多展示几张缩略图（其余在查看器里左右翻）。
+const COMMENT_MAX_THUMBS: usize = 4;
+/// 缩略图边长。
+const COMMENT_THUMB_SIZE: f32 = 72.0;
 /// 虚拟滚动时在可见区上下各多画这么多像素。
 ///
 /// 评论行的行高由我们自己算、并且渲染时强制同高，所以偏移是精确的；
@@ -237,7 +245,13 @@ impl CommentRows {
         }
         for comment in &items[self.heights.len()..] {
             let lines = lines_of(&comment.text).clamp(1, COMMENT_MAX_LINES);
-            let height = COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32;
+            let image_extra = if comment.pictures.is_empty() {
+                0.0
+            } else {
+                COMMENT_IMAGE_ROW_HEIGHT
+            };
+            let height =
+                COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32 + image_extra;
             let top = *self.offsets.last().unwrap_or(&0.0);
             self.heights.push(height);
             self.offsets.push(top + height);
@@ -544,6 +558,8 @@ pub struct PlayerView {
     visibility_observer: Option<gpui::Subscription>,
     /// 窗口可见性状态机（失焦与不可见要分开，见 [`VisibilityGate`]）。
     visibility: VisibilityGate,
+    /// 评论图片查看器（独立实体，挂在播放器最上层）。
+    image_viewer: gpui::Entity<crate::image_viewer::ImageViewer>,
 }
 
 /// 进程内 `PlayerView` 实例数。
@@ -684,6 +700,7 @@ impl PlayerView {
             visibility_observed: false,
             visibility_observer: None,
             visibility: VisibilityGate::default(),
+            image_viewer: cx.new(crate::image_viewer::ImageViewer::new),
             state: {
                 let mut st = PlayerState::new();
                 st.duration_secs = 754.0;
@@ -3502,6 +3519,8 @@ impl Render for PlayerView {
             .child(window)
             // 第一次 Esc 提示放在浮窗之外：顶栏右侧。
             .children(self.escape_hint_overlay(&t, cx))
+            // 评论图片查看器：压在播放器全部内容之上（含侧栏）。
+            .child(self.image_viewer.clone())
     }
 }
 
@@ -4955,7 +4974,13 @@ impl PlayerView {
                     {
                         let top = self.comment_rows.offsets[index];
                         let height = self.comment_rows.heights[index];
-                        let lines = ((height - COMMENT_ROW_CHROME) / COMMENT_TEXT_LINE_HEIGHT)
+                        let image_extra = if self.comment_items[index].pictures.is_empty() {
+                            0.0
+                        } else {
+                            COMMENT_IMAGE_ROW_HEIGHT
+                        };
+                        let lines = ((height - COMMENT_ROW_CHROME - image_extra)
+                            / COMMENT_TEXT_LINE_HEIGHT)
                             .round()
                             .max(1.0) as usize;
                         stack = stack.child(
@@ -4965,7 +4990,13 @@ impl PlayerView {
                                 .right_0()
                                 .top(px(top))
                                 .h(px(height))
-                                .child(comment_item(t, &self.comment_items[index], lines)),
+                                .child(comment_item(
+                                    t,
+                                    &self.comment_items[index],
+                                    lines,
+                                    self.image_viewer.clone(),
+                                    cx,
+                                )),
                         );
                         index += 1;
                     }
@@ -5432,12 +5463,24 @@ fn comment_wrapped_lines(window: &mut Window, text: &str, width: f32) -> usize {
     }
 }
 
-fn comment_item(t: &YkTheme, comment: &DynamicComment, lines: usize) -> impl IntoElement {
+fn comment_item(
+    t: &YkTheme,
+    comment: &DynamicComment,
+    lines: usize,
+    viewer: gpui::Entity<crate::image_viewer::ImageViewer>,
+    cx: &mut Context<PlayerView>,
+) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
     // 高度必须与 `CommentRows` 算出来的完全一致（窗口化渲染按它绝对定位）：
-    // padding 16 + 作者行 16 + 两个 2px 间距 + 正文 20×行数 + 时间行 14。
-    let height = COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32;
+    // padding 16 + 作者行 16 + 两个 2px 间距 + 正文 20×行数 + 时间行 14，
+    // 有附图时再加一条缩略图条（`COMMENT_IMAGE_ROW_HEIGHT`）。
+    let image_extra = if comment.pictures.is_empty() {
+        0.0
+    } else {
+        COMMENT_IMAGE_ROW_HEIGHT
+    };
+    let height = COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32 + image_extra;
     div()
         .w_full()
         .flex()
@@ -5489,14 +5532,74 @@ fn comment_item(t: &YkTheme, comment: &DynamicComment, lines: usize) -> impl Int
                         .child(comment.author.clone()),
                 )
                 .child(
+                    // 评论正文用 `SelectableText`：拖动可以按字符选范围，Cmd/Ctrl+C
+                    // 复制选中部分（`gpui-base` 的窗口级选区 + Root 的复制动作）。
+                    // 高度仍然由 `CommentRows` 算好的行数决定，外层裁切保证
+                    // 窗口化渲染的绝对定位不被撑开。
                     div()
                         .h(px(COMMENT_TEXT_LINE_HEIGHT * lines as f32))
-                        .text_size(px(FONT_SIZE_CONTROL))
-                        .text_color(s.text_primary)
-                        .line_height(px(COMMENT_TEXT_LINE_HEIGHT))
-                        .line_clamp(COMMENT_MAX_LINES)
-                        .child(comment.text.clone()),
+                        .overflow_hidden()
+                        .child(
+                            gpui::base::SelectableText::new(
+                                ("comment-body", comment.rpid.max(0) as usize),
+                                comment.text.clone(),
+                            )
+                            .text_style(gpui::TextStyleRefinement {
+                                font_size: Some(px(FONT_SIZE_CONTROL).into()),
+                                line_height: Some(px(COMMENT_TEXT_LINE_HEIGHT).into()),
+                                color: Some(s.text_primary),
+                                line_clamp: Some(COMMENT_MAX_LINES),
+                                ..Default::default()
+                            }),
+                        ),
                 )
+                // 评论附图：最多 4 张 72×72 缩略图，点开进查看器（可缩放 / 左右翻）。
+                .when(!comment.pictures.is_empty(), |el| {
+                    let urls: Vec<String> = comment
+                        .pictures
+                        .iter()
+                        .map(|picture| picture.detail_url())
+                        .collect();
+                    let mut strip = div()
+                        .mt(px(6.))
+                        .h(px(COMMENT_THUMB_SIZE))
+                        .flex()
+                        .gap(px(6.))
+                        .overflow_hidden();
+                    for (i, picture) in comment
+                        .pictures
+                        .iter()
+                        .take(COMMENT_MAX_THUMBS)
+                        .enumerate()
+                    {
+                        let viewer = viewer.clone();
+                        let urls = urls.clone();
+                        strip = strip.child(
+                            div()
+                                .id(("comment-image", (comment.rpid.max(0) as usize) << 4 | i))
+                                .w(px(COMMENT_THUMB_SIZE))
+                                .h(px(COMMENT_THUMB_SIZE))
+                                .flex_shrink_0()
+                                .rounded(px(RADIUS_MD))
+                                .overflow_hidden()
+                                .bg(s.fill_3)
+                                .cursor_pointer()
+                                .child(
+                                    img(ImageSource::from(picture.thumb_url(144)))
+                                        .w(px(COMMENT_THUMB_SIZE))
+                                        .h(px(COMMENT_THUMB_SIZE))
+                                        .object_fit(ObjectFit::Cover),
+                                )
+                                .on_click(cx.listener(move |_view, _: &ClickEvent, window, cx| {
+                                    let _ = viewer.update(cx, |viewer, cx| {
+                                        viewer.open(urls.clone(), i, window, cx);
+                                    });
+                                    cx.stop_propagation();
+                                })),
+                        );
+                    }
+                    el.child(strip)
+                })
                 .child(
                     div()
                         .h(px(14.))

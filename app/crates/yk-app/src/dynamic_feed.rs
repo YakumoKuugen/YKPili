@@ -572,6 +572,39 @@ fn card(
     let cover_bounds_for_click = cover_bounds.clone();
     let root_for_click = root_bounds.clone();
 
+    // 「打开详情 / 视频」的唯一实现：整卡点击与文本区抬起兜底共用。
+    let open_detail = {
+        let item = item_for_click.clone();
+        let card_bounds = card_bounds_for_click.clone();
+        let cover_bounds = cover_bounds_for_click.clone();
+        let root = root_for_click.clone();
+        move |this: &mut AppRoot, window: &mut Window, cx: &mut Context<AppRoot>| {
+            if this.playing.is_some()
+                || this.dynamic_detail.is_some()
+                || this.close_player_requested
+            {
+                return;
+            }
+            let origin = CardOrigin {
+                bounds: card_bounds.get().unwrap_or_else(|| Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(width), px(height)),
+                }),
+                cover_bounds: cover_bounds.get(),
+                root_size: root
+                    .get()
+                    .map(|b| b.size)
+                    .unwrap_or_else(|| size(px(1280.), px(820.))),
+            };
+            if item.kind == DynamicKind::Video {
+                this.open_dynamic_video(&item, Some(origin), cx);
+            } else {
+                this.open_dynamic_detail(&item, Some(origin), cx);
+            }
+            window.refresh();
+        }
+    };
+
     let mut body = div().flex().flex_col().w(px(inner)).child(header(
         t,
         item,
@@ -582,17 +615,28 @@ fn card(
 
     let card_title = card_text(&item.title);
     let card_body_text = card_text(&item.text);
+    // 先记下「有没有文字」：下面两个 `SelectableText` 会把 String move 走。
+    let has_text = !card_title.is_empty() || !card_body_text.is_empty();
+
+    // 文字区单独包一层：选区层会在按下时吞掉事件，所以「点文字开详情」
+    // 由这一层的 mouse-up 兜底（有选中内容就什么都不做）。
+    // 只包文字，别把底栏按钮包进来 —— 否则点赞 / 转发也会开详情。
+    let mut text_area = div().flex().flex_col().w_full();
 
     if !card_title.is_empty() {
-        body = body.child(
-            div()
-                .mt(px(6.))
-                .text_size(px(FONT_SIZE_BODY))
-                .line_height(px(TITLE_LINE_HEIGHT))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(s.text_primary)
-                .line_clamp(2)
-                .child(card_title),
+        // 可选中：拖动按字符选范围，Cmd/Ctrl+C 复制（gpui-base 窗口级选区）。
+        text_area = text_area.child(
+            div().mt(px(6.)).child(
+                gpui::base::SelectableText::new(("dynamic-title", idx), card_title)
+                    .text_style(gpui::TextStyleRefinement {
+                        font_size: Some(px(FONT_SIZE_BODY).into()),
+                        line_height: Some(px(TITLE_LINE_HEIGHT).into()),
+                        font_weight: Some(FontWeight::SEMIBOLD),
+                        color: Some(s.text_primary),
+                        line_clamp: Some(2),
+                        ..Default::default()
+                    }),
+            ),
         );
     }
 
@@ -602,15 +646,36 @@ fn card(
         } else {
             4
         };
-        body = body.child(
-            div()
-                .mt(px(6.))
-                .text_size(px(FONT_SIZE_CONTROL))
-                .line_height(px(BODY_LINE_HEIGHT))
-                .text_color(s.text_secondary)
-                .line_clamp(max_lines)
-                .child(card_body_text),
+        text_area = text_area.child(
+            div().mt(px(6.)).child(
+                gpui::base::SelectableText::new(("dynamic-body", idx), card_body_text)
+                    .text_style(gpui::TextStyleRefinement {
+                        font_size: Some(px(FONT_SIZE_CONTROL).into()),
+                        line_height: Some(px(BODY_LINE_HEIGHT).into()),
+                        color: Some(s.text_secondary),
+                        line_clamp: Some(max_lines),
+                        ..Default::default()
+                    }),
+            ),
         );
+    }
+
+    if has_text {
+        text_area = text_area.on_mouse_up(
+            MouseButton::Left,
+            cx.listener({
+                let open = open_detail.clone();
+                move |this, _: &MouseUpEvent, window, cx| {
+                    if gpui::base::TextSelection::selected_text(window, cx)
+                        .trim()
+                        .is_empty()
+                    {
+                        open(this, window, cx);
+                    }
+                }
+            }),
+        );
+        body = body.child(text_area);
     }
 
     match item.kind {
@@ -637,6 +702,8 @@ fn card(
                     scale_factor,
                     load_images,
                     active_images.clone(),
+                    idx,
+                    Some(cx),
                 ));
             }
         }
@@ -738,30 +805,9 @@ fn card(
             .inset_0(),
         )
         .child(body)
-        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-            if this.playing.is_some()
-                || this.dynamic_detail.is_some()
-                || this.close_player_requested
-            {
-                return;
-            }
-            let origin = CardOrigin {
-                bounds: card_bounds_for_click.get().unwrap_or_else(|| Bounds {
-                    origin: point(px(0.), px(0.)),
-                    size: size(px(width), px(height)),
-                }),
-                cover_bounds: cover_bounds_for_click.get(),
-                root_size: root_for_click
-                    .get()
-                    .map(|b| b.size)
-                    .unwrap_or_else(|| size(px(1280.), px(820.))),
-            };
-            if item_for_click.kind == DynamicKind::Video {
-                this.open_dynamic_video(&item_for_click, Some(origin), cx);
-            } else {
-                this.open_dynamic_detail(&item_for_click, Some(origin), cx);
-            }
-            window.refresh();
+        .on_click(cx.listener({
+            let open = open_detail.clone();
+            move |this, _: &ClickEvent, window, cx| open(this, window, cx)
         }))
 }
 
@@ -841,6 +887,8 @@ pub(crate) fn card_ghost(
                     scale_factor,
                     true,
                     active.clone(),
+                    item.index,
+                    None,
                 ));
             }
         }
@@ -1120,7 +1168,11 @@ fn image_grid(
     scale_factor: f32,
     load_image: bool,
     active_images: Rc<RefCell<ImageResidency>>,
+    idx: usize,
+    mut cx: Option<&mut Context<AppRoot>>,
 ) -> impl IntoElement {
+    // 查看器要用整组原图（不是卡面缩略图），点哪张就从哪张开始。
+    let viewer_urls: Vec<String> = images.iter().map(|image| image.detail_url()).collect();
     let s = &t.surfaces;
     let (cols, cell, total_h) = image_metrics(inner, images);
     let shown = images.len().min(9);
@@ -1143,7 +1195,9 @@ fn image_grid(
         } else {
             String::new()
         };
+        let tile_id = ("dynamic-image", (idx << 8) | i);
         let mut tile = div()
+            .id(tile_id)
             .relative()
             .w(px(w))
             .h(px(h))
@@ -1176,6 +1230,15 @@ fn image_grid(
                     .text_color(rgb(0xFFFFFF))
                     .child(format!("+{hidden}")),
             );
+        }
+        // 点击放大：打开图片查看器并定位到这一张（ghost 卡片没有交互，不挂）。
+        if let Some(cx) = cx.as_deref_mut() {
+            let urls = viewer_urls.clone();
+            tile = tile
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                    this.open_image_viewer(urls.clone(), i, window, cx);
+                }));
         }
         grid = grid.child(tile);
     }
@@ -1428,6 +1491,15 @@ impl AppRoot {
                 let _ = app.update(cx, |root, cx| {
                     root.dynamic_detail_close_requested = true;
                     cx.notify();
+                });
+            });
+        });
+        // 点详情页大图 → AppRoot 的查看器（缩放 / 拖动 / 左右切换）。
+        let app = cx.entity().downgrade();
+        let _ = detail.update(cx, |view, _| {
+            view.set_image_open_handler(move |cx, window, urls, index| {
+                let _ = app.update(cx, |root, cx| {
+                    root.open_image_viewer(urls, index, window, cx);
                 });
             });
         });
