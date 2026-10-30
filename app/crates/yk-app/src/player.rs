@@ -18,7 +18,8 @@
 //! 右侧是侧栏**常驻占用**的区域（收起 200 / 展开 400，贴窗口右边界、top:0 → bottom:0 通高），
 //! 它不属于播放层。播放层（红框）宽度 = 窗口宽 − 200，视频在该红框内居中。
 //! 控制栏宽度 = 播放层宽度（窗口 − 200），右端贴侧栏左边缘。
-//! 播放层右缘另有一条 88px 透明 hover 热区（覆盖在视频上、控制栏上方），用于唤出侧栏。
+//! 侧栏收起时，鼠标进入侧栏（200px）即展开；视频右缘不铺 hover 热区，
+//! 避免在画面上移动鼠标时误触发展开。展开 / 收起仍可点骑边界按钮。
 //! 播放器底边在 Dock 上方 20px（距窗口底部 92），宽度/高度随窗口缩放。
 //!
 //! **控制栏自动隐藏**：起播、窗口失焦、有焦点但鼠标 5s 不动时隐藏；
@@ -115,10 +116,6 @@ const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
 const PANEL_BACK_TO_TOP_THRESHOLD: f32 = 24.0;
 /// 滚动结束后这段时间内不响应面板收起，避免滚轮末尾的 hover 抖动。
 const PANEL_SCROLL_HOLD_MS: u64 = 400;
-/// 播放层右缘的 hover 热区宽度（覆盖在视频右侧、控制栏上方）。
-/// 侧栏常驻右侧 200；播放层/控制栏宽度都是「窗口 − 200」，不再额外缩 88。
-/// 88 只是控制栏高度 / 这条热区的宽度，不是控制栏与侧栏之间的空隙。
-const PANEL_HOVER_WIDTH: f32 = 88.0;
 
 /// 播放器下边界距窗口底部的距离。
 ///
@@ -325,12 +322,17 @@ pub struct PlayerView {
     panel_collapse_generation: u64,
     /// 面板宽度动画代际：每次展开 / 收起换一个 id，200ms EaseStandard 重新起跑。
     panel_generation: u64,
-    /// 面板刚收起时的短暂抑制：鼠标还停在面板左缘/热区时不立刻重新弹出。
+    /// 面板刚收起时的短暂抑制：鼠标还停在面板左缘时不立刻重新弹出。
     panel_hover_grace_until: Option<std::time::Instant>,
+    /// 收起那一刻的光标位置：抑制期内光标**没动**才不弹回；
+    /// 用户一动鼠标就立刻响应，不让面板显得"不听话"。
+    panel_hover_grace_pos: Option<Point<Pixels>>,
+    /// 排收起定时器那一刻的光标位置（收起时再取给 grace 用）。
+    panel_collapse_cursor: Option<Point<Pixels>>,
     /// 最近一次在面板内滚动的时间。
     ///
     /// 滚动期间 hover 会因每帧重绘而偶发抖动；用它做一小段保持窗口，
-    /// 避免「滚动 → hover 假 false → 收起 → 指针落热区 → 再展开」的高频抖动。
+    /// 避免「滚动 → hover 假 false → 收起 → 指针落回面板 → 再展开」的高频抖动。
     panel_last_scroll: Option<std::time::Instant>,
     /// 已经排了一个 220ms 收起定时器；避免 watchdog 每 100ms 重新排一次。
     panel_collapse_pending: bool,
@@ -408,7 +410,7 @@ impl PlayerView {
             current: None,
             #[cfg(target_os = "macos")]
             loop_started: false,
-            // 沉浸优先：播放浮窗默认收起信息面板（右侧 200 hover 热区唤出）。
+            // 沉浸优先：播放浮窗默认收起信息面板（鼠标进入右侧 200 面板时展开）。
             expanded: false,
             tab: 0,
             danmaku: Vec::new(),
@@ -448,6 +450,8 @@ impl PlayerView {
             seek_settle_until: None,
             panel_generation: 0,
             panel_hover_grace_until: None,
+            panel_hover_grace_pos: None,
+            panel_collapse_cursor: None,
             panel_last_scroll: None,
             panel_collapse_pending: false,
             hover_watchdog_started: false,
@@ -851,6 +855,7 @@ impl PlayerView {
             self.panel_collapse_pending = false;
             self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
             self.panel_hover_grace_until = None;
+            self.panel_hover_grace_pos = None;
             if !self.expanded {
                 self.expanded = true;
                 self.panel_generation = self.panel_generation.wrapping_add(1);
@@ -868,20 +873,25 @@ impl PlayerView {
         }
         // 播放中每帧重绘都会重算 hover；指针实际还在面板里时，
         // 这次 false 是布局闪动，不是用户移出，直接忽略。
-        if self.pointer_in_panel_zone(window.mouse_position(), window) {
+        // 用**当前**光标位置判断：`window.mouse_position()` 停在最后一次
+        // 事件上，鼠标移出窗口后它还是旧位置，会把「真的移出去了」误判成
+        // 「还在面板里」—— 面板就再也不会收起了。
+        if self.pointer_in_panel_zone(cursor_position(window, cx), window) {
             return;
         }
-        self.arm_panel_collapse(cx);
+        self.arm_panel_collapse(window, cx);
     }
 
     /// 排一个 220ms 的收起定时器。调用方必须已经确认指针在 hover 区外。
     ///
     /// 不在这里再查 `window.mouse_position()`：watchdog 用的是系统级光标，
     /// 而 `Window::mouse_position()` 在快速移出窗口时可能仍停留在旧位置。
-    fn arm_panel_collapse(&mut self, cx: &mut Context<Self>) {
+    fn arm_panel_collapse(&mut self, window: &Window, cx: &mut Context<Self>) {
         if !self.expanded {
             return;
         }
+        // 记下这一刻的光标位置：收起后用它判断「光标有没有动过」。
+        self.panel_collapse_cursor = Some(cursor_position(window, cx));
         // watchdog 每 100ms 也会调到这里：已经有定时器在跑就不要再排一个，
         // 否则一直从现在起算 220ms，永远到不了点。
         if self.panel_collapse_pending {
@@ -921,9 +931,10 @@ impl PlayerView {
         self.expanded = false;
         self.panel_collapse_pending = false;
         self.panel_generation = self.panel_generation.wrapping_add(1);
-        // 鼠标可能还停在面板左缘/热区：400ms 内不响应，避免反复弹出。
+        // 鼠标可能还停在面板左缘：400ms 内不响应，避免反复弹出。
         self.panel_hover_grace_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
+        self.panel_hover_grace_pos = self.panel_collapse_cursor.take();
         cx.notify();
     }
 
@@ -994,17 +1005,27 @@ impl PlayerView {
     /// 所以展开状态以这条路径为准，hover 回调只做兜底。
     fn update_panel_hover_from_pointer(
         &mut self,
-        position: Point<Pixels>,
+        _event_position: Point<Pixels>,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        // 判定一律用**当前光标位置**，不用事件坐标：事件坐标是那一刻的
+        // 位置，而面板展开 / 收起的真正依据是「光标现在在哪」。
+        // 两套坐标混用时，面板会在「光标已移开」和「事件还在面板里」
+        // 之间反复横跳 —— 表现就是侧栏反复弹出 / 收起。
+        let position = cursor_position(window, cx);
         if self.pointer_in_panel_zone(position, window) {
-            // 刚收起 / 刚点掉面板时给 400ms 冷却，鼠标在按钮附近微动不会立刻弹回。
-            if self
-                .panel_hover_grace_until
-                .is_some_and(|until| until > std::time::Instant::now())
-            {
-                return;
+            // 刚收起 / 刚点掉面板时给一小段冷却：光标**没动**就不弹回，
+            // 动了就立刻响应（否则用户一动鼠标面板就弹回来，很烦）。
+            if let Some(until) = self.panel_hover_grace_until {
+                if until > std::time::Instant::now() {
+                    let still = self.panel_hover_grace_pos.is_some_and(|at| {
+                        (at.x - position.x).abs() < px(2.) && (at.y - position.y).abs() < px(2.)
+                    });
+                    if still {
+                        return;
+                    }
+                }
             }
             self.set_panel_hover(true, window, cx);
         } else {
@@ -1509,8 +1530,10 @@ impl PlayerView {
         (0.0, 0.0)
     }
 
-    /// 指针是否还在右侧面板的交互区（面板 + 收起态左缘的 88px 唤出热区）。
+    /// 指针是否还在右侧面板的交互区（面板 + 展开态骑边界按钮的 16px 外沿）。
     ///
+    /// 收起态只认 200px 面板本身：视频右缘不再铺 88px 唤出热区，
+    /// 鼠标在画面上移动不会把侧栏弹出来。
     /// GPUI 的 `on_hover(false)` 会在布局变化时重算；播放中每帧都有重绘，
     /// 面板内滚动 / 控制条显隐都可能让它在指针没动时闪一次 false。
     /// 收起前用真实鼠标坐标兜底，避免面板被这种假移出事件收掉。
@@ -1520,11 +1543,11 @@ impl PlayerView {
         // 右边界以内缩后的面板右缘为准：移出到窗口最右 16px 边距
         // 也算离开 hover 区，延迟 220ms 后收起面板。
         let right = viewport.width - px(SPACE_4);
-        // 展开态给骑边界按钮留 16px；收起态正好是 200px 面板 + 88px 热区。
+        // 展开态给骑边界按钮留 16px；收起态就是面板本身。
         let width = if self.expanded {
             INFO_PANEL_EXPANDED + 16.0
         } else {
-            INFO_PANEL_COLLAPSED + PANEL_HOVER_WIDTH
+            INFO_PANEL_COLLAPSED
         };
         let top = px(TOP_BAR_HEIGHT + SPACE_4);
         let bottom = viewport.height - px(PLAYER_BOTTOM_INSET);
@@ -1770,12 +1793,29 @@ fn current_session_cookie() -> String {
 /// 窗口时可能收不到新事件，读到的还是旧位置。CoreGraphics 这里直接问系统
 /// 当前光标在哪，即使窗口不是 key/指针已在窗口外也能拿到。
 #[cfg(target_os = "macos")]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
+#[cfg(target_os = "macos")]
 fn system_mouse_position() -> Option<Point<Pixels>> {
-    #[repr(C)]
-    struct CGPoint {
-        x: f64,
-        y: f64,
-    }
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
@@ -1796,10 +1836,91 @@ fn system_mouse_position() -> Option<Point<Pixels>> {
     }
 }
 
+/// 窗口所在显示器在 CoreGraphics 全局坐标里的左上角。
+///
+/// **这是多屏修复的关键**：GPUI 的 `Window::bounds()` 在 macOS 上是
+/// 「相对当前屏幕」的坐标（窗口左上角减去屏幕左上角），而
+/// `CGEventGetLocation` 给的是**跨屏全局坐标**（主屏左上角为 0）。
+/// 窗口在主屏时两者恰好重合；拖到副屏后直接相减会把光标算到窗口外，
+/// 侧栏就永远判定不到，表现为「换屏后侧栏无法展开」。
+#[cfg(target_os = "macos")]
+fn window_display_origin(window: &Window, cx: &App) -> Option<Point<Pixels>> {
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGDisplayBounds(display: u32) -> CGRect;
+    }
+    let display = window.display(cx)?;
+    let raw: u64 = display.id().into();
+    let bounds = unsafe { CGDisplayBounds(raw as u32) };
+    Some(point(
+        px(bounds.origin.x as f32),
+        px(bounds.origin.y as f32),
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn window_display_origin(_window: &Window, _cx: &App) -> Option<Point<Pixels>> {
+    None
+}
+
 /// 非 macOS 没有 CoreGraphics 的全局光标查询；退回最后一次事件位置。
 #[cfg(not(target_os = "macos"))]
 fn system_mouse_position() -> Option<Point<Pixels>> {
     None
+}
+
+/// 测试钩子：把光标位置固定下来（`None` = 用真实光标）。
+///
+/// headless 测试里系统光标在别的窗口上，`cursor_position` 读到的
+/// 位置和测试模拟的鼠标完全对不上，判定会跑偏。
+static TEST_CURSOR: std::sync::Mutex<Option<(f32, f32)>> = std::sync::Mutex::new(None);
+
+/// 测试入口：固定光标位置；传 `None` 恢复真实光标。
+pub fn set_test_cursor(position: Option<Point<Pixels>>) {
+    let mut guard = TEST_CURSOR.lock().unwrap();
+    *guard = position.map(|p| (p.x.as_f32(), p.y.as_f32()));
+}
+
+/// 光标**当前**的位置，换算成窗口局部坐标。
+///
+/// 侧栏的展开 / 收起必须用这个，不能用 `Window::mouse_position()`：
+/// 后者只是「最后一次鼠标事件」的位置 —— 鼠标移出窗口后没有新事件，
+/// 它会一直停在旧位置。于是会出现「指针其实在窗口外，但判定说还在
+/// 面板里」：面板被反复弹出 / 收起（鼠标在面板左半区跑动时尤其明显）。
+///
+/// 三套坐标要对齐：
+/// - `CGEventGetLocation`：跨屏全局坐标（主屏左上角为 0）；
+/// - `window.display(cx)` + `CGDisplayBounds`：窗口所在屏幕的全局左上角；
+/// - `window.bounds().origin`：macOS 上**相对当前屏幕**的左上角。
+///
+/// 先减屏幕原点得到「屏幕内坐标」，再减窗口原点才是窗口局部坐标。
+/// 只减窗口原点只在主屏成立；窗口拖到副屏后侧栏会彻底判定不到。
+/// 三套全局坐标 → 窗口局部坐标。
+///
+/// `global` 是 CoreGraphics 的跨屏坐标；`display_origin` 是窗口所在屏幕的
+/// 左上角；`window_origin` 是 GPUI 给的「屏幕内」窗口左上角。
+fn cursor_local(
+    global: Point<Pixels>,
+    display_origin: Point<Pixels>,
+    window_origin: Point<Pixels>,
+) -> Point<Pixels> {
+    point(
+        global.x - display_origin.x - window_origin.x,
+        global.y - display_origin.y - window_origin.y,
+    )
+}
+
+fn cursor_position(window: &Window, cx: &App) -> Point<Pixels> {
+    if let Some((x, y)) = *TEST_CURSOR.lock().unwrap() {
+        return point(px(x), px(y));
+    }
+    system_mouse_position()
+        .map(|global| {
+            let display = window_display_origin(window, cx)
+                .unwrap_or_else(|| point(px(0.), px(0.)));
+            cursor_local(global, display, window.bounds().origin)
+        })
+        .unwrap_or_else(|| window.mouse_position())
 }
 
 /// 把一次历史上报快照丢到后台线程发送。
@@ -1848,12 +1969,7 @@ impl Render for PlayerView {
                     if !view.expanded {
                         return;
                     }
-                    let position = system_mouse_position()
-                        .map(|global| {
-                            let origin = window.bounds().origin;
-                            point(global.x - origin.x, global.y - origin.y)
-                        })
-                        .unwrap_or_else(|| window.mouse_position());
+                    let position = cursor_position(window, cx);
                     if view.pointer_in_panel_zone(position, window) {
                         // 已经回到 hover 区：取消可能排着的收起。
                         if view.panel_collapse_pending {
@@ -1867,7 +1983,7 @@ impl Render for PlayerView {
                     // 不受「滚动后 400ms 保持」影响，只保留 220ms 延迟。
                     // 直接 arm，避免再用可能过期的 window.mouse_position() 判断一次。
                     view.panel_last_scroll = None;
-                    view.arm_panel_collapse(cx);
+                    view.arm_panel_collapse(window, cx);
                 });
                 if alive.is_err() {
                     break;
@@ -2080,7 +2196,6 @@ impl Render for PlayerView {
             None
         };
         let mini_progress = (!self.controls_visible).then(|| self.mini_progress(&t, window, cx));
-        let panel_hover = (!self.expanded).then(|| self.panel_hover_zone(cx));
         // 弹幕只在「播放层」里跑：右侧面板那 200/400px 不穿弹幕（设计第 14 节）。
         let danmaku_width = playback_layer_width(window, self.panel_width());
         // 浮窗内部：绝对铺满窗口。窗口本身负责圆角/裁剪/阴影/遮挡。
@@ -2144,9 +2259,7 @@ impl Render for PlayerView {
             .child(self.center_play(&t, cx))
             // ② 控制栏黑框 + 左下角标：只在鼠标活动时挂树；隐藏时留一条 3px 进度线。
             .children(watch_badge)
-            // ③ 视频右缘与面板左缘之间让出的 88px 是唤出热区。
-            //    先挂热区、后挂控制栏：控制栏右端 88 的控件压在热区之上可点击。
-            .children(panel_hover)
+            // ③ 控制栏右端压在面板/视频边界上，仍保持可点击。
             .children(bar)
             .children(mini_progress)
             // ④ 信息面板：通高浮层，从播放页层顶一直到底
@@ -2166,7 +2279,9 @@ impl Render for PlayerView {
             // 鼠标离开播放器（去了顶栏 / 页面 / 其它窗口）：控制栏直接收起。
             .on_hover(cx.listener(|view, hovered: &bool, window, cx| {
                 if !*hovered {
-                    let position = window.mouse_position();
+                    // 用当前光标位置：`window.mouse_position()` 停在最后一次
+                    // 事件上，鼠标已经移出窗口时它还是旧位置。
+                    let position = cursor_position(window, cx);
                     // 播放中每帧重绘会让 hover 偶发 false；指针仍在播放器里就忽略。
                     if !view.pointer_in_player(position, window) {
                         // 指针真的离开播放器（含移进 16px 边距）：解除滚动保持，
@@ -2600,38 +2715,6 @@ impl PlayerView {
                             .text_color(rgb(0xFFFFFF)),
                     ),
             )
-            .into_any_element()
-    }
-
-    /// 面板右侧横向让出的 88px hover 热区：鼠标进入即展开面板。
-    ///
-    /// 这个 88 是**横向**让位，不是面板底部的 88；面板高度是 top:0 → bottom:0 通高。
-    fn panel_hover_zone(&self, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("player-panel-hover")
-            .absolute()
-            .top_0()
-            // 热区右边界对齐侧栏左边缘；宽度 88，覆盖播放层右缘。
-            .right(px(INFO_PANEL_COLLAPSED))
-            // 高度固定到控制栏上沿：不随控制栏显隐变化，也不去抢控制栏区域的
-            // hover（否则控制栏隐藏 → 热区接管 → 控制栏浮出 → 热区被盖住 → 循环）。
-            .bottom(px(CTRL_H))
-            .w(px(PANEL_HOVER_WIDTH))
-            .bg(rgba(0x00000001))
-            // 展开 / 收起统一由 `pointer_tracker` 的全局鼠标坐标驱动。
-            // 这里不再挂 on_hover：播放中每帧重绘会让 hover 在指针没动时闪 false，
-            // 热区一挂一卸就把面板和控制条带成循环。
-            .on_mouse_move(cx.listener(|view, _: &MouseMoveEvent, window, cx| {
-                view.note_activity(window, cx);
-            }))
-            .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
-                // 触控 / 点击兜底：hover 不可用时也能打开面板。
-                if !view.expanded {
-                    view.expanded = true;
-                    view.panel_generation = view.panel_generation.wrapping_add(1);
-                    cx.notify();
-                }
-            }))
             .into_any_element()
     }
 
@@ -3173,7 +3256,7 @@ impl PlayerView {
             .id("info-panel")
             .absolute()
             .top(px(0.))
-            // 侧栏贴着窗口右边界；让出 88px 的是左侧的视频区，不是面板。
+            // 侧栏贴着窗口右边界；视频区右缘不铺 hover 热区，避免误触发展开。
             .right(px(0.))
             // 高度通高：从播放页层顶部一直拉到底。
             .bottom(px(0.))
@@ -3187,7 +3270,10 @@ impl PlayerView {
             // hover 只负责「进入即展开」的兜底；收起一律由真实指针坐标决定。
             // 播放中每帧重绘都会重算 hover，不能让它驱动收起。
             .on_hover(cx.listener(|view, hovered: &bool, window, cx| {
-                if *hovered && view.pointer_in_panel_zone(window.mouse_position(), window) {
+                // 用当前光标位置判断：`window.mouse_position()` 停在最后一次
+                // 事件上，面板尺寸动画把它顶到光标底下时会拿旧位置判定，
+                // 于是面板在「指针早已移开」的情况下自己弹回来。
+                if *hovered && view.pointer_in_panel_zone(cursor_position(window, cx), window) {
                     view.set_panel_hover(true, window, cx);
                 }
             }))
