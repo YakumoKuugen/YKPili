@@ -9,6 +9,7 @@ use rand::RngCore;
 use serde::Deserialize;
 
 use crate::api::bilibili::{API_BASE, PASSPORT_BASE};
+use crate::api::limits;
 use crate::api::models::{LoginPollResponse, QrCodeData, UserInfoResponse};
 use crate::models::UserSession;
 
@@ -29,6 +30,7 @@ fn request(
     form: Option<&[(&str, String)]>,
     cookie: &str,
 ) -> Result<(String, Vec<String>), String> {
+    let write = method == reqwest::Method::POST;
     let mut rb = client
         .request(method, url)
         .header("User-Agent", UA)
@@ -40,6 +42,8 @@ fn request(
     if let Some(form) = form {
         rb = rb.form(form);
     }
+    // 登录接口也走统一节流：扫码轮询、短信、密码登录各算各的间隔。
+    limits::acquire_for(url, write);
     let resp = rb.send().map_err(|e| format!("请求登录接口失败：{e}"))?;
     let status = resp.status();
     let cookies = resp

@@ -232,8 +232,9 @@ pub fn dynamic_comments(oid: &str, kind: i64, cookie: &str, pn: u32, ps: u32) ->
 /// 新版把游标放在 `cursor.next`，原样回传给 `next`；`cursor.is_end`
 /// 表示「真的到底了」。
 ///
-/// `ps` 线上上限是 30（再大也会被截到 30），所以「一次要 100 条」
-/// 要靠上层拼多页，而不是把 `ps` 调大。
+/// `ps` 线上上限是 30（再大也会被截到 30）；调用方只取一页
+/// （[`super::client::COMMENT_PAGE_SIZE`] = 20），滚动到底再取下页。
+/// **不要**在上层拼页凑「一次 100 条」：连续 4 个请求会被频控打成 `-352`。
 pub fn comment_main(oid: &str, kind: i64, cookie: &str, next: u64, ps: u32) -> Request {
     Request {
         url: format!(
@@ -369,6 +370,18 @@ pub fn relation_attribute(fid: i64, cookie: &str) -> Request {
 pub trait HttpClient {
     type Error;
     fn get(&self, req: &Request) -> Result<String, Self::Error>;
+
+    /// 已缓存的 WBI keys（`img_key`, `sub_key`）。
+    ///
+    /// 只有真实客户端会实现：`/x/web-interface/nav` 被所有 WBI 接口共用，
+    /// 每发一个签名请求就重取一次既浪费又容易触发风控。测试替身保持
+    /// 默认实现（不缓存），这样单测仍然能验证「每次都会去取 nav」。
+    fn cached_wbi_keys(&self) -> Option<(String, String)> {
+        None
+    }
+
+    /// 把刚取到的 WBI keys 存进缓存（默认不缓存）。
+    fn store_wbi_keys(&self, _img: &str, _sub: &str) {}
 }
 
 #[cfg(test)]

@@ -179,10 +179,19 @@ enum CommentState {
     Error(String),
 }
 
-/// 评论一次「加载更多」要多少条。
+/// 评论一次「加载更多」要多少条 —— **只发 1 个请求**。
 ///
-/// 线上单页上限 30，由 `yk_core::api::client::fetch_comment_batch` 拼页凑满。
-const COMMENT_PAGE_SIZE: u32 = 100;
+/// 旧实现一批 100 条，等于在 1 秒内连打 4 个 `/x/v2/reply/main`
+/// （服务端单页上限 30），正好撞上评论区频控 → `-352`。现在一次只要
+/// 1 页 20 条（与网页端一致），其余等用户滚到底部再取。
+const COMMENT_PAGE_SIZE: u32 = yk_core::api::client::COMMENT_PAGE_SIZE;
+
+/// 两次评论请求之间的最小间隔。
+///
+/// 「一次 20 条」解决单次过大，「1 秒 1 次」解决连续触发：窗口化列表在
+/// 滚到底后会反复判定「该补一页」，间隔压不住的话仍然会被当成脚本。
+const COMMENT_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+
 /// 评论行里除正文之外的高度：上下 padding 16 + 作者行 16 + 两个 2px 间距
 /// + 时间行 14。正文另算：行数 × [`COMMENT_TEXT_LINE_HEIGHT`]。
 const COMMENT_ROW_CHROME: f32 = 50.0;
@@ -469,12 +478,14 @@ pub struct PlayerView {
     comment_next: u64,
     /// 服务端说「真的没有更多了」；只有它为真才显示「没有更多评论」。
     comments_is_end: bool,
-    /// 正在拉下一批（100 条）。
+    /// 正在拉下一批（1 页 20 条）。
     comments_loading_more: bool,
     /// 下一批失败原因；失败后等用户点重试，不自动重试。
     comments_load_error: Option<String>,
     /// 评论总数（服务端 `all_count`）。
     comments_total: u64,
+    /// 上一次评论请求（实际发出去）的时间：用来做 1 秒最小间隔。
+    last_comment_request: Option<std::time::Instant>,
     /// 评论行高缓存（窗口化渲染用）。
     comment_rows: CommentRows,
     /// 最近一帧实际创建的评论行数（窗口化渲染的验收指标）。
@@ -661,6 +672,7 @@ impl PlayerView {
             comments_loading_more: false,
             comments_load_error: None,
             comments_total: 0,
+            last_comment_request: None,
             comment_rows: CommentRows::default(),
             rendered_comment_rows: 0,
             meta_generation: 0,
@@ -919,10 +931,13 @@ impl PlayerView {
         .detach();
     }
 
-    /// 拉信息面板的标签与首批评论（100 条）。
+    /// 拉信息面板的标签与首批评论（1 页 20 条）。
     ///
     /// 起播不依赖这两个请求：取流成功、面板已有标题/UP 主之后再后台补。
     /// 失败只影响面板里的对应区块，不把整个播放器打成错误态。
+    ///
+    /// 评论只取**一页**：100 条 = 4 个连续请求，会被评论区频控打成 `-352`；
+    /// 剩下的等用户滚到列表底部，走 [`Self::spawn_more_comments`] 按页补。
     fn spawn_video_meta(&mut self, aid: i64, bvid: String, cx: &mut Context<Self>) {
         if aid <= 0 && bvid.trim().is_empty() {
             self.comments = CommentState::Ready;
@@ -943,6 +958,15 @@ impl PlayerView {
         // 没有 aid 的视频（动态 / 直播回放）不请求评论，直接判「到底」，
         // 否则空列表会被当成「还没加载完」。
         let comments_available = aid > 0;
+        // 和上一次评论请求至少隔 1 秒：换源后首屏请求也算在节流里。
+        let comment_wait = if comments_available {
+            self.comment_fetch_wait()
+        } else {
+            std::time::Duration::ZERO
+        };
+        if comments_available {
+            self.note_comment_request(comment_wait);
+        }
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -963,11 +987,16 @@ impl PlayerView {
                     };
                     // 评论 oid 用 aid；没有 aid 的视频不请求。
                     let comments = if aid > 0 {
+                        // 距上次评论请求不足 1 秒：先等够间隔再发，
+                        // 连续请求正是 -352 的触发条件。
+                        if !comment_wait.is_zero() {
+                            std::thread::sleep(comment_wait);
+                        }
                         let target = CommentTarget {
                             oid: aid.to_string(),
                             kind: 1,
                         };
-                        yk_core::api::client::fetch_comment_batch(
+                        yk_core::api::client::fetch_comment_page(
                             &client,
                             &cookie,
                             &target,
@@ -1023,7 +1052,24 @@ impl PlayerView {
     /// 评论列表离底部不足这个距离时，自动拉下一批。
     const COMMENT_LOAD_MORE_GAP: f32 = 240.0;
 
-    /// 滚到底部附近就再拉 100 条。
+    /// 距下一次评论请求还要等多久（`ZERO` = 现在就能发）。
+    ///
+    /// 「一次只取 20 条」管的是单次体积，「1 秒 1 次」管的是请求频率：
+    /// 窗口化列表滚到底后每帧都会判定「该补一页」，没有这道闸门就会连发，
+    /// 评论区频控直接回 `-352`。返回的时长由调用方拿去做延迟发送。
+    fn comment_fetch_wait(&self) -> std::time::Duration {
+        comment_request_wait(self.last_comment_request, std::time::Instant::now())
+    }
+
+    /// 记下这次评论请求的**实际发送时刻**。
+    ///
+    /// 请求可能在后台线程里先等 `wait` 再发，所以记的是 `now + wait`，
+    /// 而不是 `now` —— 否则下一次的间隔会被算短。
+    fn note_comment_request(&mut self, wait: std::time::Duration) {
+        self.last_comment_request = Some(std::time::Instant::now() + wait);
+    }
+
+    /// 滚到底部附近就再拉一页（20 条）。
     ///
     /// 触发点有两处：滚轮事件（`on_scroll_wheel`）与每帧渲染
     /// （首屏不够一屏时也能继续补）。这里只做判定与去重，真正发请求在
@@ -1045,7 +1091,10 @@ impl PlayerView {
         }
     }
 
-    /// 拉下一批评论（100 条）。
+    /// 拉下一批评论：**1 个请求、1 页 20 条**。
+    ///
+    /// 与上次请求不足 [`COMMENT_REQUEST_INTERVAL`] 时，后台线程先等够间隔
+    /// 再发；等待期间 `comments_loading_more` 保持为真，不会重复入队。
     fn spawn_more_comments(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.source.as_ref() else {
             return;
@@ -1063,6 +1112,8 @@ impl PlayerView {
         let cursor = self.comment_next;
         let generation = self.meta_generation;
         let cookie = current_session_cookie();
+        let wait = self.comment_fetch_wait();
+        self.note_comment_request(wait);
         self.comments_loading_more = true;
         self.comments_load_error = None;
         cx.notify();
@@ -1070,9 +1121,13 @@ impl PlayerView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    if !wait.is_zero() {
+                        // 节流等待：1 秒内最多一个评论请求。
+                        std::thread::sleep(wait);
+                    }
                     let client = yk_core::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
-                    yk_core::api::client::fetch_comment_batch(
+                    yk_core::api::client::fetch_comment_page(
                         &client,
                         &cookie,
                         &target,
@@ -1089,9 +1144,13 @@ impl PlayerView {
                 match result {
                     Ok(page) => {
                         let before = view.comment_items.len();
-                        merge_comment_page(&mut view.comment_items, page.items);
+                        let added = merge_comment_page(&mut view.comment_items, page.items);
+                        // 游标没前进、也没有新条目 = 服务端在重复同一页：
+                        // 收手。否则「滚到底就补一页」会变成每秒一次的无效
+                        // 请求，正好是触发 -352 的典型形态。
+                        let stalled = added == 0 && page.next == cursor;
                         view.comment_next = page.next;
-                        view.comments_is_end = page.is_end;
+                        view.comments_is_end = page.is_end || stalled;
                         if page.total > 0 {
                             view.comments_total = page.total;
                         }
@@ -4395,7 +4454,7 @@ impl PlayerView {
                     view.panel_generation = view.panel_generation.wrapping_add(1);
                     cx.notify();
                 }
-                // 滚到底部附近就补下一批评论（每批 100 条）。
+                // 滚到底部附近就补下一批评论（每批 1 页 20 条）。
                 view.maybe_load_more_comments(cx);
                 // 评论是窗口化渲染：可见区随滚动变化，每滚一下都要重算窗口，
                 // 否则滚出已创建的 ~27 行之后会看到空白。
@@ -5411,6 +5470,21 @@ fn merge_comment_page(items: &mut Vec<DynamicComment>, incoming: Vec<DynamicComm
     items.len() - before
 }
 
+/// 距下一次评论请求还要等多久（纯函数，便于单测）。
+///
+/// 两次请求至少隔 [`COMMENT_REQUEST_INTERVAL`]；`last` 为空表示从没请求过，
+/// 立刻可发。用 `saturating_duration_since` 是为了时钟回拨时退化成 0，
+/// 不会把评论区永久卡死。
+fn comment_request_wait(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> std::time::Duration {
+    let Some(last) = last else {
+        return std::time::Duration::ZERO;
+    };
+    (last + COMMENT_REQUEST_INTERVAL).saturating_duration_since(now)
+}
+
 /// 评论区是否该「再拉一批」。
 ///
 /// 两条触发条件：
@@ -6004,8 +6078,9 @@ fn ctrl_icon(icon: IconName, color: Hsla) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        comments_need_more, cursor_local, merge_comment_page, percent_encode, qq_share_url,
-        video_page_url, CommentRows, COMMENT_ROW_CHROME, COMMENT_TEXT_LINE_HEIGHT,
+        comment_request_wait, comments_need_more, cursor_local, merge_comment_page, percent_encode,
+        qq_share_url, video_page_url, CommentRows, COMMENT_PAGE_SIZE, COMMENT_REQUEST_INTERVAL,
+        COMMENT_ROW_CHROME, COMMENT_TEXT_LINE_HEIGHT,
     };
     use gpui::{point, px};
 
@@ -6071,6 +6146,43 @@ mod tests {
         assert_eq!(percent_encode("a b&c=d"), "a%20b%26c%3Dd");
         // 中文按 UTF-8 字节逐个转义
         assert_eq!(percent_encode("动态"), "%E5%8A%A8%E6%80%81");
+    }
+
+    #[test]
+    fn comment_requests_are_spaced_at_least_one_second() {
+        let now = std::time::Instant::now();
+        // 从没请求过：立刻可发。
+        assert_eq!(comment_request_wait(None, now), std::time::Duration::ZERO);
+        // 刚发过：等满 1 秒。
+        assert_eq!(
+            comment_request_wait(Some(now), now),
+            COMMENT_REQUEST_INTERVAL
+        );
+        // 400ms 前发过：还差 600ms。
+        assert_eq!(
+            comment_request_wait(Some(now - std::time::Duration::from_millis(400)), now),
+            std::time::Duration::from_millis(600)
+        );
+        // 早就发过：不再等。
+        assert_eq!(
+            comment_request_wait(Some(now - std::time::Duration::from_secs(5)), now),
+            std::time::Duration::ZERO
+        );
+        // 记的是「未来发送时刻」（后台线程先等再发）也不能算出负数。
+        assert_eq!(
+            comment_request_wait(Some(now + std::time::Duration::from_millis(400)), now),
+            std::time::Duration::from_millis(1400)
+        );
+    }
+
+    #[test]
+    fn comment_batch_is_one_small_request() {
+        // 一次「加载更多」= 1 页 20 条：不许再回到「拼 4 页凑 100 条」。
+        assert!(COMMENT_PAGE_SIZE <= 20);
+        assert!(
+            COMMENT_REQUEST_INTERVAL >= std::time::Duration::from_millis(500),
+            "请求间隔太短，评论区会再次被 -352 拦"
+        );
     }
 
     #[test]

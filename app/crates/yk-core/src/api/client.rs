@@ -6,8 +6,13 @@
 //!
 //! **两个必须带的头**：`User-Agent` 与 `Referer`。
 //! B 站对默认 UA（`reqwest/x.y`）会直接 403，缺 Referer 有概率被风控拦。
+//!
+//! **限流**：所有真实请求在 `ReqwestClient` 里统一过 [`limits::acquire_for`]，
+//! 按接口分组限制请求间隔（评论 1.2s、写操作 1.2s、推荐 0.8s……），
+//! 见 [`crate::api::limits`]。测试替身不走网络，因此不受影响、也不会被拖慢。
 
 use crate::api::bilibili::{self, HttpClient, Request};
+use crate::api::limits;
 use crate::api::models::{
     DynamicFeedResponse, HistoryResponse, MsgfeedInboxResponse, MsgfeedUnreadResponse, PlayUrlData,
     RecommendResponse, RecommendVideoItem, RelationFriendsResponse, RelationResponse, ReplyMainResponse,
@@ -82,6 +87,8 @@ impl ReqwestClient {
         if !cookie.is_empty() {
             rb = rb.header("Cookie", cookie);
         }
+        // 写操作一律进 `Write` 桶：点赞 / 投币 / 收藏 / 发动态被连点最容易吃风控。
+        limits::acquire_for(url, true);
         let resp = rb
             .form(form)
             .send()
@@ -117,6 +124,7 @@ impl ReqwestClient {
         if !cookie.is_empty() {
             rb = rb.header("Cookie", cookie);
         }
+        limits::acquire_for(url, true);
         let resp = rb
             .json(body)
             .send()
@@ -145,6 +153,7 @@ impl ReqwestClient {
         if !req.cookie.is_empty() {
             rb = rb.header("Cookie", &req.cookie);
         }
+        limits::acquire_for(&req.url, false);
         let resp = rb
             .send()
             .map_err(|e| format!("{} 请求失败：{e}", req.name))?;
@@ -162,6 +171,14 @@ impl ReqwestClient {
 impl HttpClient for ReqwestClient {
     type Error = String;
 
+    fn cached_wbi_keys(&self) -> Option<(String, String)> {
+        cached_wbi_keys()
+    }
+
+    fn store_wbi_keys(&self, img: &str, sub: &str) {
+        store_wbi_keys(img, sub);
+    }
+
     fn get(&self, req: &Request) -> Result<String, Self::Error> {
         let mut rb = self
             .inner
@@ -172,6 +189,7 @@ impl HttpClient for ReqwestClient {
         if !req.cookie.is_empty() {
             rb = rb.header("Cookie", &req.cookie);
         }
+        limits::acquire_for(&req.url, false);
         let resp = rb
             .send()
             .map_err(|e| format!("{} 请求失败：{e}", req.name))?;
@@ -194,14 +212,53 @@ pub fn now_wts() -> u64 {
         .unwrap_or(0)
 }
 
+/// WBI keys 的进程内缓存：(img_key, sub_key, 取到的时间)。
+///
+/// 放全局而不是 `ReqwestClient` 字段，是因为 App 每个后台任务都会
+/// `ReqwestClient::new()` 一次；挂在实例上等于没缓存。
+static WBI_KEYS: std::sync::OnceLock<
+    std::sync::Mutex<Option<(String, String, std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+
+/// WBI keys 缓存有效期。
+///
+/// B 站每天轮换一次；30 分钟足够激进地复用，又不会在轮换后一直用旧 key
+/// 去签名（那正是 `-352` 的另一个来源）。
+const WBI_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+fn cached_wbi_keys() -> Option<(String, String)> {
+    let cache = WBI_KEYS.get_or_init(|| std::sync::Mutex::new(None));
+    let guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .as_ref()
+        .filter(|(_, _, at)| at.elapsed() < WBI_TTL)
+        .map(|(img, sub, _)| (img.clone(), sub.clone()))
+}
+
+fn store_wbi_keys(img: &str, sub: &str) {
+    let cache = WBI_KEYS.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some((img.to_string(), sub.to_string(), std::time::Instant::now()));
+}
+
 /// 取 WBI keys（`img_key` / `sub_key`）。
 ///
 /// **不需要登录**：`nav` 在未登录时也会返回 `wbi_img`，只是 `isLogin=false`。
 /// 这一点很关键 —— 只有这样首页才能在没登录的情况下加载推荐。
+///
+/// 真实客户端会走 [`WBI_KEYS`] 缓存：推荐 / 详情 / 取流 / 发私信都要签名，
+/// 每个请求都重取一次 `nav` 等于把接口量翻倍，还多一次风控暴露面。
 pub fn fetch_wbi_keys<C>(client: &C, cookie: &str) -> Result<(String, String), String>
 where
     C: HttpClient<Error = String>,
 {
+    if let Some(keys) = client.cached_wbi_keys() {
+        return Ok(keys);
+    }
     let body = client.get(&bilibili::user_info(cookie))?;
     let parsed: UserInfoResponse =
         serde_json::from_str(&body).map_err(|e| format!("nav 响应解析失败：{e}"))?;
@@ -214,6 +271,7 @@ where
     if img.is_empty() || sub.is_empty() {
         return Err("wbi_img 里的 img_key/sub_url 为空".into());
     }
+    client.store_wbi_keys(&img, &sub);
     Ok((img, sub))
 }
 
@@ -564,6 +622,14 @@ where
         .unwrap_or_default())
 }
 
+/// 每页评论要多少条 —— **每次只发 1 个请求**。
+///
+/// 线上 `ps` 上限是 30，但这里刻意要 20：网页端默认就是 20，单个响应已经
+/// ~270KB（热门评论带楼中楼）。旧实现「一次要 100 条」在这里拼 4 个连续
+/// 请求，正好撞上 B 站评论区的频控 → `-352`。现在首屏只发 1 个请求，
+/// 用户滚到列表底部再取下一页。
+pub const COMMENT_PAGE_SIZE: u32 = 20;
+
 /// 一页评论（游标翻页）。
 #[derive(Debug, Clone, Default)]
 pub struct CommentPage {
@@ -577,25 +643,10 @@ pub struct CommentPage {
     pub total: u64,
 }
 
-impl CommentPage {
-    /// 把两页合成一页，保留游标 / 到底标志，并按 `rpid` 去重。
-    ///
-    /// 跨页重复在线上会出现：置顶评论可能同时出现在第 1 页与后续页里。
-    fn merge(&mut self, other: CommentPage) {
-        for item in other.items {
-            if !self.items.iter().any(|existing| existing.rpid == item.rpid) {
-                self.items.push(item);
-            }
-        }
-        self.next = other.next;
-        self.is_end = other.is_end;
-        if other.total > 0 {
-            self.total = other.total;
-        }
-    }
-}
-
 /// 拉一页评论（`/x/v2/reply/main`），游标翻页。
+///
+/// `size` 会被夹到 1..=30（服务端硬上限）；调用方应传
+/// [`COMMENT_PAGE_SIZE`]，**不要**为了「一次取更多」而在上层循环拼页。
 pub fn fetch_comment_page<C>(
     client: &C,
     cookie: &str,
@@ -617,6 +668,11 @@ where
     let parsed: ReplyMainResponse =
         serde_json::from_str(&body).map_err(|e| format!("评论响应解析失败：{e}"))?;
     if parsed.code != 0 {
+        // `-352` 是风控/频控的统一码：短时间连续打评论接口就会撞上。
+        // 文案要说人话，否则界面上只剩一串数字，用户不知道等一会儿就好。
+        if parsed.code == -352 {
+            return Err("评论请求太频繁，已被 B 站风控拦截（-352），请稍后再试".to_string());
+        }
         let message = if parsed.message.is_empty() {
             String::new()
         } else {
@@ -641,62 +697,6 @@ where
         is_end: cursor.is_end,
         total: cursor.all_count,
     })
-}
-
-/// 一次拉够 `want` 条评论。
-///
-/// 线上单页上限是 30（`ps` 给多大都会被截到 30），所以「一次要 100 条」
-/// 只能在这里拼 4 页；`is_end` 为真时提前收手，并把真实游标带回去。
-pub fn fetch_comment_batch<C>(
-    client: &C,
-    cookie: &str,
-    target: &CommentTarget,
-    next: u64,
-    want: u32,
-) -> Result<CommentPage, String>
-where
-    C: HttpClient<Error = String>,
-{
-    const PAGE_MAX: u32 = 30;
-    let want = want.max(1);
-    let mut cursor = next;
-    let mut page = CommentPage {
-        next: cursor,
-        ..Default::default()
-    };
-    let mut got = 0u32;
-    loop {
-        let remaining = want.saturating_sub(got);
-        if remaining == 0 {
-            break;
-        }
-        let fetched = fetch_comment_page(
-            client,
-            cookie,
-            target,
-            cursor,
-            remaining.min(PAGE_MAX),
-        )?;
-        let before = page.items.len();
-        let fetched_end = fetched.is_end;
-        let fetched_next = fetched.next;
-        page.merge(fetched);
-        got += (page.items.len() - before) as u32;
-        // 游标没有前进 + 没有新条目：再请求也是同一页，直接收手，
-        // 免得网络异常时把 UI 卡在这个循环里。
-        if fetched_next == cursor && page.items.len() == before {
-            page.is_end = fetched_end;
-            break;
-        }
-        cursor = fetched_next;
-        page.next = fetched_next;
-        if fetched_end {
-            page.is_end = true;
-            break;
-        }
-    }
-    page.next = cursor;
-    Ok(page)
 }
 
 /// 拉取一个视频（当前分 P）的全部弹幕。
@@ -1417,11 +1417,17 @@ mod tests {
         assert_eq!(items[0].title, "A &amp; B");
     }
 
-    /// 评论分页假客户端：按 `next` 游标吐页，模拟线上「单页最多 30 条」。
+    /// 评论分页假客户端：按 `next` 游标吐页，模拟线上 `ps` 被夹到 30。
     struct CommentClient {
-        /// 每一页（按请求顺序）实际返回的条数；`None` = 该页 is_end。
-        pages: Vec<usize>,
-        calls: std::cell::RefCell<Vec<u64>>,
+        /// 该页实际返回的条数（服务端可能少给）。
+        count: usize,
+        /// 下一页游标；`is_end` 由它是否为 `None` 决定。
+        next: Option<u64>,
+        /// 故意在页内塞一条重复 `rpid`，验证按 rpid 去重。
+        duplicate_first: bool,
+        /// 服务端业务码；非 0 时直接回错误码。
+        code: i64,
+        calls: std::cell::RefCell<Vec<(u64, u32)>>,
     }
 
     impl HttpClient for CommentClient {
@@ -1435,23 +1441,24 @@ mod tests {
                 .and_then(|rest| rest.split('&').next())
                 .and_then(|v| v.parse().ok())
                 .unwrap();
-            let ps: usize = req
+            let ps: u32 = req
                 .url
                 .split("ps=")
                 .nth(1)
                 .and_then(|rest| rest.split('&').next())
                 .and_then(|v| v.parse().ok())
                 .unwrap();
-            self.calls.borrow_mut().push(next);
-            let page_ix = next as usize;
-            let total = self.pages.get(page_ix).copied().unwrap_or(0).min(ps);
-            let last = page_ix + 1 >= self.pages.len();
-            // rpid 全局连续，便于检查去重；第 2 页故意重复上一页的最后一条。
-            let mut start = 1 + page_ix * 30;
-            if page_ix == 1 {
-                start -= 1;
+            self.calls.borrow_mut().push((next, ps));
+            if self.code != 0 {
+                return Ok(format!(r#"{{"code":{},"data":null}}"#, self.code));
             }
-            let replies: Vec<String> = (start..start + total)
+            let total = self.count.min(ps as usize);
+            let mut rpids: Vec<i64> = (1..=total as i64).collect();
+            if self.duplicate_first {
+                rpids.push(1);
+            }
+            let replies: Vec<String> = rpids
+                .iter()
                 .map(|rpid| {
                     format!(
                         r#"{{"rpid":{rpid},"like":0,"ctime":1700000000,"member":{{"uname":"u{rpid}"}},"content":{{"message":"m{rpid}"}}}}"#
@@ -1461,56 +1468,77 @@ mod tests {
             Ok(format!(
                 r#"{{"code":0,"data":{{"replies":[{}],"cursor":{{"next":{},"is_end":{},"all_count":500}}}}}}"#,
                 replies.join(","),
-                page_ix + 1,
-                last
+                self.next.unwrap_or(0),
+                self.next.is_none()
             ))
         }
     }
 
-    #[test]
-    fn comment_batch_fetches_100_across_30_item_pages() {
-        // 线上 ps 上限 30：要 100 条要拼 4 页（30+30+30+10）。
-        // 第 2 页重复 1 条 → 只有 99 条唯一，必须再补 1 页才够 100。
-        let client = CommentClient {
-            pages: vec![30, 30, 30, 10, 30, 30],
-            calls: Default::default(),
-        };
-        let target = CommentTarget {
+    fn comment_target() -> CommentTarget {
+        CommentTarget {
             oid: "123".into(),
             kind: 1,
-        };
-        let page = fetch_comment_batch(&client, "", &target, 0, 100).unwrap();
-        assert_eq!(page.items.len(), 100, "去重后不够 100 条要自动补页");
-        assert_eq!(
-            *client.calls.borrow(),
-            vec![0, 1, 2, 3, 4],
-            "必须按游标逐页翻、并能补页"
-        );
-        assert!(!page.is_end, "服务端没说到底，就不能标成到底");
-        assert_eq!(page.next, 5, "游标要停在服务端给的下一页");
-        assert_eq!(page.total, 500);
-        // 第 2 页重复了上一页末条：不能出现重复 rpid。
-        let mut ids: Vec<i64> = page.items.iter().map(|c| c.rpid).collect();
-        let before = ids.len();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), before, "跨页重复评论必须去重");
+        }
     }
 
     #[test]
-    fn comment_batch_stops_when_server_says_end() {
+    fn comment_page_is_one_request_of_twenty() {
+        // 一次「加载更多」只发 1 个请求、只取 20 条 —— 这是躲开 -352 的前提。
         let client = CommentClient {
-            pages: vec![12],
+            count: 20,
+            next: Some(2),
+            duplicate_first: false,
+            code: 0,
             calls: Default::default(),
         };
-        let target = CommentTarget {
-            oid: "123".into(),
-            kind: 1,
+        let page = fetch_comment_page(&client, "", &comment_target(), 0, COMMENT_PAGE_SIZE).unwrap();
+        assert_eq!(page.items.len(), 20);
+        assert_eq!(page.next, 2, "游标原样回传，供下一次「滚到底」继续翻");
+        assert!(!page.is_end, "服务端没说到底，就不能标成到底");
+        assert_eq!(page.total, 500);
+        assert_eq!(*client.calls.borrow(), vec![(0, 20)], "一批只能发一个请求");
+    }
+
+    #[test]
+    fn comment_page_dedupes_repeated_rpid() {
+        let client = CommentClient {
+            count: 5,
+            next: Some(3),
+            duplicate_first: true,
+            code: 0,
+            calls: Default::default(),
         };
-        let page = fetch_comment_batch(&client, "", &target, 0, 100).unwrap();
+        let page = fetch_comment_page(&client, "", &comment_target(), 0, COMMENT_PAGE_SIZE).unwrap();
+        assert_eq!(page.items.len(), 5, "页内重复 rpid 只保留一条");
+    }
+
+    #[test]
+    fn comment_page_respects_server_end() {
+        let client = CommentClient {
+            count: 12,
+            next: None,
+            duplicate_first: false,
+            code: 0,
+            calls: Default::default(),
+        };
+        let page = fetch_comment_page(&client, "", &comment_target(), 4, COMMENT_PAGE_SIZE).unwrap();
         assert_eq!(page.items.len(), 12);
-        assert_eq!(*client.calls.borrow(), vec![0], "is_end 之后不能再发请求");
         assert!(page.is_end);
+        assert_eq!(*client.calls.borrow(), vec![(4, 20)]);
+    }
+
+    #[test]
+    fn comment_page_maps_risk_control_to_readable_error() {
+        // -352 不能只把数字甩给界面：要告诉用户「等一会儿」。
+        let client = CommentClient {
+            count: 0,
+            next: Some(1),
+            duplicate_first: false,
+            code: -352,
+            calls: Default::default(),
+        };
+        let err = fetch_comment_page(&client, "", &comment_target(), 0, COMMENT_PAGE_SIZE).unwrap_err();
+        assert!(err.contains("风控"), "错误文案应说明被风控：{err}");
     }
 
     #[test]

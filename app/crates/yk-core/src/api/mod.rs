@@ -5,5 +5,6 @@
 
 pub mod bilibili;
 pub mod client;
+pub mod limits;
 pub mod models;
 pub mod wbi;
