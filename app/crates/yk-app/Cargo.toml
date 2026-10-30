@@ -54,6 +54,11 @@ path = "tests/player_hover.rs"
 harness = false
 
 [[test]]
+name = "pages_visual"
+path = "tests/pages_visual.rs"
+harness = false
+
+[[test]]
 name = "danmaku_visual"
 path = "tests/danmaku_visual.rs"
 harness = false

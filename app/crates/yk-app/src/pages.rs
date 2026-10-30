@@ -23,7 +23,7 @@ pub enum PageKind {
     History,
     /// 消息中心：回复 / @ / 赞 / 私信四通道。
     Messages,
-    /// 收藏夹：接口未接入，先保留 Dock 入口与选中态。
+    /// 收藏夹：由 `favorites_view` 独立渲染（数据来自真实接口）。
     Favorites,
     Mine,
     Settings,
@@ -112,7 +112,12 @@ fn body(theme: &YkTheme, page: PageKind, signed_in: bool) -> AnyElement {
     match page {
         PageKind::Hot => hot(theme).into_any_element(),
         PageKind::Category => category(theme).into_any_element(),
-        PageKind::Rank => rank(theme).into_any_element(),
+        PageKind::Rank => status::empty(
+            theme,
+            "视频排行榜",
+            "由排行榜页独立渲染",
+        )
+        .into_any_element(),
         PageKind::Live => live(theme).into_any_element(),
         PageKind::Following => following(theme, signed_in),
         // 历史页是独立的两栏视图，由 AppRoot 在 content_area 里特判，
@@ -124,10 +129,11 @@ fn body(theme: &YkTheme, page: PageKind, signed_in: bool) -> AnyElement {
         PageKind::Messages => {
             status::empty(theme, "消息中心", "由消息页独立渲染").into_any_element()
         }
+        // 收藏夹页由 favorites_view 独立渲染。
         PageKind::Favorites => status::empty(
             theme,
-            "收藏夹功能尚未接入",
-            "收藏接口接入后，收藏的视频会显示在这里",
+            "我的收藏",
+            "由收藏夹页独立渲染",
         )
         .into_any_element(),
         PageKind::Mine => mine(theme).into_any_element(),
@@ -236,16 +242,6 @@ fn category(theme: &YkTheme) -> impl IntoElement {
         );
     }
     grid
-}
-
-fn rank(theme: &YkTheme) -> impl IntoElement {
-    // 排行接口（全站榜 / 分区榜）尚未接入；这里不放占位榜单，
-    // 避免用户把假数据当成真实排行。
-    status::empty(
-        theme,
-        "排行榜功能尚未接入",
-        "排行接口接入后，全站榜与分区榜会显示在这里",
-    )
 }
 
 fn chip(theme: &YkTheme, label: &str, active: bool) -> impl IntoElement {

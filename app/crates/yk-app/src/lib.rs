@@ -33,6 +33,7 @@ pub mod account_view;
 pub mod components;
 pub mod dynamic_feed;
 pub mod dynamic_view;
+pub mod favorites_view;
 pub mod history_view;
 pub mod http;
 pub mod login_view;
@@ -40,6 +41,7 @@ pub mod messages_view;
 pub mod page_image_cache;
 pub mod pages;
 pub mod player;
+pub mod rank_view;
 pub mod search_view;
 pub mod settings_view;
 pub mod video;
@@ -47,6 +49,17 @@ pub mod video_worker;
 use page_image_cache::PageImageCache;
 use yk_ui::status::SKELETON_PULSE_MS;
 use yk_ui::theme::*;
+
+/// 一次 ⌘Q 的判定结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitDecision {
+    /// 第一次按：展示提示。
+    Show,
+    /// 按住产生的重复键 / 提示刚出现：忽略。
+    Wait,
+    /// 提示期内再次按：退出。
+    Quit,
+}
 
 /// 当前帧实际挂出的卡片图片 URL。
 ///
@@ -105,6 +118,19 @@ pub struct AppRoot {
     /// 滚动监测：滚轮不会触发 AppRoot render，需要轮询偏移量后 notify。
     scroll_watchdog_started: bool,
     last_scroll_offset_y: f32,
+    /// 最近一次真实滚动的时间。
+    ///
+    /// 滚轮 / 触控板滚动时，卡片会在指针下方移动，GPUI 会连续派发
+    /// `on_hover(true/false)`。若照单全收，每次 hover 变化都会让
+    /// `hover_generation + 1`，封面缩放动画就被反复重置、重播。
+    /// 滚动期间及其后一小段时间内丢弃 hover 事件，只保留一次收起动画。
+    last_scroll_at: Option<std::time::Instant>,
+    /// 滚动停止后是否还需要补一帧。
+    ///
+    /// 滚动期间卡片 hover 视觉被暂停；停下后如果没有鼠标事件，画面会停在
+    /// 「没有 hover」的状态。watchdog 在 `scroll_settling()` 结束后补一帧，
+    /// 让指针下的卡片重新拿到 hover 样式（只补一次）。
+    scroll_render_pending: bool,
     /// 动态详情浮层；None = 未打开。
     dynamic_detail: Option<Entity<dynamic_view::DynamicDetailView>>,
     /// 详情浮层完成缩回：下一次 render 再移除实体，避免在它自己的回调里析构。
@@ -121,6 +147,10 @@ pub struct AppRoot {
     following_generation: u64,
     /// 观看历史页状态（数据、筛选、批量选择、搜索框）。
     history: history_view::HistoryState,
+    /// 收藏夹页状态（夹子列表、夹内视频、分页与本地排序）。
+    favorites: favorites_view::FavoritesState,
+    /// 排行榜页状态（分区、整榜数据与请求代际）。
+    rank: rank_view::RankState,
     /// 搜索：顶栏输入、联想面板与结果页共享同一份状态。
     search: search_view::SearchState,
     /// 消息中心：四通道列表、私信会话与未读角标。
@@ -173,6 +203,13 @@ pub struct AppRoot {
     offline_error: Option<String>,
     /// hover 进入/离开时 +1：让 with_animation 的 id 变化、动画重新开始
     hover_generation: u64,
+    /// 退出确认提示的展示时间；None = 没显示。
+    ///
+    /// 第一次 ⌘Q 只展示提示，提示期内再按一次才真正退出（见
+    /// [`AppRoot::request_quit`]）。
+    quit_hint_shown_at: Option<std::time::Instant>,
+    /// 退出提示代际：重复按 ⌘Q / 超时清除时丢弃旧定时器。
+    quit_hint_generation: u64,
     /// 系统「减少动效」轮询是否已启动（macOS/Windows 没有订阅通知）
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     motion_watchdog_started: bool,
@@ -233,6 +270,18 @@ impl AppRoot {
     /// 测试 / 截图入口：不自动弹登录卡片。
     pub fn without_login_prompt(mut self) -> Self {
         self.login_prompted = true;
+        self
+    }
+
+    /// 测试 / 截图入口：装一个假的已登录会话（不发请求，只让页面走登录态分支）。
+    pub fn with_signed_in(mut self) -> Self {
+        let mut session = yk_core::models::UserSession::default();
+        session.dede_user_id = 1;
+        session.sess_data = "test-session".into();
+        session.bili_jct = "test-csrf".into();
+        session.nickname = "测试账号".into();
+        session.is_logged_in = true;
+        self.session = Some(session);
         self
     }
 
@@ -307,6 +356,62 @@ impl AppRoot {
         self
     }
 
+    /// 测试 / 截图入口：直接显示 ⌘Q 退出确认提示。
+    pub fn with_quit_hint(mut self) -> Self {
+        self.quit_hint_shown_at = Some(std::time::Instant::now());
+        self
+    }
+
+    /// 测试 / 验收：⌘Q 退出提示当前是否可见。
+    pub fn quit_hint_visible(&self) -> bool {
+        self.quit_hint_shown_at.is_some()
+    }
+
+    /// 测试入口：把焦点放到顶栏搜索框，让窗口有真实的键盘焦点。
+    pub fn focus_search_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_search_input(window, cx);
+        if let Some(input) = self.search.input.clone() {
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+    }
+
+    /// 测试 / 截图入口：直接注入一张榜单。
+    pub fn with_rank_page(mut self, rid: u32, page: yk_core::ranking::RankPage) -> Self {
+        self.page = Some(pages::PageKind::Rank);
+        self.rank.zone = yk_core::ranking::ZONES
+            .iter()
+            .position(|zone| zone.rid == rid)
+            .unwrap_or(0);
+        self.rank.items = page.items;
+        if !page.note.trim().is_empty() {
+            self.rank.note = page.note;
+        }
+        self.rank.loaded = true;
+        self.rank.loading = false;
+        self
+    }
+
+    /// 测试 / 截图入口：直接注入收藏夹列表与夹内视频。
+    pub fn with_favorites(
+        mut self,
+        folders: Vec<yk_core::interaction::FavFolder>,
+        items: Vec<yk_core::favorites::FavVideo>,
+        total: u64,
+    ) -> Self {
+        self.page = Some(pages::PageKind::Favorites);
+        self.favorites.folders = folders;
+        self.favorites.folders_loaded = true;
+        self.favorites.folders_loading = false;
+        self.favorites.selected = self.favorites.folders.first().map(|folder| folder.id);
+        self.favorites.items = items;
+        self.favorites.total = total;
+        self.favorites.loaded = true;
+        self.favorites.loading = false;
+        self.favorites.has_more = false;
+        self
+    }
+
     /// 测试 / 截图入口：私信列表直接开启「只看互关」。
     pub fn with_message_only_mutual(mut self, only: bool) -> Self {
         self.messages.only_mutual = only;
@@ -368,6 +473,8 @@ impl AppRoot {
         match self.page {
             Some(pages::PageKind::Following) => self.ensure_following(cx),
             Some(pages::PageKind::History) => self.ensure_history(cx),
+            Some(pages::PageKind::Favorites) => self.ensure_favorites(cx),
+            Some(pages::PageKind::Rank) => self.ensure_rank(cx),
             Some(pages::PageKind::Messages) => self.ensure_messages(cx),
             Some(pages::PageKind::Search) => {
                 if !self.search.query.trim().is_empty() {
@@ -397,6 +504,151 @@ impl AppRoot {
         self.hovered_card = None;
         self.leaving_card = None;
         self.hover_generation = self.hover_generation.wrapping_add(1);
+    }
+
+    /// 处理一次 ⌘Q。
+    ///
+    /// 第一次只展示「按住 ⌘Q 键即可退出」提示，返回 `false`；
+    /// 提示还在（3 秒内）且不是按住产生的首个重复键，再按一次返回 `true`，
+    /// 由调用方执行 `cx.quit()`。这样误触不会直接杀掉窗口。
+    pub fn request_quit(&mut self, cx: &mut Context<Self>) -> bool {
+        let now = std::time::Instant::now();
+        match self.quit_decision(now) {
+            QuitDecision::Quit => {
+                eprintln!("[quit] 再次按下 ⌘Q，正式退出");
+                true
+            }
+            QuitDecision::Wait => false,
+            QuitDecision::Show => {
+                eprintln!("[quit] 第一次 ⌘Q：显示退出提示");
+                self.quit_hint_generation = self.quit_hint_generation.wrapping_add(1);
+                let generation = self.quit_hint_generation;
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(3))
+                        .await;
+                    let _ = this.update(cx, |view, cx| {
+                        if view.quit_hint_generation == generation {
+                            view.quit_hint_shown_at = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+                false
+            }
+        }
+    }
+
+    /// 纯状态机：决定这次 ⌘Q 是「显示提示 / 忽略 / 退出」。
+    ///
+    /// 不依赖 `Context`，因此可以单测 300ms 防重复、3s 提示窗口两个边界。
+    fn quit_decision(&mut self, now: std::time::Instant) -> QuitDecision {
+        if let Some(shown_at) = self.quit_hint_shown_at {
+            let elapsed = now.saturating_duration_since(shown_at);
+            // 300ms 内视为同一次按住产生的重复键：只展示提示，不立刻退。
+            if elapsed < std::time::Duration::from_millis(300) {
+                return QuitDecision::Wait;
+            }
+            // 提示只保留 3 秒；定时器没来得及清掉时，超时也按「第一次」处理。
+            if elapsed <= std::time::Duration::from_secs(3) {
+                return QuitDecision::Quit;
+            }
+            self.quit_hint_shown_at = None;
+        }
+        self.quit_hint_shown_at = Some(now);
+        QuitDecision::Show
+    }
+
+    /// 退出确认提示：压在播放器 / 登录 / 设置之上。
+    ///
+    /// 只有视觉层，没有 hitbox，不会挡住下面的点击。
+    fn quit_hint(&self, t: &YkTheme) -> Option<AnyElement> {
+        self.quit_hint_shown_at?;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .min_w(px(520.))
+                        .px(px(SPACE_8))
+                        .py(px(SPACE_5))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(RADIUS_2XL))
+                        .bg(rgba(0x1E1E1EF2))
+                        .border_1()
+                        .border_color(rgba(0xFFFFFF14))
+                        .shadow(t.shadows.shadow_glass_elevated.clone())
+                        .child(
+                            div()
+                                .text_size(px(22.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0xFFFFFF))
+                                .text_center()
+                                .child("按住 ⌘Q 键即可退出"),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// 更新卡片 hover 状态；返回是否发生变化（调用方据此决定要不要重绘）。
+    ///
+    /// `animate = false` 用于滚动期间：状态照常跟踪，但不推进
+    /// `hover_generation`，配合渲染层的暂停，封面缩放不会被反复重置。
+    fn update_card_hover(&mut self, idx: usize, hovered: bool, animate: bool) -> bool {
+        if hovered {
+            if self.hovered_card == Some(idx) {
+                return false;
+            }
+            // 从上一张卡移进来：让上一张播放收尾动画。
+            if let Some(prev) = self.hovered_card {
+                self.leaving_card = Some(prev);
+            }
+            // 重新进入正在收尾的自己：取消收尾，直接反向。
+            if self.leaving_card == Some(idx) {
+                self.leaving_card = None;
+            }
+            self.hovered_card = Some(idx);
+            if animate {
+                self.hover_generation = self.hover_generation.wrapping_add(1);
+            }
+            true
+        } else if self.hovered_card == Some(idx) {
+            self.hovered_card = None;
+            self.leaving_card = Some(idx);
+            if animate {
+                self.hover_generation = self.hover_generation.wrapping_add(1);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 记录一次滚动活动。只刷新时间戳 / 补帧标记，不改 hover 状态 ——
+    /// 滚轮事件本身可能被边界 clamp 掉（content 没动），此时不应把
+    /// 用户停在卡片上的 hover 收掉。
+    fn mark_scrolling(&mut self) {
+        self.last_scroll_at = Some(std::time::Instant::now());
+        self.scroll_render_pending = true;
+    }
+
+    /// 滚动是否仍在「活跃期」。
+    ///
+    /// 平滑滚动动画本身全程算活跃；触控板 / 原生滚动用时间窗兜底。
+    fn scroll_settling(&self) -> bool {
+        self.smooth_scroll_animating
+            || self
+                .last_scroll_at
+                .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(250))
     }
 
     /// 打开播放器。**只在没有实例时创建，已有就复用。**
@@ -569,6 +821,7 @@ impl AppRoot {
         self.dynamic_detail_close_requested = false;
         self.reset_following();
         self.history.reset();
+        self.favorites.reset();
         self.messages.reset_for_account();
         self.login_prompted = true;
         if let Err(e) = yk_core::session::clear(&yk_core::session::session_path()) {
@@ -651,6 +904,11 @@ impl AppRoot {
         }
         if self.page == Some(pages::PageKind::History) {
             self.load_history(cx);
+        }
+        if self.page == Some(pages::PageKind::Favorites) {
+            // 换账号后旧收藏夹不再适用：先清空，再按新 Cookie 重拉。
+            self.favorites.reset();
+            self.load_favorites(cx);
         }
         if self.page == Some(pages::PageKind::Messages) {
             self.ensure_messages(cx);
@@ -1268,13 +1526,13 @@ impl AppRoot {
     }
 
     /// 按当前页面类型发起刷新：推荐流重拉第 0 页，关注流重拉第一页，
-    /// 历史页重拉 cursor 第一页。
+    /// 历史 / 收藏夹重拉第一页，排行榜重拉当前分区。
     ///
     /// 回顶手势与手动入口共用这一层；1.2s 冷却只加在手势入口上 —— 用户明确
     /// 点了按钮，就该真的重新发一次请求，而不是被防抖吞掉。
     ///
-    /// 返回是否发起了刷新：其它页面（热门 / 分区 / 排行 / 我的…）没有可重拉的数据，
-    /// 返回 `false`，调用方据此决定要不要把滚动位置拉回顶部。
+    /// 返回是否发起了刷新：热门 / 分区等没有可重拉数据的页面返回 `false`，
+    /// 调用方据此决定要不要把滚动位置拉回顶部。
     fn refresh_page_now(&mut self, cx: &mut Context<Self>) -> bool {
         match self.page {
             None => {
@@ -1294,6 +1552,17 @@ impl AppRoot {
                     return false;
                 }
                 self.load_history(cx);
+                true
+            }
+            Some(pages::PageKind::Favorites) => {
+                if self.session.is_none() {
+                    return false;
+                }
+                self.load_favorites(cx);
+                true
+            }
+            Some(pages::PageKind::Rank) => {
+                self.load_rank(cx);
                 true
             }
             Some(pages::PageKind::Messages) => {
@@ -1402,6 +1671,9 @@ impl AppRoot {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        // 滚轮 → 卡片在指针下滑动 → GPUI 连发 hover 事件。
+        // 先记下滚动时间，`on_hover` 在活跃期内直接忽略，避免动画反复重置。
+        self.mark_scrolling();
         if event.delta.precise() {
             // 触控板 / 高精度滚轮是像素级增量，交给原生滚动更跟手；
             // 若平滑动画正在跑，先停掉，避免两边抢 offset。
@@ -1479,6 +1751,7 @@ impl AppRoot {
             None => self.load_more_feed(cx),
             Some(pages::PageKind::Following) => self.load_following_page(true, false, cx),
             Some(pages::PageKind::Messages) => self.messages_load_more(cx),
+            Some(pages::PageKind::Favorites) => self.load_more_favorites(cx),
             _ => {}
         }
     }
@@ -1509,6 +1782,8 @@ impl AppRoot {
             active_images: Rc::new(RefCell::new(ImageResidency::default())),
             scroll_watchdog_started: false,
             last_scroll_offset_y: 0.0,
+            last_scroll_at: None,
+            scroll_render_pending: false,
             dynamic_detail: None,
             dynamic_detail_close_requested: false,
             following: Vec::new(),
@@ -1520,6 +1795,8 @@ impl AppRoot {
             following_has_more: false,
             following_generation: 0,
             history: history_view::HistoryState::new(),
+            favorites: favorites_view::FavoritesState::new(),
+            rank: rank_view::RankState::new(),
             search: search_view::SearchState::new(),
             messages: messages_view::MessageState::new(),
             login_prompted: false,
@@ -1546,6 +1823,8 @@ impl AppRoot {
             offline_retrying: false,
             offline_error: None,
             hover_generation: 0,
+            quit_hint_shown_at: None,
+            quit_hint_generation: 0,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             motion_watchdog_started: false,
         }
@@ -1574,6 +1853,14 @@ impl Render for AppRoot {
                         .timer(std::time::Duration::from_millis(60))
                         .await;
                     let alive = this.update(cx, |view, cx| {
+                        // 滚动停下后补一帧：滚动期间卡片 hover 视觉被暂停，
+                        // 若没有后续鼠标事件，指针下的卡片会一直停在静态态。
+                        // 同时清掉收尾态，避免滚回来的卡片重新挂载时重播 1→0。
+                        if view.scroll_render_pending && !view.scroll_settling() {
+                            view.scroll_render_pending = false;
+                            view.leaving_card = None;
+                            cx.notify();
+                        }
                         // 消息页用自己的虚拟列表 / 私信列表，滚动偏移不在 content_scroll 上。
                         if view.page == Some(pages::PageKind::Messages) {
                             if let Some(handle) = view
@@ -1664,6 +1951,9 @@ impl Render for AppRoot {
 
                         if (y - view.last_scroll_offset_y).abs() > 0.5 {
                             view.last_scroll_offset_y = y;
+                            // 记录滚动时间；hover 状态仍在更新（指针下的卡片
+                            // 会变），但渲染时暂停封面动画，等滚动停下再恢复。
+                            view.mark_scrolling();
                             cx.notify();
                         }
                     });
@@ -1741,6 +2031,19 @@ impl Render for AppRoot {
                     }
                 }),
             )
+            .capture_key_down(cx.listener(
+                |view, event: &KeyDownEvent, _window, cx| {
+                    let keystroke = &event.keystroke;
+                    if keystroke.modifiers.platform && keystroke.key.eq_ignore_ascii_case("q") {
+                        // 按住不放产生的自动重复不算「再按一次」：忽略，
+                        // 必须松开后重新按下才确认退出。
+                        if !event.is_held && view.request_quit(cx) {
+                            cx.quit();
+                        }
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             // ⓪ 页面原点探针：封面快照用它把窗口坐标换算成页面坐标。
             //    canvas 自己不可见、不吃点击，每帧 prepaint 更新。
             .child(
@@ -1816,11 +2119,14 @@ impl Render for AppRoot {
                             self.page_state,
                             self.session.is_some(),
                             &self.history,
+                            &self.favorites,
+                            &self.rank,
                             &self.search,
                             &self.messages,
                             self.hovered_card,
                             self.leaving_card,
                             self.hover_generation,
+                            self.scroll_settling(),
                             dynamic_feed::FeedState {
                                 items: &self.following,
                                 loading: self.following_loading,
@@ -1915,6 +2221,8 @@ impl Render for AppRoot {
             .children(self.account.clone())
             // 设置浮层再压一层；从个人面板进入。
             .children(self.settings.clone())
+            // ⌘Q 退出确认压在全部内容之上。
+            .children(self.quit_hint(t))
     }
 }
 
@@ -1987,14 +2295,16 @@ fn glow_layer(t: &YkTheme) -> impl IntoElement {
 /// 当前页面是否有可重拉的数据。
 ///
 /// 顶栏刷新与 Dock「刷新」共用这一份判断：没有数据可拉的页面
-/// （如收藏、排行榜）把入口置灰，而不是点了没反应。
+/// （如热门 / 分区 / 我的）把入口置灰，而不是点了没反应。
 fn can_refresh_page(page: Option<pages::PageKind>, signed_in: bool) -> bool {
     page.is_none()
         || page == Some(pages::PageKind::Search)
+        || page == Some(pages::PageKind::Rank)
         || (matches!(
             page,
             Some(pages::PageKind::Following)
                 | Some(pages::PageKind::History)
+                | Some(pages::PageKind::Favorites)
                 | Some(pages::PageKind::Messages)
         ) && signed_in)
 }
@@ -2261,11 +2571,14 @@ fn content_area(
     state: pages::PageState,
     signed_in: bool,
     history: &history_view::HistoryState,
+    favorites: &favorites_view::FavoritesState,
+    rank: &rank_view::RankState,
     search: &search_view::SearchState,
     messages: &messages_view::MessageState,
     hovered_card: Option<usize>,
     leaving_card: Option<usize>,
     hover_generation: u64,
+    scroll_settling: bool,
     following: dynamic_feed::FeedState<'_>,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
@@ -2273,6 +2586,14 @@ fn content_area(
     scroll: &VirtualListScrollHandle,
     cx: &mut Context<AppRoot>,
 ) -> AnyElement {
+    // 滚动期间暂停卡片的 hover / 收尾视觉：卡片在指针下滑过时 GPUI 会连发
+    // hover 事件，若每次都按新代际重锚，封面缩放会反复重置、重播。
+    // 状态照常更新（指针最后停在哪张卡上不能丢），只是这一帧不画动画。
+    let (hovered_card, leaving_card) = if scroll_settling {
+        (None, None)
+    } else {
+        (hovered_card, leaving_card)
+    };
     // Dock 现在是底部横向浮层：横向不再占位，内容区左右各留 24；
     // 底部留出 `DOCK_RESERVED`，否则最后一行封面会被 Dock 压住 ——
     // 浮层「在上」不等于内容可以钻到它背后。
@@ -2346,6 +2667,32 @@ fn content_area(
                 layout_bounds,
                 active_images.clone(),
                 window,
+                cx,
+            )
+        } else if kind == pages::PageKind::Favorites {
+            favorites_view::page(
+                t,
+                favorites,
+                signed_in,
+                hovered_card,
+                leaving_card,
+                hover_generation,
+                layout_bounds,
+                active_images.clone(),
+                window,
+                cx,
+            )
+        } else if kind == pages::PageKind::Rank {
+            rank_view::page(
+                t,
+                rank,
+                hovered_card,
+                leaving_card,
+                hover_generation,
+                layout_bounds,
+                window,
+                scroll,
+                active_images.clone(),
                 cx,
             )
         } else {
@@ -2466,8 +2813,16 @@ fn content_area(
                         .gap(px(SPACE_4))
                         .w_full()
                         .h(px(COVER_CELL_HEIGHT));
-                    let hovered_idx = this.hovered_card;
-                    let leaving_idx = this.leaving_card;
+                    let hovered_idx = if this.scroll_settling() {
+                        None
+                    } else {
+                        this.hovered_card
+                    };
+                    let leaving_idx = if this.scroll_settling() {
+                        None
+                    } else {
+                        this.leaving_card
+                    };
                     let hover_gen = this.hover_generation;
                     let root_bounds = this.layout_bounds.clone();
                     let load_cover = row >= load_start && row < load_end;
@@ -2767,24 +3122,11 @@ fn card(
             if this.playing.is_some() {
                 return;
             }
-            if *hovered {
-                if this.hovered_card != Some(idx) {
-                    // 从上一张卡移进来：让上一张播放收尾动画。
-                    if let Some(prev) = this.hovered_card {
-                        this.leaving_card = Some(prev);
-                    }
-                    // 重新进入正在收尾的自己：取消收尾，直接反向。
-                    if this.leaving_card == Some(idx) {
-                        this.leaving_card = None;
-                    }
-                    this.hovered_card = Some(idx);
-                    this.hover_generation = this.hover_generation.wrapping_add(1);
-                    cx.notify();
-                }
-            } else if this.hovered_card == Some(idx) {
-                this.hovered_card = None;
-                this.leaving_card = Some(idx);
-                this.hover_generation = this.hover_generation.wrapping_add(1);
+            // 滚动期间卡片从指针下滑过，GPUI 会连续给出 true/false。
+            // 状态仍然要跟（指针最后停在谁上面），但**不推进动画代际**：
+            // 渲染侧同时把 hover/leaving 视觉暂停，滚动时就不会反复重置缩放。
+            let animate = !this.scroll_settling();
+            if this.update_card_hover(idx, *hovered, animate) {
                 cx.notify();
             }
         }));
@@ -3412,6 +3754,9 @@ fn dock(
                             this.ensure_login(cx);
                         }
                     }
+                    if target == Some(pages::PageKind::Rank) {
+                        this.ensure_rank(cx);
+                    }
                     this.page = target;
                     this.reset_card_hover();
                     this.top_refresh_armed = false;
@@ -3482,6 +3827,7 @@ fn dock(
             .id("dock-favorites")
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 if this.page == Some(pages::PageKind::Favorites) {
+                    this.refresh_page_manually(cx);
                     window.refresh();
                     cx.notify();
                     return;
@@ -3490,6 +3836,13 @@ fn dock(
                 this.reset_card_hover();
                 this.top_refresh_armed = false;
                 this.pull_refresh_triggered = false;
+                if this.session.is_none() {
+                    this.ensure_login(cx);
+                } else {
+                    // 每次从其他页面进入都重新拉夹子列表，刚在播放页收藏的视频
+                    // 才能立刻出现在正确的夹子里。
+                    this.load_favorites(cx);
+                }
                 this.scroll_content_to_top();
                 window.refresh();
                 cx.notify();
@@ -3618,6 +3971,87 @@ fn mock_recommend(n: usize) -> Vec<RecommendVideoItem> {
             }),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod quit_tests {
+    use super::{AppRoot, QuitDecision};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn quit_needs_a_second_press_inside_the_hint_window() {
+        let mut app = AppRoot::new();
+        let t0 = Instant::now();
+
+        assert_eq!(app.quit_decision(t0), QuitDecision::Show);
+        assert!(app.quit_hint_shown_at.is_some());
+
+        // 按住 ⌘Q 产生的首个重复键：忽略，避免提示刚出现就退出。
+        assert_eq!(
+            app.quit_decision(t0 + Duration::from_millis(100)),
+            QuitDecision::Wait
+        );
+
+        // 明确的第二次按键：正式退出。
+        assert_eq!(
+            app.quit_decision(t0 + Duration::from_millis(500)),
+            QuitDecision::Quit
+        );
+    }
+
+    #[test]
+    fn expired_hint_requires_another_first_press() {
+        let mut app = AppRoot::new();
+        let t0 = Instant::now();
+        assert_eq!(app.quit_decision(t0), QuitDecision::Show);
+
+        // 超过 3 秒：提示已过期，这次又按「第一次」处理。
+        let later = t0 + Duration::from_millis(3_200);
+        assert_eq!(app.quit_decision(later), QuitDecision::Show);
+        assert_eq!(
+            app.quit_decision(later + Duration::from_millis(400)),
+            QuitDecision::Quit
+        );
+    }
+}
+
+#[cfg(test)]
+mod scroll_hover_tests {
+    use super::AppRoot;
+
+    #[test]
+    fn scroll_hover_updates_state_without_restarting_animation() {
+        let mut app = AppRoot::new();
+        let generation = app.hover_generation;
+
+        // 模拟滚动中滚轮连续划过卡片：状态要跟着走（指针最后停在哪张卡上
+        // 不能丢），但不能推进动画代际，否则封面缩放每帧重置。
+        assert!(app.update_card_hover(3, true, false));
+        assert_eq!(app.hovered_card, Some(3));
+        assert_eq!(app.hover_generation, generation);
+
+        assert!(app.update_card_hover(3, false, false));
+        assert_eq!(app.hovered_card, None);
+        assert_eq!(app.leaving_card, Some(3));
+        assert_eq!(app.hover_generation, generation);
+
+        assert!(app.update_card_hover(4, true, false));
+        assert_eq!(app.hovered_card, Some(4));
+        assert_eq!(app.hover_generation, generation);
+
+        // 滚动结束后用户真的把鼠标移到卡上：这时才换代，播一次进入动画。
+        assert!(app.update_card_hover(5, true, true));
+        assert_eq!(app.hover_generation, generation + 1);
+    }
+
+    #[test]
+    fn scroll_settling_windows_cover_native_scroll() {
+        let mut app = AppRoot::new();
+        assert!(!app.scroll_settling());
+        app.mark_scrolling();
+        assert!(app.scroll_settling(), "刚滚过：hover 动画应当暂停");
+        assert!(app.scroll_render_pending, "滚动停止后需要补一帧恢复视觉");
+    }
 }
 
 #[cfg(test)]

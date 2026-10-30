@@ -12,6 +12,7 @@ pub mod auth;
 pub mod cache;
 pub mod danmaku;
 pub mod dynamic;
+pub mod favorites;
 pub mod feed;
 pub mod feed_cache;
 pub mod format;
@@ -23,6 +24,7 @@ pub mod messages;
 pub mod models;
 pub mod playback;
 pub mod player;
+pub mod ranking;
 pub mod resume;
 pub mod search;
 pub mod session;
@@ -35,6 +37,7 @@ pub use dynamic::{
     DynamicPage, DynamicStats, DynamicVideo,
 };
 pub use feed::{Feed, MAX_ITEMS};
+pub use favorites::{FavVideo, FavVideoPage, FAV_PAGE_SIZE};
 pub use history::{HistoryCursor, HistoryDay, HistoryEntry};
 pub use image_cache::ImageDiskCache;
 pub use interaction::{FavFolder, InteractionState};
@@ -46,6 +49,7 @@ pub use messages::{
 pub use models::{CoverItem, LoginState, UserSession};
 pub use playback::PlaybackSource;
 pub use player::{PlayerPrefs, PlayerState, RATE_OPTIONS};
+pub use ranking::{RankItem, RankPage, RankZone, DEFAULT_NOTE as RANK_DEFAULT_NOTE};
 pub use resume::{ResumeRecord, ResumeStore};
 pub use search::{
     Hotword, SearchArticle, SearchHistory, SearchLive, SearchMedia, SearchPage, SearchResults,
