@@ -55,6 +55,12 @@ function Get-GitCommit {
 
 function Resolve-CargoArgs {
     # gpui-fast 0.1.10 用了 std::hint::cold_path，Rust 1.94 编译不过。
+    #
+    # rustc -V 的输出形如：
+    #   rustc 1.99.1 (58cf8f9c3 2026-10-13)
+    #   rustc 1.99.0-nightly (012345678 2026-01-02)
+    # 提交日期本身带连字符，不能按 '-' 切分（会切出
+    # "1.99.1 (58cf8f9c3 2026" 这种非法版本号），必须用正则只取前三段数字。
     foreach ($candidate in @("1.99.1", "stable")) {
         $probe = @()
         if ($candidate -ne "stable") { $probe += "+$candidate" }
@@ -62,9 +68,10 @@ function Resolve-CargoArgs {
         $out = & rustc @probe 2>$null
         if ($LASTEXITCODE -ne 0 -or -not $out) { continue }
         $versionText = ($out | Select-Object -First 1) -replace '^rustc\s+', ''
-        $numeric = ($versionText -split '-')[0]
+        $m = [regex]::Match($versionText, '^\s*(\d+\.\d+\.\d+)')
+        if (-not $m.Success) { continue }
         try {
-            $v = [version]$numeric
+            $v = [version]$m.Groups[1].Value
         } catch {
             continue
         }
