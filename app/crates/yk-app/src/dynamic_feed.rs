@@ -666,6 +666,8 @@ fn card(
         }
         DynamicKind::Images => {
             if !item.images.is_empty() {
+                // 卡片上的图片不做「点击放大」：整卡是进详情的入口。
+                // 放大 / 复制图片都在详情浮层里（那里再给 `Some(cx)`）。
                 body = body.child(image_grid(
                     t,
                     &item.images,
@@ -674,7 +676,7 @@ fn card(
                     load_images,
                     active_images.clone(),
                     idx,
-                    Some(cx),
+                    None,
                 ));
             }
         }

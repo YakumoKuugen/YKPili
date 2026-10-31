@@ -27,6 +27,7 @@
 
 use gpui::assets::IconName;
 use gpui::component::input::{Input, InputEvent, InputState};
+use gpui::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui::component::kbd::Kbd;
 use gpui::component::Icon;
 use std::cell::Cell;
@@ -5571,6 +5572,36 @@ fn flatten_comment_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// 评论正文的右键菜单。复制时优先取当前选区，没选区就复制整条。
+fn comment_copy_menu(
+    text: String,
+    view: WeakEntity<PlayerView>,
+) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+    move |menu, _, _| {
+        let view = view.clone();
+        let fallback = text.clone();
+        menu.item(
+            PopupMenuItem::new("复制文本")
+                .icon(Icon::new(IconName::Copy))
+                .on_click(move |_, window, cx| {
+                    let selected = gpui::base::TextSelection::selected_text(window, cx);
+                    let value = if selected.trim().is_empty() {
+                        fallback.clone()
+                    } else {
+                        selected
+                    };
+                    if value.trim().is_empty() {
+                        return;
+                    }
+                    cx.write_to_clipboard(ClipboardItem::new_string(value));
+                    let _ = view.update(cx, |view, cx| {
+                        view.show_interaction_note("已复制".into(), false, cx);
+                    });
+                }),
+        )
+    }
+}
+
 fn comment_item(
     t: &YkTheme,
     comment: &DynamicComment,
@@ -5586,6 +5617,7 @@ fn comment_item(
     } else {
         comment.text.clone()
     };
+    let menu_text = text.clone();
     // 高度必须与 `CommentRows` 算出来的完全一致（窗口化渲染按它绝对定位）：
     // padding 16 + 作者行 16 + 两个 2px 间距 + 正文 20×行数 + 时间行 14，
     // 有附图时再加一条缩略图条（`COMMENT_IMAGE_ROW_HEIGHT`）。
@@ -5657,19 +5689,24 @@ fn comment_item(
                     // 注意别在正文外面再包 `overflow_hidden`：拖选自动滚动按
                     // 最近一层裁切计算可视区，裁到正文高度后左右拖动也会一直
                     // 触发滚动。让最近一层裁切保持为侧栏的滚动视口。
-                    div().h(px(COMMENT_TEXT_LINE_HEIGHT * lines as f32)).child(
-                        gpui::base::SelectableText::new(
-                            ("comment-body", comment.rpid.max(0) as usize),
-                            text,
+                    div()
+                        .id(("comment-menu", comment.rpid.max(0) as usize))
+                        .h(px(COMMENT_TEXT_LINE_HEIGHT * lines as f32))
+                        .child(
+                            gpui::base::SelectableText::new(
+                                ("comment-body", comment.rpid.max(0) as usize),
+                                text,
+                            )
+                            .text_style(gpui::TextStyleRefinement {
+                                font_size: Some(px(FONT_SIZE_CONTROL).into()),
+                                line_height: Some(px(COMMENT_TEXT_LINE_HEIGHT).into()),
+                                color: Some(s.text_primary),
+                                line_clamp: Some(COMMENT_MAX_LINES),
+                                ..Default::default()
+                            }),
                         )
-                        .text_style(gpui::TextStyleRefinement {
-                            font_size: Some(px(FONT_SIZE_CONTROL).into()),
-                            line_height: Some(px(COMMENT_TEXT_LINE_HEIGHT).into()),
-                            color: Some(s.text_primary),
-                            line_clamp: Some(COMMENT_MAX_LINES),
-                            ..Default::default()
-                        }),
-                    ),
+                        // 右键菜单：有选区就复制选区，没有就复制整条评论。
+                        .context_menu(comment_copy_menu(menu_text, cx.entity().downgrade())),
                 )
                 // 评论附图：最多 4 张 72×72 缩略图，点开进查看器（可缩放 / 左右翻）。
                 .when(!comment.pictures.is_empty(), |el| {

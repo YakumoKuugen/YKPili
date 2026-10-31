@@ -21,7 +21,7 @@ use gpui::{
     WindowOptions,
 };
 use yk_app::dynamic_view::DynamicDetailView;
-use yk_core::dynamic::{DynamicAuthor, DynamicImage, DynamicItem, DynamicKind};
+use yk_core::dynamic::{DynamicAuthor, DynamicComment, DynamicImage, DynamicItem, DynamicKind};
 
 fn context() -> HeadlessAppContext {
     let mut cx = HeadlessAppContext::with_platform(
@@ -157,7 +157,7 @@ fn main() {
 
     let body = "这是一段用于验证右键复制功能的动态正文。";
     let mut cx = context();
-    let (handle, _view) = open_detail(&mut cx, body_item(body));
+    let (handle, view) = open_detail(&mut cx, body_item(body));
     cx.update_window(handle, |_, window, cx| {
         window.render_frame(cx);
     })
@@ -207,6 +207,61 @@ fn main() {
         copied.as_deref(),
         Some(body),
         "右键菜单的「复制文本」必须把正文写进剪贴板"
+    );
+
+    // ①b 评论区右键同样要能复制。
+    let comment = DynamicComment {
+        rpid: 4242,
+        author: "评论用户".into(),
+        text: "这是一条用于验证评论右键复制的正文。".into(),
+        ..Default::default()
+    };
+    cx.update(|cx| {
+        view.update(cx, |view, cx| {
+            view.set_test_comments(vec![comment.clone()]);
+            cx.notify();
+        });
+    });
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .unwrap();
+    let comment_center = cx
+        .update_window(handle, |_, window, _| {
+            window
+                .find(gpui::ElementId::Name(
+                    format!("dynamic-comment-text-{}", comment.rpid).into(),
+                ))
+                .bounds()
+                .center()
+        })
+        .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        click_at(window, comment_center, MouseButton::Right, cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    cx.update_window(handle, |_, window, cx| {
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.update_window(handle, |_, window, cx| {
+        click_at(
+            window,
+            comment_center + gpui::point(px(64.), px(17.)),
+            MouseButton::Left,
+            cx,
+        );
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let copied = cx
+        .update(|cx| cx.read_from_clipboard())
+        .and_then(|item| item.text());
+    assert_eq!(
+        copied.as_deref(),
+        Some(comment.text.as_str()),
+        "评论右键菜单的「复制文本」必须把评论写进剪贴板"
     );
 
     // ② 图片右下角的复制按钮 → 图片条目。

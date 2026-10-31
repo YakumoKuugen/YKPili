@@ -50,8 +50,13 @@ fn comments(count: usize) -> Vec<DynamicComment> {
         .collect()
 }
 
-#[gpui::test]
-fn horizontal_drag_in_comment_does_not_scroll_panel(cx: &mut TestAppContext) {
+fn open_comments(
+    cx: &mut TestAppContext,
+) -> (
+    gpui::AnyWindowHandle,
+    gpui::Entity<PlayerView>,
+    VisualTestContext,
+) {
     let theme = yk_ui::theme::YkTheme::dark();
     let (handle, player) = cx.update(|cx| {
         gpui::init(cx);
@@ -80,13 +85,18 @@ fn horizontal_drag_in_comment_does_not_scroll_panel(cx: &mut TestAppContext) {
         )
         .unwrap()
     });
-
     let mut vcx = VisualTestContext::from_window(handle, cx);
     vcx.update(|window, cx| {
         window.render_frame(cx);
     });
     // 固定光标在侧栏内，避免 hover 收起把布局改掉。
     set_test_cursor(Some(point(px(960.), px(300.))));
+    (handle, player, vcx)
+}
+
+#[gpui::test]
+fn horizontal_drag_in_comment_does_not_scroll_panel(cx: &mut TestAppContext) {
+    let (_handle, player, mut vcx) = open_comments(cx);
 
     let offset =
         |vcx: &mut VisualTestContext| vcx.update(|_, cx| player.read(cx).test_scroll_offset());
@@ -147,5 +157,38 @@ fn horizontal_drag_in_comment_does_not_scroll_panel(cx: &mut TestAppContext) {
         point(px(text_left + 40.0), px(y)),
         MouseButton::Left,
         Modifiers::default(),
+    );
+    vcx.update(|window, cx| gpui::base::TextSelection::clear(window, cx));
+
+    // 回到顶部，右键第一条评论 → 菜单「复制文本」。
+    vcx.update(|window, cx| {
+        player.update(cx, |view, cx| {
+            view.set_test_scroll(0.0);
+            cx.notify();
+        });
+        window.render_frame(cx);
+    });
+    let press = point(px(text_left + 40.0), px(285.0));
+    vcx.simulate_mouse_down(press, MouseButton::Right, Modifiers::default());
+    vcx.simulate_mouse_up(press, MouseButton::Right, Modifiers::default());
+    vcx.update(|window, cx| {
+        window.render_frame(cx);
+    });
+
+    // 菜单锚在右键位置，首项在菜单内边距之后（与详情页复制测试一致）。
+    let menu_item = press + point(px(64.), px(17.));
+    vcx.simulate_mouse_down(menu_item, MouseButton::Left, Modifiers::default());
+    vcx.simulate_mouse_up(menu_item, MouseButton::Left, Modifiers::default());
+    vcx.update(|window, cx| {
+        window.render_frame(cx);
+    });
+
+    let copied = vcx
+        .update(|_, cx| cx.read_from_clipboard())
+        .and_then(|item| item.text());
+    let text = copied.expect("评论右键菜单必须能把内容写进剪贴板");
+    assert!(
+        text.contains("第 0 条评论"),
+        "评论右键菜单复制了错误内容：{text:?}"
     );
 }

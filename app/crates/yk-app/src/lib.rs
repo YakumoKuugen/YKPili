@@ -325,6 +325,14 @@ impl AppRoot {
         self.dynamic_detail.is_some()
     }
 
+    /// 测试入口：图片查看器是否已打开。
+    #[doc(hidden)]
+    pub fn test_image_viewer_open(&self, cx: &App) -> bool {
+        self.image_viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.read(cx).is_open())
+    }
+
     /// 测试 / 截图入口：固定一张封面处于 hover 态，用于检查卡片材质。
     pub fn with_hovered_card(mut self, index: usize) -> Self {
         self.hovered_card = Some(index);

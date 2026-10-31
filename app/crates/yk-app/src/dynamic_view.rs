@@ -116,6 +116,12 @@ impl DynamicDetailView {
         self.close_handler = Some(Box::new(handler));
     }
 
+    /// 测试入口：直接灌入评论，跳过网络请求。
+    #[doc(hidden)]
+    pub fn set_test_comments(&mut self, comments: Vec<DynamicComment>) {
+        self.comments = CommentState::Ready(comments);
+    }
+
     fn spawn_comments(&mut self, cx: &mut Context<Self>) {
         let Some(target) = self.item.comment_target.clone() else {
             self.comments = CommentState::Ready(Vec::new());
@@ -1438,6 +1444,7 @@ fn comment_row(
                         .id(ElementId::Name(
                             format!("dynamic-comment-text-{}", comment.rpid).into(),
                         ))
+                        .test_support()
                         .text_size(px(FONT_SIZE_CONTROL))
                         .line_height(px(LINE_HEIGHT_CONTROL))
                         .text_color(s.text_secondary)

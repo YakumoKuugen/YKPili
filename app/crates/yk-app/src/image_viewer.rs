@@ -253,10 +253,14 @@ impl Render for ImageViewer {
             .inset_0()
             // 深色底：0.9 不透明，压住下面的界面又不至于纯黑。
             .bg(gpui::rgba(0x000000E6))
+            // 查看器是模态层：不能再把点击 / 命中漏给下面的详情遮罩，
+            // 否则「点图片外面」会同时关掉查看器和详情两个浮层。
+            .occlude()
             .track_focus(&self.focus_handle)
-            // 点击背景关闭（图片自己 stop_propagation）。
+            // 点击背景只关查看器（图片自己 stop_propagation）。
             .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
                 this.close(cx);
+                cx.stop_propagation();
             }))
             // 滚轮缩放，锚点取指针相对屏幕中心的偏移。
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
@@ -277,6 +281,7 @@ impl Render for ImageViewer {
                 MouseButton::Right,
                 cx.listener(|this, _: &gpui::MouseDownEvent, _window, cx| {
                     this.close(cx);
+                    cx.stop_propagation();
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
