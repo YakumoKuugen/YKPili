@@ -215,6 +215,20 @@ pub fn clipboard_image(bytes: Vec<u8>, format: ImageFormat) -> gpui::ClipboardIt
     gpui::ClipboardItem::new_image(&image)
 }
 
+/// 把图片写进系统剪贴板。
+///
+/// Windows 上优先走 [`crate::win_clipboard`]：GPUI 的 Windows 后端只写注册格式
+/// `PNG`，不写 `CF_DIB` —— 微信 / QQ / Word 这些只认 CF_DIB 的程序粘贴出来是空的，
+/// 看起来就像「点了复制但没复制上」。补一份 DIB 之后两边都能贴。
+/// 其它平台（以及 Windows 上解码失败时）继续走 GPUI 自己的实现。
+pub fn copy_image_to_clipboard(cx: &mut gpui::App, bytes: Vec<u8>, format: ImageFormat) {
+    #[cfg(target_os = "windows")]
+    if crate::win_clipboard::write_image(&bytes, format) {
+        return;
+    }
+    cx.write_to_clipboard(clipboard_image(bytes, format));
+}
+
 fn resp_status_is_success(status: reqwest::StatusCode) -> bool {
     status.is_success()
 }

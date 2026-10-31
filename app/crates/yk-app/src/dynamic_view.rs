@@ -200,7 +200,7 @@ impl DynamicDetailView {
                 view.copying_image = false;
                 match result {
                     Ok((bytes, format)) => {
-                        cx.write_to_clipboard(crate::http::clipboard_image(bytes, format));
+                        crate::http::copy_image_to_clipboard(cx, bytes, format);
                         view.show_notice("图片已复制", cx);
                     }
                     Err(error) => {
@@ -364,7 +364,21 @@ impl DynamicDetailView {
             );
 
         let body = if has_media {
-            let media = self.media_column(t, &images, &cover_url, media_w, scale_factor, cx);
+            // 封面也按原图复制：显示用的 `cover_url` 带 `@xxxw.webp` 缩放后缀。
+            let cover_copy_url = if cover.is_empty() {
+                String::new()
+            } else {
+                yk_core::dynamic::original_url(&cover)
+            };
+            let media = self.media_column(
+                t,
+                &images,
+                &cover_url,
+                &cover_copy_url,
+                media_w,
+                scale_factor,
+                cx,
+            );
             let right = self.article_column(t, cx);
             div()
                 .flex()
@@ -415,6 +429,7 @@ impl DynamicDetailView {
         t: &YkTheme,
         images: &[DynamicImage],
         cover_url: &str,
+        cover_copy_url: &str,
         media_w: f32,
         scale_factor: f32,
         cx: &mut Context<Self>,
@@ -567,10 +582,14 @@ impl DynamicDetailView {
         }
 
         // 右下角「复制图片」：半透明材质浮在大图上，多图时抬到缩略图条上方。
+        //
+        // 复制**原图**而不是屏幕上这张：显示用的地址是按显示宽度取的
+        // `@480w.webp` 缩略图，贴到聊天框里一放大就糊。原图过宽时
+        // `copy_url` 会收一档到 2560，避免解码 + 写剪贴板占太多内存。
         let copy_url = if len > 0 {
-            images[current].fit_url(media_w, scale_factor)
+            images[current].copy_url()
         } else {
-            cover_url.to_string()
+            cover_copy_url.to_string()
         };
         if !copy_url.is_empty() {
             column = column.child(self.image_copy_button(t, copy_url, len > 1, cx));

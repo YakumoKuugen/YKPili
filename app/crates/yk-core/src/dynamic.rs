@@ -78,6 +78,19 @@ impl DynamicImage {
         asset_url(&self.url, 1280)
     }
 
+    /// 复制到剪贴板用的地址：尽量给**原图**。
+    ///
+    /// 屏幕上那张是按显示宽度取的缩略图（`@480w.webp` 之类），复制出去一放大就糊；
+    /// 原图宽度可控时直接给原图，超过 2560 才收一档 —— 再大的原图解码成
+    /// 位图 + 写 CF_DIB 会一次性占掉上百 MB，收益却看不出来。
+    pub fn copy_url(&self) -> String {
+        if self.width > 2560 {
+            asset_url(&self.url, 2560)
+        } else {
+            original_url(&self.url)
+        }
+    }
+
     /// 宽高比（宽 / 高）；数据缺失时按 4:3 处理。
     pub fn aspect(&self) -> f32 {
         if self.width > 0 && self.height > 0 {
@@ -115,24 +128,33 @@ pub fn fitted_width(display_px: f32, scale_factor: f32, original_width: u32) -> 
 }
 
 pub fn asset_url(url: &str, width: u32) -> String {
-    let url = url.trim();
-    if url.is_empty() {
-        return String::new();
+    let mut out = original_url(url);
+    if out.is_empty() {
+        return out;
     }
-    // 协议相对地址（`//i0.hdslb.com/...`）很常见：不补 scheme 的话
-    // `img()` 拿到的不是绝对 URL，图会加载不出来。
-    let mut out = if let Some(rest) = url.strip_prefix("http://") {
-        format!("https://{rest}")
-    } else if let Some(rest) = url.strip_prefix("//") {
-        format!("https://{rest}")
-    } else {
-        url.to_string()
-    };
     if out.contains('@') || out.contains('?') || !out.contains("hdslb.com") {
         return out;
     }
     out.push_str(&format!("@{width}w.webp"));
     out
+}
+
+/// 只补 scheme、**不加缩放后缀**：需要原图的场景（复制到剪贴板）用它。
+///
+/// 协议相对地址（`//i0.hdslb.com/...`）很常见：不补 scheme 的话
+/// `img()` 拿到的不是绝对 URL，图会加载不出来。
+pub fn original_url(url: &str) -> String {
+    let url = url.trim();
+    if url.is_empty() {
+        return String::new();
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = url.strip_prefix("//") {
+        format!("https://{rest}")
+    } else {
+        url.to_string()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -604,6 +626,55 @@ pub struct DynamicPage {
 mod tests {
     use super::*;
     use crate::api::models::{DynamicFeedResponse, ReplyResponse};
+
+    #[test]
+    fn copy_url_prefers_original_image() {
+        let image = DynamicImage {
+            url: "http://i0.hdslb.com/bfs/new_dyn/abc.jpg".into(),
+            width: 1448,
+            height: 1080,
+        };
+        // 复制要原图：不带 `@xxxw.webp` 缩放后缀，但 scheme 补成 https。
+        assert_eq!(
+            image.copy_url(),
+            "https://i0.hdslb.com/bfs/new_dyn/abc.jpg"
+        );
+        // 对照：屏幕显示用的那一档确实带后缀。
+        assert_eq!(
+            image.fit_url(400.0, 2.0),
+            "https://i0.hdslb.com/bfs/new_dyn/abc.jpg@800w.webp"
+        );
+
+        // 未知宽度（接口没给）也按原图给。
+        let unknown = DynamicImage {
+            url: "//i1.hdslb.com/bfs/a.png".into(),
+            width: 0,
+            height: 0,
+        };
+        assert_eq!(unknown.copy_url(), "https://i1.hdslb.com/bfs/a.png");
+
+        // 超宽原图收一档到 2560，避免解码 + 写剪贴板占上百 MB。
+        let huge = DynamicImage {
+            url: "https://i2.hdslb.com/bfs/b.jpg".into(),
+            width: 6000,
+            height: 4000,
+        };
+        assert_eq!(
+            huge.copy_url(),
+            "https://i2.hdslb.com/bfs/b.jpg@2560w.webp"
+        );
+
+        // 已经带后缀 / 外链的地址原样返回。
+        let suffixed = DynamicImage {
+            url: "https://i0.hdslb.com/bfs/c.jpg@480w.webp".into(),
+            width: 1448,
+            height: 1080,
+        };
+        assert_eq!(
+            suffixed.copy_url(),
+            "https://i0.hdslb.com/bfs/c.jpg@480w.webp"
+        );
+    }
 
     const FEED: &str = r#"{
       "code": 0,

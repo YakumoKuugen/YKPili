@@ -47,6 +47,8 @@ pub mod search_view;
 pub mod settings_view;
 pub mod video;
 pub mod video_worker;
+#[cfg(target_os = "windows")]
+pub mod win_clipboard;
 use page_image_cache::PageImageCache;
 use yk_ui::status::SKELETON_PULSE_MS;
 use yk_ui::theme::*;
