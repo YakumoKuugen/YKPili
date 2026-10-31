@@ -92,6 +92,15 @@ impl ImageResidency {
 /// 应用根视图。
 pub struct AppRoot {
     theme: YkTheme,
+    /// 根节点自己的焦点句柄。
+    ///
+    /// ⌘Q 挂在根节点的 capture 阶段；没有焦点时 GPUI 只把按键派发到
+    /// `base::Root` 这一层，AppRoot 的监听器根本不在路径上。启动时先让根
+    /// 节点拿到焦点，键盘事件才有稳定的落点（打开播放器后能退出，就是
+    /// 因为播放器刚好把焦点放进了 AppRoot 子树）。
+    root_focus: Option<FocusHandle>,
+    /// 是否已经排了一次「把焦点交回根节点」的延迟任务。
+    root_focus_pending: bool,
     feed: Feed,
     /// Some = 正在播放（整场景压在页面上）
     playing: Option<gpui::Entity<player::PlayerView>>,
@@ -1852,6 +1861,8 @@ impl AppRoot {
         eprintln!("[app] AppRoot::new 被调用");
         Self {
             theme: YkTheme::dark(),
+            root_focus: None,
+            root_focus_pending: false,
             feed: {
                 let mut f = Feed::new();
                 f.load(&mock_recommend(24));
@@ -1941,6 +1952,28 @@ impl Render for AppRoot {
             self.dynamic_detail = None;
         }
         self.prune_page_images(window, cx);
+
+        // 根节点焦点：保证 ⌘Q 永远能进到根节点的 capture 监听器。
+        // 已有焦点（搜索框、播放器、输入框等）时不抢，只在「没人持有焦点」时兜底。
+        let focus_handle = match self.root_focus.as_ref() {
+            Some(handle) => handle.clone(),
+            None => {
+                let handle = cx.focus_handle();
+                self.root_focus = Some(handle.clone());
+                handle
+            }
+        };
+        if !self.root_focus_pending && window.focused(cx).is_none() {
+            self.root_focus_pending = true;
+            let handle = focus_handle.clone();
+            cx.defer_in(window, move |view, window, cx| {
+                view.root_focus_pending = false;
+                if window.focused(cx).is_none() {
+                    window.focus(&handle, cx);
+                }
+            });
+        }
+
         // 窗口可见性：最小化 / 被完全遮挡时停掉页面侧的动画与补帧。
         // 失焦不算 —— 窗口还在屏幕上，内容该照常刷新。
         if !self.visibility_observed {
@@ -2141,6 +2174,7 @@ impl Render for AppRoot {
         div()
             .relative()
             .size_full()
+            .track_focus(&focus_handle)
             // 顶栏 / 播放浮窗 / 账号面板 / 动态详情都在页面图片缓存范围之外；
             // GPUI 的 `img()` 没有 `ImageCache` 就不会发请求（评论头像、顶栏头像
             // 都只会剩渐变占位）。这里给整棵树挂一个 retain-all 缓存兜底，
