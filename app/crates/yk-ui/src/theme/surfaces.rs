@@ -28,6 +28,11 @@ pub struct YkSurfaces {
     pub surface_elevated_solid: Hsla,
     pub surface_elevated_solid_hover: Hsla,
     pub surface_elevated_strong: Hsla,
+    /// 弹层 / 菜单底：比所在表面再亮一档。
+    ///
+    /// 暗色下 `surface_elevated_strong` 与侧栏底（#373A3E）同色，光靠描边和阴影
+    /// 几乎看不出「这张卡浮在上面」；弹层单独一档，层级靠表面差就成立。
+    pub surface_popover: Hsla,
     /// 顶栏 / 工具栏底：比卡片 / 浮层更暗、带一点透明，让工具栏成为「窗口外壳」
     /// 而不是另一块内容卡。取色参考 macOS 浏览器工具栏（#2E3034）。
     pub surface_toolbar: Hsla,
@@ -72,6 +77,8 @@ pub fn light() -> YkSurfaces {
         surface_elevated_solid: rgba(0xFFFFFFFF).into(),
         surface_elevated_solid_hover: rgba(0xD9D9D9FF).into(),
         surface_elevated_strong: rgba(0xFFFFFFEB).into(),
+        // 浅色下弹层就是白卡：和侧栏同色时靠描边 + 阴影分层，别压成灰。
+        surface_popover: rgba(0xFFFFFFFA).into(),
         surface_toolbar: rgba(0xF6F7F9F2).into(),
         fill_1: rgba(0x83839126).into(),
         fill_2: rgba(0x8383914D).into(),
@@ -120,6 +127,7 @@ pub fn dark() -> YkSurfaces {
         surface_elevated_solid: rgba(0x373A3EFF).into(),
         surface_elevated_solid_hover: rgba(0x414449FF).into(),
         surface_elevated_strong: rgba(0x373A3EEB).into(),
+        surface_popover: rgba(0x45494FF2).into(),
         surface_toolbar: rgba(0x2B2E33F2).into(),
         fill_1: rgba(0x8383911A).into(),
         fill_2: rgba(0x83839133).into(),

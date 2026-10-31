@@ -57,7 +57,7 @@ pub fn apply(cx: &mut gpui::App, t: &YkTheme) {
         c.border = s.border_subtle;
         c.muted = s.fill_1;
         c.muted_foreground = s.text_tertiary;
-        c.popover = s.surface_elevated_strong;
+        c.popover = s.surface_popover;
         c.popover_foreground = s.text_primary;
         c.overlay = s.overlay_scrim;
         c.caret = p.theme_primary;

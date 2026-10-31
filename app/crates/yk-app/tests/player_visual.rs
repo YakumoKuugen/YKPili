@@ -1,7 +1,8 @@
 //! 播放浮窗信息面板的离屏渲染验收：互动区默认态 + 分享面板展开态。
 //!
 //! 只在 macOS / Linux 上跑；GPUI 的 headless renderer 需要 Metal / WGPU。
-//! 图片写到 `/tmp/ykpili-player-*.ppm`，用 `sips -s format png` 转 PNG 后目检。
+//! 图片写到 `target/visual/ykpili-player-*.ppm`（Windows 没有 `/tmp`），
+//! macOS 用 `sips -s format png` 转 PNG 后目检。
 //!
 //! 本地验收：`YK_VISUAL=1 cargo test -p yk-app --test player_visual`
 
@@ -75,8 +76,12 @@ fn capture(
     for pixel in raw.chunks_exact(4) {
         ppm.extend_from_slice(&pixel[..3]);
     }
-    fs::write(path, ppm).unwrap();
-    eprintln!("[player] {path} {width}x{height}");
+    // 输出目录跟着仓库走：Windows 上没有 `/tmp`，用 `target/visual` 两边都能读。
+    let dir = std::path::Path::new("target/visual");
+    fs::create_dir_all(dir).unwrap();
+    let path = dir.join(path);
+    fs::write(&path, ppm).unwrap();
+    eprintln!("[player] {} {width}x{height}", path.display());
 }
 
 fn main() {
@@ -85,7 +90,7 @@ fn main() {
         return;
     }
     capture(
-        "/tmp/ykpili-player-share.ppm",
+        "ykpili-player-share.ppm",
         1280.0,
         820.0,
         true,
@@ -94,7 +99,7 @@ fn main() {
         false,
     );
     capture(
-        "/tmp/ykpili-player-coin.ppm",
+        "ykpili-player-coin.ppm",
         1280.0,
         820.0,
         false,
@@ -103,16 +108,17 @@ fn main() {
         false,
     );
     capture(
-        "/tmp/ykpili-player-fav.ppm",
+        "ykpili-player-fav.ppm",
         1280.0,
         820.0,
         false,
         false,
         true,
-        false,
+        // 展开态截图：368 宽的收藏夹卡片要按 400 侧栏排版才完整。
+        true,
     );
     capture(
-        "/tmp/ykpili-player-expanded.ppm",
+        "ykpili-player-expanded.ppm",
         1280.0,
         820.0,
         false,

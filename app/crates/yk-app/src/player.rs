@@ -120,11 +120,18 @@ const CTRL_H: f32 = PLAYER_CONTROL_BAR_HEIGHT; // 88
 const DANMAKU_INPUT_H: f32 = 38.0;
 const INFO_PANEL_EXPANDED: f32 = PLAYER_INFO_PANEL_WIDTH; // 400
 const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
+/// 收藏夹面板一屏先摆几行：再长就先折叠，点「展开全部」再看。
+/// 8 × 32 + 头尾 ≈ 330，与 §13.3「容器最大高 320」同一量级。
+const FAV_PANEL_VISIBLE_ROWS: usize = 8;
 /// 面板整块滚动超过这个距离后，右下角才浮出「回到顶部」。
 /// 留 24px 是为了不因滚轮抖动 / 触控板回弹闪一下按钮。
 const PANEL_BACK_TO_TOP_THRESHOLD: f32 = 24.0;
 /// 滚动结束后这段时间内不响应面板收起，避免滚轮末尾的 hover 抖动。
 const PANEL_SCROLL_HOLD_MS: u64 = 400;
+/// 互动 toast 从弹出到开始退场的时长（含入场动画，不含退场动画）。
+const TOAST_VISIBLE_MS: u64 = 2600;
+/// 互动 toast 缩放动画的起始比例：入场 88% → 100%，退场反过来。
+const TOAST_SCALE_FROM: f32 = 0.88;
 
 /// 播放器下边界距窗口底部的距离。
 ///
@@ -522,10 +529,23 @@ pub struct PlayerView {
     fav_folders: Vec<yk_core::FavFolder>,
     /// 收藏夹列表是否在加载。
     fav_loading: bool,
-    /// 互动提示（成功 / 失败），显示在互动行下面，几秒后自动消失。
+    /// 收藏夹列表的失败原因：非空时面板显示「重试」，而不是空状态。
+    fav_error: Option<String>,
+    /// 收藏夹超过一屏时是否已展开（默认先折叠，别把标签 / 评论顶出视野）。
+    fav_list_expanded: bool,
+    /// 互动行（点赞 / 投币 / 收藏 / 分享）的实际几何（窗口坐标）。
+    /// 三个互动弹层按它定位，不再占文档流。
+    action_row_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// 正在播退场动画的那张卡：bool 已经清零，但内容还要再画一帧两帧。
+    overlay_closing_kind: Option<ActionOverlay>,
+    /// 弹层动画代次：入场 / 退场各起一段，旧定时器不能把新弹层收掉。
+    overlay_generation: u64,
+    /// 互动提示（成功 / 失败），在窗口底部居中弹 toast，几秒后自动消失。
     interaction_note: Option<(String, bool)>,
     /// 互动提示代次：旧定时器不能把新提示收走。
     interaction_note_generation: u64,
+    /// toast 正在播放退场缩放：提示内容保留到动画结束再摘掉。
+    interaction_note_closing: bool,
     /// 互动状态请求代次：换源后旧响应直接丢弃。
     interaction_generation: u64,
     /// 信息面板的唯一滚动区：顶部信息与评论一起滚。
@@ -696,8 +716,14 @@ impl PlayerView {
             share_panel_open: false,
             fav_folders: Vec::new(),
             fav_loading: false,
+            fav_error: None,
+            fav_list_expanded: false,
+            action_row_bounds: Rc::new(Cell::new(None)),
+            overlay_closing_kind: None,
+            overlay_generation: 0,
             interaction_note: None,
             interaction_note_generation: 0,
+            interaction_note_closing: false,
             interaction_generation: 0,
             panel_collapse_generation: 0,
             panel_scroll: ScrollHandle::new(),
@@ -827,9 +853,15 @@ impl PlayerView {
         self.coin_also_like = false;
         self.fav_panel_open = false;
         self.share_panel_open = false;
+        // 换源时把可能还在播的退场动画也断掉，别让上一支视频的卡飘在新视频上。
+        self.overlay_closing_kind = None;
+        self.overlay_generation = self.overlay_generation.wrapping_add(1);
         self.fav_folders.clear();
         self.fav_loading = false;
+        self.fav_error = None;
+        self.fav_list_expanded = false;
         self.interaction_note = None;
+        self.interaction_note_closing = false;
         self.interaction_note_generation = self.interaction_note_generation.wrapping_add(1);
         // 本地没有记录、也没有历史页带来的进度时，才去服务端历史里找一次
         // （别的设备 / 别的客户端看过，本地不知道）。
@@ -1229,21 +1261,45 @@ impl PlayerView {
         .detach();
     }
 
-    /// 在互动区下面弹一条提示（成功 / 失败），2.6 秒后自动收回。
+    /// 在窗口底部居中弹一条轻提示（toast）。
+    ///
+    /// 生命周期分三段：入场缩放 → 停留 `TOAST_VISIBLE_MS` → 退场缩放，
+    /// 退场动画走完才把内容从 `interaction_note` 里摘掉。
     fn show_interaction_note(&mut self, text: String, is_error: bool, cx: &mut Context<Self>) {
         self.interaction_note = Some((text, is_error));
+        self.interaction_note_closing = false;
         self.interaction_note_generation = self.interaction_note_generation.wrapping_add(1);
         let generation = self.interaction_note_generation;
         cx.notify();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
-                .timer(std::time::Duration::from_millis(2600))
+                .timer(std::time::Duration::from_millis(TOAST_VISIBLE_MS))
+                .await;
+            let still_current = this
+                .update(cx, |view, cx| {
+                    if view.interaction_note_generation != generation {
+                        return false;
+                    }
+                    // 先切到退场动画；内容还要再留 DURATION_FAST 让缩放收完。
+                    view.interaction_note_closing = true;
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !still_current {
+                return;
+            }
+            // 动画的起点要等下一帧 request_layout 才建立，这里多留一两帧，
+            // 避免缩放到一半就被摘掉（最后 10% 的透明度/尺寸跳变肉眼可见）。
+            cx.background_executor()
+                .timer(DURATION_FAST + std::time::Duration::from_millis(40))
                 .await;
             let _ = this.update(cx, |view, cx| {
                 if view.interaction_note_generation != generation {
                     return;
                 }
                 view.interaction_note = None;
+                view.interaction_note_closing = false;
                 cx.notify();
             });
         })
@@ -1327,10 +1383,14 @@ impl PlayerView {
             self.show_interaction_note("请先登录后再投币".into(), true, cx);
             return;
         }
-        self.coin_panel_open = !self.coin_panel_open;
+        if self.coin_panel_open {
+            self.close_action_overlays(cx);
+            return;
+        }
         self.fav_panel_open = false;
         self.share_panel_open = false;
-        cx.notify();
+        self.coin_panel_open = true;
+        self.note_overlay_opened(cx);
     }
 
     /// 投币（1 枚 / 2 枚，可同时点赞）。
@@ -1356,7 +1416,7 @@ impl PlayerView {
         }
         let coins = multiply.clamp(1, 2);
         self.interaction_busy = true;
-        self.coin_panel_open = false;
+        self.close_action_overlays(cx);
         let cookie = session.cookie_header();
         let csrf = session.bili_jct.clone();
         cx.notify();
@@ -1405,12 +1465,15 @@ impl PlayerView {
             self.show_interaction_note("请先登录后再收藏".into(), true, cx);
             return;
         }
-        let open = !self.fav_panel_open;
-        self.fav_panel_open = open;
+        if self.fav_panel_open {
+            self.close_action_overlays(cx);
+            return;
+        }
         self.coin_panel_open = false;
         self.share_panel_open = false;
-        cx.notify();
-        if open && self.fav_folders.is_empty() {
+        self.fav_panel_open = true;
+        self.note_overlay_opened(cx);
+        if self.fav_folders.is_empty() {
             self.load_fav_folders(cx);
         }
     }
@@ -1422,6 +1485,7 @@ impl PlayerView {
             return;
         };
         self.fav_loading = true;
+        self.fav_error = None;
         let cookie = session.cookie_header();
         let mid = session.dede_user_id;
         cx.notify();
@@ -1439,9 +1503,13 @@ impl PlayerView {
                 match result {
                     Ok(folders) => {
                         view.fav_folders = folders;
+                        view.fav_error = None;
                     }
                     Err(error) => {
                         eprintln!("[interaction] 收藏夹加载失败：{error}");
+                        // 面板内联显示失败态 + 重试：只弹 toast 的话，
+                        // 面板里只剩一片空白，用户不知道是「没有收藏夹」还是「没加载出来」。
+                        view.fav_error = Some(error.clone());
                         view.show_interaction_note(error, true, cx);
                     }
                 }
@@ -1453,7 +1521,8 @@ impl PlayerView {
 
     /// 收藏到指定收藏夹 / 从收藏夹移除。
     fn do_fav(&mut self, folder_id: i64, add: bool, cx: &mut Context<Self>) {
-        if self.interaction_busy {
+        // 退场动画里那张卡只是残影：别再让它接业务操作。
+        if self.interaction_busy || !self.fav_panel_open {
             return;
         }
         let Some(source) = self.source.clone() else {
@@ -1484,13 +1553,30 @@ impl PlayerView {
                 view.interaction_busy = false;
                 match result {
                     Ok(()) => {
-                        view.interaction.favoured = add;
-                        if let Some(source) = view.source.as_mut() {
-                            source.favorite_count = if add {
-                                source.favorite_count.saturating_add(1)
-                            } else {
-                                source.favorite_count.saturating_sub(1)
-                            };
+                        // 收藏夹是多选：勾上 / 取消只改这一夹的状态。
+                        // 先回写列表，否则面板上的勾选框永远停在旧状态
+                        // （看起来像点了没反应）。
+                        if let Some(folder) = view
+                            .fav_folders
+                            .iter_mut()
+                            .find(|folder| folder.id == folder_id)
+                        {
+                            folder.fav_state = if add { 1 } else { 0 };
+                        }
+                        // 顶部的收藏数只在「一个夹都没有 → 至少收进一个」这一下 ±1；
+                        // 收进第二个夹不该再加一次数。
+                        let was_favoured = view.interaction.favoured;
+                        let now_favoured =
+                            view.fav_folders.iter().any(|folder| folder.contains_video());
+                        view.interaction.favoured = now_favoured;
+                        if was_favoured != now_favoured {
+                            if let Some(source) = view.source.as_mut() {
+                                source.favorite_count = if now_favoured {
+                                    source.favorite_count.saturating_add(1)
+                                } else {
+                                    source.favorite_count.saturating_sub(1)
+                                };
+                            }
                         }
                         view.show_interaction_note(
                             if add { "已收藏" } else { "已取消收藏" }.into(),
@@ -1509,12 +1595,69 @@ impl PlayerView {
         .detach();
     }
 
-    /// 展开 / 收起分享面板。
-    fn toggle_share_panel(&mut self, cx: &mut Context<Self>) {
-        self.share_panel_open = !self.share_panel_open;
+    /// 收起互动区的所有弹层；返回「刚才确实有弹层开着」。
+    ///
+    /// Esc 和「面板收起」都走这里：弹层是浮在内容上的一次性操作，
+    /// 关掉它不应该带动其它状态（不退出播放器、不重置互动）。
+    fn close_action_overlays(&mut self, cx: &mut Context<Self>) -> bool {
+        let kind = if self.fav_panel_open {
+            ActionOverlay::Fav
+        } else if self.coin_panel_open {
+            ActionOverlay::Coin
+        } else if self.share_panel_open {
+            ActionOverlay::Share
+        } else {
+            return false;
+        };
         self.coin_panel_open = false;
         self.fav_panel_open = false;
+        self.share_panel_open = false;
+        // 留一两帧给退场动画：内容按 kind 重新画，动画走完再真正摘掉。
+        self.overlay_closing_kind = Some(kind);
+        self.overlay_generation = self.overlay_generation.wrapping_add(1);
+        let generation = self.overlay_generation;
         cx.notify();
+        cx.spawn(async move |this, cx| {
+            // 动画起点要等下一帧 request_layout 才建立，多留两帧，
+            // 免得淡到一半就被摘掉（最后 10% 的跳变肉眼可见）。
+            cx.background_executor()
+                .timer(DURATION_FAST + std::time::Duration::from_millis(40))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.overlay_generation != generation || view.overlay_closing_kind.is_none() {
+                    return;
+                }
+                view.overlay_closing_kind = None;
+                cx.notify();
+            });
+        })
+        .detach();
+        true
+    }
+
+    /// 弹层刚打开：清掉可能还在跑的退场动画，并起一段新的入场动画。
+    fn note_overlay_opened(&mut self, cx: &mut Context<Self>) {
+        self.overlay_closing_kind = None;
+        self.overlay_generation = self.overlay_generation.wrapping_add(1);
+        // 打开弹层时可能已经排了一个 220ms 的收起：取消掉，
+        // 否则刚打开就被收走（面板一收弹层也跟着关）。
+        if self.panel_collapse_pending {
+            self.panel_collapse_pending = false;
+            self.panel_collapse_generation = self.panel_collapse_generation.wrapping_add(1);
+        }
+        cx.notify();
+    }
+
+    /// 展开 / 收起分享面板。
+    fn toggle_share_panel(&mut self, cx: &mut Context<Self>) {
+        if self.share_panel_open {
+            self.close_action_overlays(cx);
+            return;
+        }
+        self.coin_panel_open = false;
+        self.fav_panel_open = false;
+        self.share_panel_open = true;
+        self.note_overlay_opened(cx);
     }
 
     /// 分享到哔哩哔哩动态：转发视频，配文用标题。
@@ -1534,7 +1677,7 @@ impl PlayerView {
             return;
         }
         self.interaction_busy = true;
-        self.share_panel_open = false;
+        self.close_action_overlays(cx);
         // 正文 = 标题 + 视频链接：B 站会把链接解析成视频卡片，
         // 解析不了也至少是一条能点进视频的动态。
         let content = format!("{} {}", source.title, video_page_url(&source.bvid));
@@ -1583,7 +1726,7 @@ impl PlayerView {
             self.show_interaction_note("这个视频没有可分享的链接".into(), true, cx);
             return;
         }
-        self.share_panel_open = false;
+        self.close_action_overlays(cx);
         let link = video_page_url(&source.bvid);
         let title = source.title.clone();
         let desc = source.desc.clone();
@@ -1599,15 +1742,24 @@ impl PlayerView {
         cx.notify();
     }
 
-    /// 复制视频链接。
+    /// 复制视频链接：`链接 + 换行 + 标题`。
+    ///
+    /// 只贴一条裸链接，粘到聊天框里对方看不出是什么视频；带上标题一行，
+    /// 既认得出内容，链接本身也还能点开（和 B 站网页版复制的形态一致）。
     fn copy_video_link(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.source.clone() else {
             return;
         };
-        self.share_panel_open = false;
+        self.close_action_overlays(cx);
         let link = video_page_url(&source.bvid);
-        cx.write_to_clipboard(ClipboardItem::new_string(link));
-        self.show_interaction_note("链接已复制".into(), false, cx);
+        let text = share_link_text(&link, &source.title);
+        let with_title = text.len() > link.len();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.show_interaction_note(
+            if with_title { "已复制链接和标题" } else { "链接已复制" }.into(),
+            false,
+            cx,
+        );
     }
 
     /// 窗口可见性变化：不可见时让视频线程停帧，可见时恢复。
@@ -1787,12 +1939,23 @@ impl PlayerView {
         self.arm_panel_collapse(window, cx);
     }
 
+    /// 互动弹层（投币 / 收藏夹 / 分享）现在是否开着。
+    fn action_overlay_open(&self) -> bool {
+        self.coin_panel_open || self.fav_panel_open || self.share_panel_open
+    }
+
     /// 排一个 220ms 的收起定时器。调用方必须已经确认指针在 hover 区外。
     ///
     /// 不在这里再查 `window.mouse_position()`：watchdog 用的是系统级光标，
     /// 而 `Window::mouse_position()` 在快速移出窗口时可能仍停留在旧位置。
     fn arm_panel_collapse(&mut self, window: &Window, cx: &mut Context<Self>) {
         if !self.expanded {
+            return;
+        }
+        // 弹层开着就把面板钉住：弹层是从互动行挂出来的浮层，
+        // 指针为了看它 / 点它跑出面板边界，不该连带把面板和弹层一起收掉。
+        // 弹层关掉后（外点 / Esc / 再点触发按钮）看门狗会重新判断，该收还是会收。
+        if self.action_overlay_open() {
             return;
         }
         // 记下这一刻的光标位置：收起后用它判断「光标有没有动过」。
@@ -1836,6 +1999,9 @@ impl PlayerView {
         self.expanded = false;
         self.panel_collapse_pending = false;
         self.panel_generation = self.panel_generation.wrapping_add(1);
+        // 弹层现在已经浮在面板之外：面板一收，它们就会悬在视频画面上。
+        // 指针离开面板本来就该关掉弹层，三个一起收。
+        self.close_action_overlays(cx);
         // 鼠标可能还停在面板左缘：400ms 内不响应，避免反复弹出。
         self.panel_hover_grace_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(400));
@@ -2223,6 +2389,22 @@ impl PlayerView {
         self.expanded
     }
 
+    /// 测试入口：互动行的实际几何（窗口坐标）。
+    /// 三个互动弹层按它定位，`None` 表示这一帧还没 prepaint。
+    #[doc(hidden)]
+    pub fn test_action_row_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.action_row_bounds.get()
+    }
+
+    /// 测试入口：直接打开收藏夹弹层（跳过登录检查，也不拉接口）。
+    #[doc(hidden)]
+    pub fn test_open_fav_overlay(&mut self, cx: &mut Context<Self>) {
+        self.coin_panel_open = false;
+        self.share_panel_open = false;
+        self.fav_panel_open = true;
+        self.note_overlay_opened(cx);
+    }
+
     /// 测试入口：读三个互动面板的展开状态（投币 / 收藏 / 分享）。
     pub fn action_panels_open(&self) -> (bool, bool, bool) {
         (
@@ -2295,22 +2477,35 @@ impl PlayerView {
         self.coin_panel_open = coin;
         self.fav_panel_open = fav;
         if fav {
-            self.fav_folders = vec![
-                yk_core::FavFolder {
-                    id: 1,
-                    title: "默认收藏夹".into(),
-                    media_count: 265,
-                    attr: 1,
-                    fav_state: 0,
-                },
-                yk_core::FavFolder {
-                    id: 2,
-                    title: "硬件".into(),
-                    media_count: 12,
-                    attr: 0,
-                    fav_state: 1,
-                },
+            // 截图用的夹具按线上真实形态铺：十几夹、几十条、两条已收藏，
+            // 这样折叠 / 展开、勾选态、长标题截断都能一次看到。
+            let fixtures: [(&str, u64, i64); 14] = [
+                ("默认收藏夹", 257, 1),
+                ("硬件", 2, 1),
+                ("硬件科普", 1, 0),
+                ("身体护理", 1, 0),
+                ("音乐", 14, 0),
+                ("NAS", 3, 0),
+                ("锻炼", 3, 0),
+                ("Swift", 1, 0),
+                ("tauri", 1, 0),
+                ("AI", 12, 0),
+                ("原神", 15, 0),
+                ("弹射", 1, 0),
+                ("环", 1, 0),
+                ("书", 4, 0),
             ];
+            self.fav_folders = fixtures
+                .iter()
+                .enumerate()
+                .map(|(index, (title, count, state))| yk_core::FavFolder {
+                    id: index as i64 + 1,
+                    title: (*title).into(),
+                    media_count: *count,
+                    attr: if index == 0 { 1 } else { 0 },
+                    fav_state: *state,
+                })
+                .collect();
         }
         self
     }
@@ -3397,6 +3592,8 @@ impl Render for PlayerView {
             .child(self.info_panel(&t, window, cx))
             // ⑤ 骑边界按钮：面板之后挂载 → 压在面板之上（GPUI 没有 z-index）
             .child(self.panel_toggle(&t, cx))
+            // ⑥ 互动反馈 toast：窗口底部居中，浮在视频与右侧面板之上。
+            .children(self.interaction_toast(&t))
             // 鼠标移动 / 点击都算活动：把控制栏叫回来并重新计时 5 秒。
             .on_mouse_move(cx.listener(|view, _: &MouseMoveEvent, window, cx| {
                 view.note_activity(window, cx);
@@ -3572,6 +3769,12 @@ impl Render for PlayerView {
                             }
                         }
                         "escape" => {
+                            // 弹层开着时 Esc 只关弹层（APG：Esc 关闭并把焦点还给触发按钮），
+                            // 别一按就进「再按一次退出播放器」——用户想关的是面前这张卡。
+                            if this.close_action_overlays(cx) {
+                                cx.stop_propagation();
+                                return;
+                            }
                             if this.escape_hint {
                                 this.request_close(window, cx);
                             } else {
@@ -4283,10 +4486,12 @@ impl PlayerView {
         } else {
             "分享".to_string()
         };
+        let action_bounds = self.action_row_bounds.clone();
         let actions = div()
             // 顶边线按 400 宽铺满（面板内容就是 400 宽排版），按钮区另外
             // 固定 200 —— 见下面的说明。
             .w(px(PLAYER_INFO_PANEL_WIDTH))
+            .relative()
             .border_t_1()
             .border_color(s.border_subtle)
             .child(
@@ -4343,6 +4548,16 @@ impl PlayerView {
                             view.toggle_share_panel(cx);
                         }),
                     )),
+            )
+            // 互动行的实际几何由这层透明 canvas 在 prepaint 时写回。
+            // 弹层按它挂到窗口上，所以展开面板不会再把下面的内容顶下去。
+            .child(
+                canvas(
+                    move |bounds, _, _| action_bounds.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
             );
 
         let mut tags: Vec<String> = if !self.tags.is_empty() {
@@ -4425,16 +4640,6 @@ impl PlayerView {
             );
         }
 
-        // 互动区展开的面板（投币 / 收藏夹 / 分享）+ 一行提示。
-        // 这里不加左右外边距：面板本身就按可见宽度排，再加外边距就会
-        // 超出可见区，右边被裁掉一截。
-        let action_panels = div()
-            .pb(px(SPACE_2))
-            .children(self.coin_panel(t, cx))
-            .children(self.fav_panel(t, cx))
-            .children(self.share_panel(t, cx))
-            .children(self.interaction_note_line(t));
-
         // 整个面板只有一个滚动区：图 1 那一段（标题 / UP / 互动 / 标签 / Tab）
         // 不再固定，和下面的评论一起滚。内层单独包一列，避免 flex 子项被压缩后
         // 高度不足、overflow_y_scroll 反而滚不动。
@@ -4446,7 +4651,6 @@ impl PlayerView {
             .children(meta)
             .children(up)
             .child(actions)
-            .child(action_panels)
             .children(tags_row)
             .child(tabs_row)
             .child(self.tab_content(t, active, window, cx));
@@ -4522,6 +4726,8 @@ impl PlayerView {
                 view.note_pointer_move(event.position, window, cx);
             }))
             .child(body)
+            // 互动弹层：deferred 画在所有面板内容之后（GPUI 没有 z-index）。
+            .children(self.action_overlay(t, window, cx))
             // 滚动后出现：浮在内容之上，右下角 16px 内边距。
             .children(show_back_to_top.then(|| self.panel_back_to_top(t, cx)))
             .with_animation(
@@ -4534,18 +4740,114 @@ impl PlayerView {
             .into_any_element()
     }
 
-    /// 互动区展开面板的宽度：固定 200（与互动行同宽）。
+    /// 投币 / 分享浮层的宽度：固定 200（与互动按钮区同宽）。
     ///
-    /// 同样不能跟着展开态变 —— 面板宽度一变，它下面的按钮就会挪位，
+    /// 不能跟着侧栏展开态变 —— 宽度一变，里面的按钮就会挪位，
     /// 用户刚展开就点会点空。
     fn action_panel_width(&self) -> f32 {
         INFO_PANEL_COLLAPSED
     }
 
-    /// 互动区展开的浮层外壳：圆角卡片 + 细边，压在内容上方一点。
+    /// 三个互动弹层（投币 / 收藏夹 / 分享）的浮层容器。
     ///
-    /// 宽度用**收起态**的 200 而不是 `w_full`：面板内容是按 400 宽排版的，
-    /// 侧栏收起时右半会被裁掉，面板跟着裁就只剩半个字。
+    /// 走 `deferred + anchored` 而不是插进文档流：
+    /// - **不占布局**：以前展开面板会把标签、评论区整段往下顶，收起时又跳回来；
+    /// - **画在最上层**：GPUI 没有 z-index，`deferred` 让它在所有兄弟节点之后绘制；
+    /// - **位置跟着互动行走**：bounds 由互动行 prepaint 时记录，滚动时下一帧自动跟上。
+    fn action_overlay(
+        &self,
+        t: &YkTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        // 开着的那个优先；退场动画期间按缓存的 kind 继续画同一张卡。
+        let kind = if self.fav_panel_open {
+            ActionOverlay::Fav
+        } else if self.coin_panel_open {
+            ActionOverlay::Coin
+        } else if self.share_panel_open {
+            ActionOverlay::Share
+        } else {
+            self.overlay_closing_kind?
+        };
+        let closing = self.overlay_closing_kind.is_some();
+        // 首帧还没量到互动行：这一帧先不画，下一帧就有位置了。
+        let bounds = self.action_row_bounds.get()?;
+        // 互动行滚出面板可视区后不再画：浮层是按窗口坐标挂的，
+        // 不拦一下会跟着滚到视频画面上，看起来像凭空飘着一张卡。
+        let viewport = window.viewport_size();
+        let panel_top = px(TOP_BAR_HEIGHT + SPACE_4);
+        let panel_bottom = viewport.height - px(PLAYER_BOTTOM_INSET);
+        if bounds.origin.y + bounds.size.height < panel_top || bounds.origin.y > panel_bottom {
+            return None;
+        }
+        let panel = match kind {
+            ActionOverlay::Fav => self.fav_panel(t, cx),
+            ActionOverlay::Coin => self.coin_panel(t, cx),
+            ActionOverlay::Share => self.share_panel(t, cx),
+        }?;
+
+        // 入场：淡入 + 从上方 6px 落下来；退场反向。GPUI 没有 transform，
+        // 位移用负 margin 做，卡片本身不带 margin，anchor 的定位不受影响。
+        let animation = if closing {
+            Animation::new(DURATION_FAST).with_easing(ease_standard())
+        } else {
+            Animation::new(DURATION_FAST).with_easing(ease_entrance())
+        };
+        let animated = div().child(panel).with_animation(
+            format!(
+                "player-overlay-{}-{}",
+                if closing { "out" } else { "in" },
+                self.overlay_generation
+            ),
+            animation,
+            move |el, delta| {
+                let progress = if closing { 1.0 - delta } else { delta };
+                let progress = progress.clamp(0.0, 1.0);
+                el.opacity(progress).mt(px(-6.0 * (1.0 - progress)))
+            },
+        );
+
+        Some(
+            deferred(
+                // 整窗的点击层垫在浮层下面：点任何别的地方都先把浮层收起来。
+                // 浮层卡片自己带 occlude，点卡片上的按钮不会被这层吃掉。
+                anchored()
+                    .position(point(px(0.), px(0.)))
+                    .child(
+                        div()
+                            .id("player-overlay-catcher")
+                            .w(viewport.width)
+                            .h(viewport.height)
+                            .occlude()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                                    // 外点只负责关浮层，这一次点击不再落到下面的按钮上。
+                                    view.close_action_overlays(cx);
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(
+                                anchored()
+                                    // 与面板文字列对齐（16）；下方放不下时自动翻到上方。
+                                    .position(point(
+                                        bounds.origin.x + px(SPACE_4),
+                                        bounds.origin.y + bounds.size.height + px(SPACE_1),
+                                    ))
+                                    .snap_to_window_with_margin(px(SPACE_4))
+                                    .child(animated),
+                            ),
+                    ),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// 投币 / 分享这两个小浮层的壳：圆角卡片 + 细边 + 阴影。
+    ///
+    /// 宽度跟互动按钮区一样是 200：这两个面板只有两三个控件，
+    /// 再宽反而和上面的按钮对不齐（收藏夹是清单，另走 368 的卡片）。
     fn action_popover(
         t: &YkTheme,
         id: &'static str,
@@ -4556,20 +4858,25 @@ impl PlayerView {
         div()
             .id(id)
             .w(px(width))
-            .mb(px(SPACE_2))
             .px(px(SPACE_3))
             .py(px(SPACE_2))
-            .rounded(px(RADIUS_MD))
-            .bg(s.fill_2)
+            .rounded(px(RADIUS_LG))
+            // 和收藏夹卡片共用同一档弹层表面：三个面板是一个家族，
+            // 不能一个像卡片、另外两个像侧栏里多出来的一行。
+            .bg(s.surface_popover)
             .border_1()
-            .border_color(s.border_subtle)
+            .border_color(s.border_popover)
+            .shadow(t.shadows.shadow_glass_elevated.clone())
+            // 浮层是实心的：点空白处也不该穿透到下面的标签 / 评论。
+            .occlude()
             .child(content)
             .into_any_element()
     }
 
     /// 投币面板：1 枚 / 2 枚 + 「同时点赞」。
     fn coin_panel(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.coin_panel_open {
+        // 退场动画期间 bool 已经清零，但这一帧还得把卡画出来。
+        if !self.coin_panel_open && self.overlay_closing_kind != Some(ActionOverlay::Coin) {
             return None;
         }
         let s = &t.surfaces;
@@ -4663,84 +4970,315 @@ impl PlayerView {
     }
 
     /// 收藏夹面板：列出自己的收藏夹，点一下收藏 / 取消收藏。
+    ///
+    /// 按「多选清单」重做（设计 §13.3 弹出层 / §13.7 勾选）：
+    /// - 卡片抬一层：`surface_popover` + `border_popover` + 悬浮阴影，
+    ///   压在侧栏内容之上读，不再和普通列表行糊成一片；
+    /// - 行高 32（与菜单项同规格），左侧勾选圈表示是否已收藏，数量右对齐。
+    ///   原先把「标题 / 数量 / 收藏」三列硬塞进 200 宽，标题和动作词互相裁切；
+    /// - 行内不再写「收藏 / 已收藏」：勾选圈 + 底色已经说明状态，
+    ///   重复一遍动作词只会挤掉标题；
+    /// - 超过一屏先折叠，别把标签 / 评论整个顶出视野；加载 / 空 / 失败三态齐备。
     fn fav_panel(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.fav_panel_open {
+        // 退场动画期间 bool 已经清零，但这一帧还得把卡画出来。
+        if !self.fav_panel_open && self.overlay_closing_kind != Some(ActionOverlay::Fav) {
             return None;
         }
         let s = &t.surfaces;
+        let p = &t.palette;
         let busy = self.interaction_busy;
-        let list = if self.fav_loading {
+        let selected = self
+            .fav_folders
+            .iter()
+            .filter(|folder| folder.contains_video())
+            .count();
+
+        let close = div()
+            .id("player-fav-close")
+            .w(px(22.))
+            .h(px(22.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(RADIUS_HALF))
+            .cursor_pointer()
+            .hover(|style| style.bg(s.fill_3))
+            .child(
+                Icon::new(IconName::X)
+                    .size(px(ICON_SIZE_SM - 2.))
+                    .text_color(s.text_tertiary),
+            )
+            .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                view.fav_panel_open = false;
+                cx.notify();
+            }));
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_2))
+            .h(px(32.))
+            .px(px(SPACE_2))
+            .child(
+                div()
+                    .text_size(px(FONT_SIZE_CONTROL))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(s.text_primary)
+                    .child("收藏夹"),
+            )
+            .child(div().flex_1())
+            .children((selected > 0).then(|| {
+                div()
+                    .text_size(px(FONT_SIZE_MICRO))
+                    .text_color(p.theme_primary)
+                    .child(format!("已收藏 {selected} 个"))
+            }))
+            .child(close);
+
+        let divider = div().h(px(1.)).w_full().bg(s.border_subtle);
+
+        let body: AnyElement = if self.fav_loading && self.fav_folders.is_empty() {
+            // 骨架行按真实行高占位：数据回来时面板不会「跳一下」。
             div()
-                .py(px(SPACE_2))
-                .text_size(px(FONT_SIZE_CAPTION))
-                .text_color(s.text_tertiary)
-                .child("收藏夹加载中…")
-        } else if self.fav_folders.is_empty() {
-            div()
-                .py(px(SPACE_2))
-                .text_size(px(FONT_SIZE_CAPTION))
-                .text_color(s.text_tertiary)
-                .child("没有可用的收藏夹")
-        } else {
-            let mut list = div().flex().flex_col();
-            for folder in self.fav_folders.clone() {
-                let folder_id = folder.id;
-                let favourited = folder.contains_video();
-                list = list.child(
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1))
+                .py(px(SPACE_1))
+                .children((0..3).map(|_| {
                     div()
-                        .id("player-fav-folder")
+                        .h(px(32.))
+                        .w_full()
+                        .rounded(px(RADIUS_MD))
+                        .bg(s.skeleton_brush)
+                        .opacity(0.6)
+                        .into_any_element()
+                }))
+                .into_any_element()
+        } else if let Some(error) = self
+            .fav_error
+            .as_ref()
+            .filter(|_| self.fav_folders.is_empty())
+        {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(SPACE_1))
+                .py(px(SPACE_4))
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(s.text_secondary)
+                        .child("收藏夹没加载出来"),
+                )
+                .child(
+                    div()
+                        .max_w(px(280.))
+                        .truncate()
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(s.text_quaternary)
+                        .child(error.clone()),
+                )
+                .child(
+                    div()
+                        .id("player-fav-retry")
+                        .mt(px(SPACE_1))
+                        .px(px(SPACE_3))
                         .h(px(28.))
                         .flex()
                         .items_center()
-                        .justify_between()
-                        .px(px(SPACE_2))
-                        .rounded(px(RADIUS_SM))
+                        .rounded(px(RADIUS_HALF))
+                        .cursor_pointer()
+                        .bg(p.theme_primary_10)
+                        .hover(|style| style.bg(p.theme_primary_20))
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(p.theme_primary)
+                        .child("重试")
+                        .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                            view.load_fav_folders(cx);
+                        })),
+                )
+                .into_any_element()
+        } else if self.fav_folders.is_empty() {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(SPACE_1))
+                .py(px(SPACE_5))
+                .child(
+                    Icon::new(IconName::FolderOpen)
+                        .size(px(ICON_SIZE_LG))
+                        .text_color(s.text_quaternary),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(s.text_secondary)
+                        .child("还没有收藏夹"),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(s.text_quaternary)
+                        .child("在网页版建好收藏夹后会同步到这里"),
+                )
+                .into_any_element()
+        } else {
+            let total = self.fav_folders.len();
+            let shown = if self.fav_list_expanded {
+                total
+            } else {
+                total.min(FAV_PANEL_VISIBLE_ROWS)
+            };
+            let mut list = div().flex().flex_col().gap(px(SPACE_1)).py(px(SPACE_1));
+            for folder in self.fav_folders.iter().take(shown) {
+                list = list.child(Self::fav_row(t, folder, busy, cx));
+            }
+            let mut stack = div().flex().flex_col().child(list);
+            if total > FAV_PANEL_VISIBLE_ROWS {
+                let expanded = self.fav_list_expanded;
+                stack = stack.child(
+                    div()
+                        .id("player-fav-more")
+                        .h(px(28.))
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(SPACE_1))
+                        .rounded(px(RADIUS_HALF))
                         .cursor_pointer()
                         .hover(|style| style.bg(s.fill_3))
-                        .text_size(px(FONT_SIZE_CAPTION))
-                        .text_color(s.text_primary)
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(s.text_tertiary)
+                        .child(if expanded {
+                            "收起".to_string()
+                        } else {
+                            format!("展开全部 {total} 个")
+                        })
                         .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(SPACE_2))
-                                .child(div().min_w(px(0.)).truncate().child(folder.title.clone()))
-                                .child(
-                                    div()
-                                        .text_size(px(FONT_SIZE_MICRO))
-                                        .text_color(s.text_quaternary)
-                                        .child(format!("{} 个", folder.media_count)),
-                                ),
+                            Icon::new(if expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .size(px(12.))
+                            .text_color(s.text_quaternary),
                         )
-                        .child(
-                            div()
-                                .text_size(px(FONT_SIZE_MICRO))
-                                .text_color(if favourited {
-                                    s.text_primary
-                                } else {
-                                    s.text_quaternary
-                                })
-                                .child(if favourited { "已收藏" } else { "收藏" }),
-                        )
-                        .when(busy, |el| el.opacity(0.5))
-                        .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
-                            view.do_fav(folder_id, !favourited, cx);
+                        .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                            view.fav_list_expanded = !view.fav_list_expanded;
+                            cx.notify();
                         })),
                 );
             }
-            list
+            stack.into_any_element()
         };
-        Some(Self::action_popover(
-            t,
-            "player-fav-panel",
-            self.action_panel_width(),
-            div().child(list).into_any_element(),
-        ))
+
+        Some(
+            div()
+                .id("player-fav-panel")
+                .w(px(PLAYER_INFO_PANEL_WIDTH - SPACE_4 * 2.0))
+                .p(px(SPACE_1))
+                .flex()
+                .flex_col()
+                .rounded(px(RADIUS_XL))
+                .bg(s.surface_popover)
+                .border_1()
+                .border_color(s.border_popover)
+                .shadow(t.shadows.shadow_glass_elevated.clone())
+                .occlude()
+                .child(header)
+                .child(divider)
+                .child(body)
+                .into_any_element(),
+        )
+    }
+
+    /// 收藏夹行：左侧勾选圈 + 标题 + 右侧数量，整行可点，点一下加 / 取消。
+    ///
+    /// 勾选圈用形状（实心对勾 / 空心圆）而不是只靠颜色区分选中态，
+    /// 色觉障碍用户也能看出来哪几个夹子已经收藏。
+    fn fav_row(
+        t: &YkTheme,
+        folder: &yk_core::FavFolder,
+        busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let s = &t.surfaces;
+        let p = &t.palette;
+        let selected = folder.contains_video();
+        let folder_id = folder.id;
+        let hover_bg = if selected {
+            p.theme_primary_20
+        } else {
+            s.fill_3
+        };
+        div()
+            .id(SharedString::from(format!("player-fav-folder-{folder_id}")))
+            .h(px(32.))
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(SPACE_2))
+            .px(px(SPACE_2))
+            .rounded(px(RADIUS_MD))
+            .cursor_pointer()
+            .text_size(px(FONT_SIZE_CONTROL))
+            .when(selected, |el| el.bg(p.theme_primary_10))
+            .when(!busy, |el| el.hover(move |style| style.bg(hover_bg)))
+            .when(busy, |el| el.opacity(0.55))
+            .child(
+                div()
+                    .w(px(14.))
+                    .h(px(14.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .when(selected, |el| {
+                        el.bg(p.theme_primary)
+                            .border_1()
+                            .border_color(p.theme_primary)
+                    })
+                    .when(!selected, |el| el.border_1().border_color(s.border_strong))
+                    .children(selected.then(|| {
+                        Icon::new(IconName::Check)
+                            .size(px(10.))
+                            .text_color(rgb(0xFFFFFF))
+                    })),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_color(if selected {
+                        s.text_primary
+                    } else {
+                        s.text_secondary
+                    })
+                    .child(folder.title.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(FONT_SIZE_MICRO))
+                    .text_color(s.text_tertiary)
+                    .child(fav_count_label(folder.media_count)),
+            )
+            .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                view.do_fav(folder_id, !selected, cx);
+            }))
+            .into_any_element()
     }
 
     /// 分享面板：哔哩哔哩动态 / QQ / 复制链接。
     fn share_panel(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.share_panel_open {
+        // 退场动画期间 bool 已经清零，但这一帧还得把卡画出来。
+        if !self.share_panel_open && self.overlay_closing_kind != Some(ActionOverlay::Share) {
             return None;
         }
         let s = &t.surfaces;
@@ -4866,21 +5404,69 @@ impl PlayerView {
         true
     }
 
-    /// 互动提示行：成功 / 失败各一行小字。
-    fn interaction_note_line(&self, t: &YkTheme) -> Option<AnyElement> {
+    /// 互动反馈 toast：窗口底部居中的小胶囊，成功 / 失败共用。
+    ///
+    /// 浮在播放层与右侧面板之上，不参与面板排版，所以复制 / 点赞后
+    /// 按钮不会因为提示出现而被顶开。位置抬到控制栏之上，
+    /// 控制栏显示或隐藏时都不会压住它。
+    ///
+    /// 缩放用「字号 / 内边距 / 高度同比插值」实现：这一版 GPUI 没有
+    /// 元素级 transform，等比改这几个尺寸在视觉上就是整体缩放。
+    fn interaction_toast(&self, t: &YkTheme) -> Option<AnyElement> {
         let (text, is_error) = self.interaction_note.clone()?;
         let s = &t.surfaces;
+        let closing = self.interaction_note_closing;
+        let scale_from = TOAST_SCALE_FROM;
+        // 入场 / 退场各用一个独立的动画 id：切到退场时动画从头开始，
+        // 但首帧 scale 正好是 1，和入场结束态无缝衔接。
+        let (animation_id, animation) = if closing {
+            (
+                format!("player-toast-out-{}", self.interaction_note_generation),
+                Animation::new(DURATION_FAST).with_easing(ease_standard()),
+            )
+        } else {
+            (
+                format!("player-toast-in-{}", self.interaction_note_generation),
+                Animation::new(DURATION_FAST).with_easing(ease_entrance()),
+            )
+        };
+        let pill = div()
+            .rounded_full()
+            .bg(s.surface_elevated_strong)
+            .border_1()
+            .border_color(s.border_popover)
+            .shadow(t.shadows.shadow_2.clone())
+            .text_color(if is_error {
+                t.palette.status_error
+            } else {
+                s.text_secondary
+            })
+            .flex()
+            .items_center()
+            .child(text)
+            .with_animation(animation_id, animation, move |el, delta| {
+                let factor = if closing {
+                    1.0 - (1.0 - scale_from) * delta
+                } else {
+                    scale_from + (1.0 - scale_from) * delta
+                };
+                let opacity = if closing { 1.0 - delta } else { delta };
+                el.max_w(px(360.0 * factor))
+                    .min_h(px(34.0 * factor))
+                    .px(px(SPACE_4 * factor))
+                    .py(px(SPACE_2 * factor))
+                    .text_size(px(FONT_SIZE_CAPTION * factor))
+                    .opacity(opacity.clamp(0.0, 1.0))
+            });
         Some(
             div()
-                .id("player-interaction-note")
-                .pb(px(SPACE_1))
-                .text_size(px(FONT_SIZE_MICRO))
-                .text_color(if is_error {
-                    t.palette.status_error
-                } else {
-                    s.text_secondary
-                })
-                .child(text)
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(CTRL_H + SPACE_4))
+                .flex()
+                .justify_center()
+                .child(pill)
                 .into_any_element(),
         )
     }
@@ -5335,6 +5921,38 @@ fn meta_stat(icon: IconName, text: String) -> impl IntoElement {
         .gap(px(3.))
         .child(Icon::new(icon).size(px(12.)))
         .child(text)
+}
+
+/// 复制链接的文本形态：`链接 + 换行 + 标题`。
+///
+/// 只贴一条裸链接，粘到聊天框里对方看不出是什么视频；带上标题一行，
+/// 既认得出内容，链接本身也还能点开（和 B 站网页版复制的形态一致）。
+/// 标题为空时退回裸链接，不留一个空行。
+fn share_link_text(link: &str, title: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        link.to_string()
+    } else {
+        format!("{link}
+{title}")
+    }
+}
+
+/// 三个互动弹层。退场动画期间 bool 已经清零，靠它才知道该重画哪一张卡。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActionOverlay {
+    Coin,
+    Fav,
+    Share,
+}
+
+/// 收藏夹条数文案：四位以内给「N 个」，过万用「万」单位，别让数字把标题挤掉。
+fn fav_count_label(count: u64) -> String {
+    if count >= 10_000 {
+        format::count(count)
+    } else {
+        format!("{count} 个")
+    }
 }
 
 /// 互动行的一项：图标在上、计数/文案在下。
@@ -6160,7 +6778,8 @@ fn ctrl_icon(icon: IconName, color: Hsla) -> impl IntoElement {
 mod tests {
     use super::{
         comment_request_wait, comments_need_more, cursor_local, flatten_comment_text,
-        merge_comment_page, percent_encode, qq_share_url, video_page_url, CommentRows,
+        merge_comment_page, percent_encode, qq_share_url, share_link_text, video_page_url,
+        CommentRows,
         COMMENT_PAGE_SIZE, COMMENT_REQUEST_INTERVAL, COMMENT_ROW_CHROME, COMMENT_TEXT_LINE_HEIGHT,
     };
     use gpui::{point, px};
@@ -6207,6 +6826,20 @@ mod tests {
         let local = cursor_local(global, point(px(-1613.), px(-1440.)), point(px(108.), px(342.)));
         assert!((local.x.as_f32() - 1273.2).abs() < 0.1);
         assert!((local.y.as_f32() - 323.2).abs() < 0.1);
+    }
+
+    #[test]
+    fn share_link_text_puts_title_on_second_line() {
+        let link = video_page_url("BV1mG1QBNEFN");
+        assert_eq!(
+            share_link_text(&link, "【攻略】若娜瓦"),
+            "https://www.bilibili.com/video/BV1mG1QBNEFN
+【攻略】若娜瓦"
+        );
+        // 标题两端空白要清掉；空标题不留空行。
+        assert_eq!(share_link_text(&link, "  标题  "), format!("{link}
+标题"));
+        assert_eq!(share_link_text(&link, "   "), link);
     }
 
     #[test]
