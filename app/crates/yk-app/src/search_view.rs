@@ -23,6 +23,7 @@ use yk_core::search::{
     self, Hotword, SearchHistory, SearchMedia, SearchResults, SearchSort, SearchTab, SearchUser,
     SearchVideo, SuggestItem,
 };
+use yk_ui::status;
 use yk_ui::theme::*;
 
 use crate::{AppRoot, ImageResidency, DOCK_RESERVED};
@@ -125,7 +126,14 @@ pub struct SearchState {
     pub bar_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     pub episode_open: Option<i64>,
     pub episode_selected: HashMap<i64, usize>,
+    /// 已关注（服务端确认过）的 uid 集合。
     pub followed: HashSet<i64>,
+    /// 已经问过服务端、关注状态可信的 uid；不在里面 = 还没查过。
+    pub follow_known: HashSet<i64>,
+    /// 关注 / 取关请求进行中的 uid：按钮显示「处理中」并挡住连点。
+    pub follow_busy: HashSet<i64>,
+    /// 后台补查关注状态的 uid（只用来去重，不改按钮文案）。
+    pub follow_prefetching: HashSet<i64>,
     pub notice: Option<String>,
     notice_generation: u64,
 }
@@ -165,6 +173,9 @@ impl SearchState {
             episode_open: None,
             episode_selected: HashMap::new(),
             followed: HashSet::new(),
+            follow_known: HashSet::new(),
+            follow_busy: HashSet::new(),
+            follow_prefetching: HashSet::new(),
             notice: None,
             notice_generation: 0,
         }
@@ -502,6 +513,8 @@ impl AppRoot {
                             view.search.results.live.len(),
                             view.search.results.articles.len(),
                         );
+                        // 用户卡上的「已关注」要真实数据：结果一落地就在后台补查。
+                        view.prefetch_user_follows(cx);
                     }
                     Err(error) => {
                         eprintln!("[search] 结果拉取失败：{error}");
@@ -547,6 +560,163 @@ impl AppRoot {
                     view.search.notice = None;
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// 关注 / 取关搜索结果里的 UP 主。
+    ///
+    /// 状态可信就直接翻；还没查过（刚搜出来、后台补查还没回来）就先查一次关系，
+    /// 再写反状态 —— 不把已经关注的人又「关注」一遍。
+    pub(crate) fn toggle_user_follow(&mut self, mid: i64, cx: &mut Context<Self>) {
+        if mid <= 0 || self.search.follow_busy.contains(&mid) {
+            return;
+        }
+        let Some(session) = self.session.clone() else {
+            self.set_search_notice("请先登录后再关注", cx);
+            return;
+        };
+        let cookie = session.cookie_header();
+        let csrf = session.bili_jct.clone();
+        let known = self.search.follow_known.contains(&mid);
+        let intended = !self.search.followed.contains(&mid);
+        self.search.follow_busy.insert(mid);
+        if known {
+            // 乐观更新：失败再翻回来（见下方 Err 分支）。
+            if intended {
+                self.search.followed.insert(mid);
+            } else {
+                self.search.followed.remove(&mid);
+            }
+        }
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    // 未知起点：先查真实状态，再决定写「关注」还是「取关」。
+                    let next = if known {
+                        intended
+                    } else {
+                        !yk_core::api::client::fetch_followed(&client, &cookie, mid)?
+                    };
+                    yk_core::interaction::follow_user(&client, &cookie, &csrf, mid, next)?;
+                    Ok::<_, String>(next)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                view.search.follow_busy.remove(&mid);
+                match result {
+                    Ok(next) => {
+                        if next {
+                            view.search.followed.insert(mid);
+                        } else {
+                            view.search.followed.remove(&mid);
+                        }
+                        view.search.follow_known.insert(mid);
+                        view.set_search_notice(
+                            if next { "已关注" } else { "已取消关注" },
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("[search] 关注失败：{error}");
+                        if known {
+                            // 乐观更新回滚。
+                            if intended {
+                                view.search.followed.remove(&mid);
+                            } else {
+                                view.search.followed.insert(mid);
+                            }
+                        }
+                        view.set_search_notice(error, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 结果页里的 UP 主卡：把还没查过的关注状态补上。
+    ///
+    /// 只在「综合 / 用户」tab 用得到。关系接口在 `Relation` 桶里（400ms 一条），
+    /// 所以串行查：用户 tab 最多补 20 个，综合页只补露出的第一个；
+    /// 后台结果只填「还不知道」的 uid，不覆盖用户刚点出来的状态。
+    pub(crate) fn prefetch_user_follows(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.search.tab, SearchTab::All | SearchTab::User) {
+            return;
+        }
+        if self.cookie().trim().is_empty() {
+            return;
+        }
+        // 综合页只露出第一个用户，补一个就够；「用户」tab 才铺开补全。
+        let cap = if self.search.tab == SearchTab::All {
+            1
+        } else {
+            20
+        };
+        let mids: Vec<i64> = self
+            .search
+            .results
+            .users
+            .iter()
+            .map(|user| user.mid)
+            .filter(|mid| {
+                *mid > 0
+                    && !self.search.follow_known.contains(mid)
+                    && !self.search.follow_prefetching.contains(mid)
+            })
+            .take(cap)
+            .collect();
+        if mids.is_empty() {
+            return;
+        }
+        let cookie = self.cookie();
+        for mid in &mids {
+            self.search.follow_prefetching.insert(*mid);
+        }
+        cx.spawn(async move |this, cx| {
+            let pending = mids.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    let mut states = Vec::with_capacity(mids.len());
+                    for mid in mids {
+                        // 单条失败只跳过这一条：不因为一个 -412 把整批丢掉。
+                        if let Ok(followed) =
+                            yk_core::api::client::fetch_followed(&client, &cookie, mid)
+                        {
+                            states.push((mid, followed));
+                        }
+                    }
+                    Ok::<_, String>(states)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                for mid in &pending {
+                    view.search.follow_prefetching.remove(mid);
+                }
+                if let Ok(states) = result {
+                    for (mid, followed) in states {
+                        // 用户在此期间点过（有过写操作）的，以写操作为准。
+                        if view.search.follow_known.contains(&mid) {
+                            continue;
+                        }
+                        view.search.follow_known.insert(mid);
+                        if followed {
+                            view.search.followed.insert(mid);
+                        } else {
+                            view.search.followed.remove(&mid);
+                        }
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -1452,6 +1622,8 @@ fn tabs_row(t: &YkTheme, state: &SearchState, cx: &mut Context<AppRoot>) -> AnyE
                         view.search.filters_open = false;
                         view.reset_card_hover();
                         view.scroll_content_to_top();
+                        // 切到「用户」才需要这批关注状态（综合页只露第一个用户）。
+                        view.prefetch_user_follows(cx);
                         window.refresh();
                         cx.notify();
                     }
@@ -2045,6 +2217,7 @@ fn user_card(
     let s = &t.surfaces;
     let p = &t.palette;
     let followed = state.followed.contains(&user.mid);
+    let follow_busy = state.follow_busy.contains(&user.mid);
 
     let avatar = if user.avatar_url.is_empty() {
         div()
@@ -2075,6 +2248,17 @@ fn user_card(
             .object_fit(ObjectFit::Cover)
             .into_any_element()
     };
+
+    // 点头像进空间浮窗（12.9 节）：搜索结果里「这个人是谁」和「关注 TA」同样重要。
+    let avatar = AppRoot::up_profile_avatar(
+        SharedString::from(format!("search-up-{}", user.mid)),
+        user.mid,
+        user.name.clone(),
+        user.avatar_url.clone(),
+        56.0,
+        avatar,
+        cx,
+    );
 
     let head = div()
         .flex()
@@ -2155,6 +2339,7 @@ fn user_card(
                 .items_center()
                 .rounded(px(INTERACTIVE_RADIUS))
                 .bg(if followed { s.fill_2 } else { p.theme_primary })
+                .when(follow_busy, |el| el.opacity(0.55))
                 .text_size(px(FONT_SIZE_CONTROL))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(if followed {
@@ -2164,16 +2349,17 @@ fn user_card(
                 })
                 .cursor_pointer()
                 .hover(|style| style.opacity(0.9))
-                .child(if followed { "已关注" } else { "+ 关注" })
+                .child(if follow_busy {
+                    "处理中…"
+                } else if followed {
+                    "已关注"
+                } else {
+                    "+ 关注"
+                })
                 .on_click(cx.listener({
                     let mid = user.mid;
-                    move |view, _: &ClickEvent, window, cx| {
-                        if !view.search.followed.remove(&mid) {
-                            view.search.followed.insert(mid);
-                            view.set_search_notice("已在本地关注，账号关注接口尚未接入", cx);
-                        }
-                        window.refresh();
-                        cx.notify();
+                    move |view, _: &ClickEvent, _window, cx| {
+                        view.toggle_user_follow(mid, cx);
                     }
                 })),
         );
@@ -2241,16 +2427,24 @@ fn user_video_tile(
     cx: &mut Context<AppRoot>,
 ) -> AnyElement {
     let s = &t.surfaces;
-    let cover = if video.cover_url.is_empty() {
-        div().w_full().h(px(94.)).bg(s.fill_3).into_any_element()
-    } else {
+    // 封面走公共组件（与首页卡片 / UP 主浮窗同一份）：
+    // 渐变卡面 + 真实封面 + 播放 / 弹幕 + 时长都在 `cover_visual` 里。
+    if !video.cover_url.is_empty() {
         active_images.borrow_mut().mark(&video.cover_url);
-        img(ImageSource::from(video.cover_url.clone()))
-            .w_full()
-            .h(px(94.))
-            .object_fit(ObjectFit::Cover)
-            .into_any_element()
-    };
+    }
+    let art = crate::cover_art(&video.title, &video.cover_url, None, s.fill_3).into_any_element();
+    let cover = crate::cover_visual(
+        t,
+        crate::CoverVisual {
+            art,
+            views: video.view_count,
+            danmaku: video.danmaku_count,
+            duration_secs: video.duration_secs,
+            is_live: false,
+            show_stats: true,
+        },
+        168.0 / 94.0,
+    );
     let bvid = video.bvid.clone();
     div()
         .id(SharedString::from(format!(
@@ -2266,27 +2460,7 @@ fn user_video_tile(
             window.refresh();
             cx.notify();
         }))
-        .child(
-            div()
-                .relative()
-                .w_full()
-                .h(px(94.))
-                .rounded(px(RADIUS_HALF))
-                .overflow_hidden()
-                .child(cover)
-                .child(
-                    div()
-                        .absolute()
-                        .left(px(SPACE_1))
-                        .bottom(px(SPACE_1))
-                        .px(px(4.))
-                        .rounded(px(RADIUS_SM))
-                        .bg(rgba(0x000000B3))
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(rgb(0xFFFFFF))
-                        .child(format::count(video.view_count)),
-                ),
-        )
+        .child(cover)
         .child(
             div()
                 .text_size(px(FONT_SIZE_CAPTION))
@@ -2675,7 +2849,6 @@ fn empty_state(t: &YkTheme, state: &SearchState, cx: &mut Context<AppRoot>) -> A
 
 /// 全局轻提示：动作尚未接入时给一个明确出口，而不是点了没反应。
 pub(crate) fn notice(t: &YkTheme, text: &str) -> AnyElement {
-    let s = &t.surfaces;
     div()
         .absolute()
         .left_0()
@@ -2683,20 +2856,6 @@ pub(crate) fn notice(t: &YkTheme, text: &str) -> AnyElement {
         .bottom(px(DOCK_RESERVED + SPACE_4))
         .flex()
         .justify_center()
-        .child(
-            div()
-                .h(px(34.))
-                .px(px(SPACE_4))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .bg(s.surface_elevated_strong)
-                .border_1()
-                .border_color(s.border_popover)
-                .shadow(t.shadows.shadow_2.clone())
-                .text_size(px(FONT_SIZE_CAPTION))
-                .text_color(s.text_secondary)
-                .child(text.to_string()),
-        )
+        .child(status::toast_pill(t, text))
         .into_any_element()
 }

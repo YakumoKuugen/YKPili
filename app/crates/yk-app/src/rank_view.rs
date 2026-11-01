@@ -15,7 +15,6 @@ use gpui::component::Icon;
 use gpui::prelude::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement, *};
 use yk_core::api::client::ReqwestClient;
-use yk_core::format;
 use yk_core::ranking::{self, RankItem, RankPage, DEFAULT_NOTE, ZONES};
 use yk_ui::status;
 use yk_ui::theme::*;
@@ -410,9 +409,6 @@ fn row(
     } else {
         item.up_name.clone()
     };
-    let duration = format::duration(item.duration_secs);
-    let views = format::count(item.view_count);
-    let danmaku = format::count(item.danmaku_count);
     let bvid = item.bvid.clone();
 
     let mut meta = div()
@@ -449,13 +445,9 @@ fn row(
                 .text_color(s.text_secondary)
                 .child(up_name),
         )
-        .child(meta_dot(t))
-        .child(format!("{views}播放"))
-        .child(meta_dot(t))
-        .child(format!("{danmaku}弹幕"));
-    if !duration.is_empty() {
-        meta = meta.child(meta_dot(t)).child(duration);
-    }
+        // 播放 / 弹幕 / 时长已经在封面的数据层上，这里不再重复一遍；
+        // 同一张卡上同一组数字出现两次，用户会以为是两个指标。
+        ;
     if !item.tname.trim().is_empty() {
         meta = meta.child(meta_dot(t)).child(item.tname.clone());
     }
@@ -488,21 +480,31 @@ fn row(
         );
     }
 
-    // 封面视觉层：悬停时做 1.04 缓推，与首页 / 收藏 / 历史封面同一条动画。
-    // 缩略图铺满整个封面，圆角裁切交给外层容器；名次、标题等不跟着放大。
-    let mut art = div().absolute().top_0().left_0().w_full().h_full();
-    if !cover.is_empty() {
-        art = art.child(
-            img(ImageSource::from(cover.clone()))
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .h_full()
-                .object_fit(ObjectFit::Cover),
-        );
-    }
-    let art = animate_cover_zoom(art, hovered, leaving, index, hover_generation);
+    // 封面视觉：渐变卡面 + 真实封面 + 播放/弹幕/时长全部走公共组件
+    // （与首页卡片、UP 主浮窗同一份实现）；悬停 1.04 缓推只作用在画面层，
+    // 名次、标题等不跟着放大。
+    let source_placeholder = yk_core::feed::PLACEHOLDER_PALETTE
+        [index % yk_core::feed::PLACEHOLDER_PALETTE.len()]
+    .to_string();
+    let art = animate_cover_zoom(
+        crate::cover_art(&title, &cover, Some(&source_placeholder), s.fill_3),
+        hovered,
+        leaving,
+        index,
+        hover_generation,
+    );
+    let cover_visual = crate::cover_visual(
+        t,
+        crate::CoverVisual {
+            art,
+            views: item.view_count,
+            danmaku: item.danmaku_count,
+            duration_secs: item.duration_secs,
+            is_live: false,
+            show_stats: true,
+        },
+        ROW_COVER_WIDTH / ROW_COVER_HEIGHT,
+    );
 
     // 封面实际矩形：prepaint 写入，点击时作为播放浮窗的展开 / 收回起点。
     // 记的是固定 160×90 外框（不含缓推），关闭时缩回的就是左侧这张封面本身。
@@ -511,18 +513,11 @@ fn row(
     let source_bvid = bvid.clone();
     let source_title = title.clone();
     let source_image_url = cover.clone();
-    let source_placeholder = yk_core::feed::PLACEHOLDER_PALETTE
-        [index % yk_core::feed::PLACEHOLDER_PALETTE.len()]
-    .to_string();
     let cover_el = div()
         .relative()
         .flex_shrink_0()
         .w(px(ROW_COVER_WIDTH))
-        .h(px(ROW_COVER_HEIGHT))
-        .rounded(px(MEDIA_RADIUS))
-        .overflow_hidden()
-        .bg(s.fill_3)
-        .child(art)
+        .child(cover_visual)
         .on_prepaint(move |bounds, _window, _cx| {
             let Some(root) = root_bounds.get() else {
                 return;

@@ -304,6 +304,13 @@ fn main() {
         cx.update(|cx| app.read(cx).test_image_viewer_open(cx)),
         "详情里点大图应当打开图片查看器"
     );
+    assert!(
+        cx.update_window(handle, |_, window, _| {
+            window.try_find("image-viewer-copy").is_some()
+        })
+        .unwrap(),
+        "图片查看器右下角应当有复制按钮"
+    );
 
     // 查看器图片占屏幕 86%，左上角 (20, 20) 落在背景上。
     dispatch_click(&mut cx, handle, point(px(20.), px(20.)), MouseButton::Left);

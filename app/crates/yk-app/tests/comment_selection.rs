@@ -45,6 +45,7 @@ fn comments(count: usize) -> Vec<DynamicComment> {
                 time: format!("{} 天前", i % 30 + 1),
                 like: i as u64,
                 pictures: Vec::new(),
+                is_top: false,
             }
         })
         .collect()
@@ -91,6 +92,10 @@ fn open_comments(
     });
     // 固定光标在侧栏内，避免 hover 收起把布局改掉。
     set_test_cursor(Some(point(px(960.), px(300.))));
+    assert!(
+        vcx.update(|window, _| window.try_find("comment-composer").is_some()),
+        "评论 Tab 底部应该有浮动评论输入框"
+    );
     (handle, player, vcx)
 }
 
@@ -158,6 +163,30 @@ fn horizontal_drag_in_comment_does_not_scroll_panel(cx: &mut TestAppContext) {
         MouseButton::Left,
         Modifiers::default(),
     );
+
+    // 保留选区直接右键：菜单里的复制必须复制选区，而不是整条评论。
+    let selected_press = point(px(text_left + 80.0), px(y));
+    vcx.simulate_mouse_down(selected_press, MouseButton::Right, Modifiers::default());
+    vcx.simulate_mouse_up(selected_press, MouseButton::Right, Modifiers::default());
+    vcx.update(|window, cx| {
+        window.render_frame(cx);
+    });
+    let selected_item = selected_press + point(px(64.), px(17.));
+    vcx.simulate_mouse_down(selected_item, MouseButton::Left, Modifiers::default());
+    vcx.simulate_mouse_up(selected_item, MouseButton::Left, Modifiers::default());
+    vcx.update(|window, cx| {
+        window.render_frame(cx);
+    });
+    let copied_selection = vcx
+        .update(|_, cx| cx.read_from_clipboard())
+        .and_then(|item| item.text())
+        .expect("选中文本后右键复制不应为空");
+    assert_eq!(
+        copied_selection.trim(),
+        selected.trim(),
+        "有选区时右键复制必须只复制选区"
+    );
+
     vcx.update(|window, cx| gpui::base::TextSelection::clear(window, cx));
 
     // 回到顶部，右键第一条评论 → 菜单「复制文本」。

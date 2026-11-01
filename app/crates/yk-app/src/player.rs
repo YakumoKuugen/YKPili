@@ -27,8 +27,8 @@
 
 use gpui::assets::IconName;
 use gpui::component::input::{Input, InputEvent, InputState};
-use gpui::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui::component::kbd::Kbd;
+use gpui::component::menu::ContextMenuExt as _;
 use gpui::component::Icon;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -39,7 +39,10 @@ use yk_core::danmaku::{Danmaku, DanmakuMode, DanmakuSet, LaneAllocator};
 use yk_core::dynamic::{asset_url, fitted_width, CommentTarget, DynamicComment};
 use yk_core::format;
 use yk_core::player::PlayerState;
+use yk_ui::status;
 use yk_ui::theme::*;
+
+use crate::comment_view::text_copy_menu;
 
 use crate::video::TestFrame;
 
@@ -123,9 +126,16 @@ const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
 /// 收藏夹面板一屏先摆几行：再长就先折叠，点「展开全部」再看。
 /// 8 × 32 + 头尾 ≈ 330，与 §13.3「容器最大高 320」同一量级。
 const FAV_PANEL_VISIBLE_ROWS: usize = 8;
-/// 面板整块滚动超过这个距离后，右下角才浮出「回到顶部」。
-/// 留 24px 是为了不因滚轮抖动 / 触控板回弹闪一下按钮。
-const PANEL_BACK_TO_TOP_THRESHOLD: f32 = 24.0;
+/// 评论输入条收起态的圆形按钮直径。
+const COMMENT_COMPOSER_FAB: f32 = 40.0;
+/// 评论输入条高度：收起 / 展开同高，展开只是变宽。
+const COMMENT_COMPOSER_HEIGHT: f32 = 40.0;
+/// 输入条被「回到顶部」按钮顶起的距离：按钮 34 + 间距 8。
+const COMMENT_COMPOSER_LIFT: f32 = 34.0 + SPACE_2;
+/// 输入条展开 / 收起动画时长。
+const COMMENT_COMPOSER_TOGGLE_MS: u64 = 180;
+/// 「回到顶部」浮出 / 收起时，输入条让位 / 归位的时长。
+const COMMENT_COMPOSER_LIFT_MS: u64 = 200;
 /// 滚动结束后这段时间内不响应面板收起，避免滚轮末尾的 hover 抖动。
 const PANEL_SCROLL_HOLD_MS: u64 = 400;
 /// 互动 toast 从弹出到开始退场的时长（含入场动画，不含退场动画）。
@@ -182,7 +192,7 @@ enum CommentState {
     /// 还没有播放源（取流中 / 失败），不显示评论态。
     Idle,
     Loading,
-    /// 首批已经回来；具体条目在 `PlayerView::comment_items` 里。
+    /// 首批已经回来；具体条目在 `PlayerView::comments_list.items` 里。
     Ready,
     Error(String),
 }
@@ -203,104 +213,11 @@ const COMMENT_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_
 /// 评论行里除正文之外的高度：上下 padding 16 + 作者行 16 + 两个 2px 间距
 /// + 时间行 14。正文另算：行数 × [`COMMENT_TEXT_LINE_HEIGHT`]。
 const COMMENT_ROW_CHROME: f32 = 50.0;
-const COMMENT_TEXT_LINE_HEIGHT: f32 = 20.0;
-/// 正文最多 3 行（与 `comment_item` 的 `line_clamp` 对齐）。
-const COMMENT_MAX_LINES: usize = 3;
-/// 评论附图条：缩略图 72 高 + 与正文之间的 6px 间距 + 1 个 2px 列间距。
-///
-/// 高度写死，才能让窗口化渲染的前缀和保持精确；缩略图按 72×72 裁切。
-const COMMENT_IMAGE_ROW_HEIGHT: f32 = 80.0;
-/// 一条评论最多展示几张缩略图（其余在查看器里左右翻）。
-const COMMENT_MAX_THUMBS: usize = 4;
-/// 缩略图边长。
-const COMMENT_THUMB_SIZE: f32 = 72.0;
 /// 虚拟滚动时在可见区上下各多画这么多像素。
 ///
 /// 评论行的行高由我们自己算、并且渲染时强制同高，所以偏移是精确的；
 /// 多画一段只是为了让滚动过程中不会出现「一帧空白」。
 const COMMENT_OVERSCAN: f32 = 1200.0;
-
-/// 评论行的排布缓存：每条评论的高度 + 前缀和。
-///
-/// 评论区是窗口化渲染（只创建可见行），所以必须提前知道每一行多高才能算
-/// 出总高度和每行的位置。行高由正文折行数决定，折行数用文本系统的
-/// `shape_text` 按面板可用宽度算一次，之后缓存。
-#[derive(Default)]
-struct CommentRows {
-    /// 每条评论的行高。
-    heights: Vec<f32>,
-    /// 每条评论正文的物理行数（未按展示上限截断）。
-    ///
-    /// GPUI 的 `line_clamp` 对显式换行只按**段**生效：多段正文不会被
-    /// 压到 `COMMENT_MAX_LINES` 以内，会撑出窗口化渲染写死的高度。
-    /// 超过上限的评论渲染前要先压成一段（见 `comment_item`）。
-    line_counts: Vec<usize>,
-    /// 前缀和：`offsets[i]` 是第 i 行的顶部，最后一项是内容总高。
-    offsets: Vec<f32>,
-    /// 算行高时用的正文宽度；面板宽度变了要整表重算。
-    width: f32,
-}
-
-impl CommentRows {
-    /// 已排布的内容总高。
-    fn total(&self) -> f32 {
-        *self.offsets.last().unwrap_or(&0.0)
-    }
-
-    /// 保证缓存覆盖 `items`，返回是否有变化（需要重新算偏移）。
-    fn ensure(
-        &mut self,
-        items: &[DynamicComment],
-        width: f32,
-        mut lines_of: impl FnMut(&str) -> usize,
-    ) {
-        if (self.width - width).abs() > 0.5 {
-            self.width = width;
-            self.heights.clear();
-            self.line_counts.clear();
-            self.offsets.clear();
-        }
-        if self.heights.len() > items.len() {
-            self.heights.truncate(items.len());
-            self.line_counts.truncate(items.len());
-            self.offsets.truncate(self.heights.len() + 1);
-        }
-        if self.offsets.is_empty() {
-            self.offsets.push(0.0);
-        }
-        for comment in &items[self.heights.len()..] {
-            let total_lines = lines_of(&comment.text).max(1);
-            let lines = total_lines.min(COMMENT_MAX_LINES);
-            self.line_counts.push(total_lines);
-            let image_extra = if comment.pictures.is_empty() {
-                0.0
-            } else {
-                COMMENT_IMAGE_ROW_HEIGHT
-            };
-            let height = COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32 + image_extra;
-            let top = *self.offsets.last().unwrap_or(&0.0);
-            self.heights.push(height);
-            self.offsets.push(top + height);
-        }
-    }
-
-    /// `y`（相对评论列表顶部）处的第一条可见行。
-    fn first_row_at(&self, y: f32) -> usize {
-        // offsets[i] <= y 的最大 i；offsets 比 heights 多一项。
-        let rows = self.heights.len();
-        let mut lo = 0usize;
-        let mut hi = rows;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if self.offsets[mid + 1] <= y {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        lo.min(rows)
-    }
-}
 
 /// 窗口可见性状态机：失焦 ≠ 不可见。
 ///
@@ -374,7 +291,21 @@ struct PlacedDanmaku {
 ///
 /// 真实弹幕里同一秒可以来几十条；轨道无限增长会把字画到屏幕外，
 /// 超出部分仍然进「弹幕」Tab，只是不上屏。
-const MAX_SCROLL_LANES: usize = 14;
+/// 滚动弹幕的轨道上限（真实条数按播放区高度动态算）。
+const MAX_SCROLL_LANES: usize = 32;
+/// 每条滚动弹幕占的行高。
+const SCROLL_LANE_HEIGHT: f32 = 30.0;
+
+/// 按播放区实际高度算能放几条轨道。
+///
+/// 播放浮窗高度 = 窗口高 − 顶栏下方 16 − 底部 92；弹幕从 y=8 开始排，
+/// 每条占 30px。旧实现写死 14 条，在 820 高的窗口里只够铺到画面中部。
+fn scroll_lane_capacity(window: &Window) -> usize {
+    let area_height =
+        (window.viewport_size().height.as_f32() - (TOP_BAR_HEIGHT + SPACE_4) - PLAYER_BOTTOM_INSET)
+            .max(120.0);
+    (((area_height - 8.0) / SCROLL_LANE_HEIGHT).floor() as usize).clamp(8, MAX_SCROLL_LANES)
+}
 /// 顶部 / 底部固定弹幕各自的槽位数。
 const FIXED_LANES: usize = 5;
 /// 顶部 / 底部固定弹幕的停留时长（秒）。
@@ -428,6 +359,8 @@ pub struct PlayerView {
     /// 弹幕请求代次：换源后旧请求的结果直接丢弃。
     danmaku_generation: u64,
     lanes: LaneAllocator,
+    /// 当前播放区实际能放下的滚动弹幕轨道数（按窗口高度算）。
+    scroll_lanes: usize,
     /// 最近一次从 mpv 读到的播放位置（秒），弹幕位置靠它算
     play_time: f64,
     /// 弹幕输入框状态（首次 render 时创建，那时才有 window）
@@ -474,6 +407,11 @@ pub struct PlayerView {
     /// 关闭回调：`false` = 开始缩回，`true` = 缩回结束可移除实体。
     /// AppRoot 在开始时先恢复分类条/网格，让卡片回到封面快照的坐标。
     close_handler: Option<Box<dyn Fn(&mut App, bool)>>,
+    /// 点信息面板的 UP 主头像：请 AppRoot 打开 UP 主浮窗（mid / 昵称 / 头像）。
+    up_profile_handler:
+        Option<Box<dyn Fn(&mut App, &mut Window, i64, String, String, Bounds<Pixels>)>>,
+    /// 信息面板头像的屏幕 bounds（canvas 探针每帧写），给 UP 主浮窗做入场锚点。
+    up_avatar_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// 本地续播记录（每个视频上次看到的位置）。
     resume: yk_core::resume::ResumeStore,
     /// 打开时由「观看历史」带进来的起播位置（服务端进度）。
@@ -489,30 +427,23 @@ pub struct PlayerView {
     tags: Vec<String>,
     /// 评论加载状态（打开视频后异步拉首批）。
     comments: CommentState,
-    /// 已加载的全部评论（按服务端返回顺序；翻页追加，按 rpid 去重）。
-    comment_items: Vec<DynamicComment>,
-    /// 下一页游标（`/x/v2/reply/main` 的 `cursor.next`）。
-    comment_next: u64,
-    /// 服务端说「真的没有更多了」；只有它为真才显示「没有更多评论」。
-    comments_is_end: bool,
-    /// 正在拉下一批（1 页 20 条）。
-    comments_loading_more: bool,
-    /// 下一批失败原因；失败后等用户点重试，不自动重试。
-    comments_load_error: Option<String>,
-    /// 评论总数（服务端 `all_count`）。
-    comments_total: u64,
-    /// 上一次评论请求（实际发出去）的时间：用来做 1 秒最小间隔。
-    last_comment_request: Option<std::time::Instant>,
-    /// 评论行高缓存（窗口化渲染用）。
-    comment_rows: CommentRows,
-    /// 最近一帧实际创建的评论行数（窗口化渲染的验收指标）。
-    rendered_comment_rows: usize,
+    /// 评论区（列表 / 翻页 / 输入条 / 回到顶部），与动态详情共用同一份实现。
+    comment_section: crate::comment_section::Section,
     /// 元数据请求代次：换源后旧请求的结果直接丢弃。
     meta_generation: u64,
     /// 左下角眼睛按钮：关掉后不再绘制弹幕层。
     danmaku_visible: bool,
-    /// 关注按钮的本地态（本轮不写服务端，只做视觉反馈）。
+    /// 关注按钮：服务端关系状态（已关注 / 未关注）。
     followed: bool,
+    /// 是否已经从服务端读到过关注状态。没读到之前点按钮先查一次再写，
+    /// 免得把「已关注」的 UP 主又关注一遍。
+    follow_known: bool,
+    /// 关注请求进行中：按钮置灰，避免连点。
+    follow_busy: bool,
+    /// 关注状态 / 粉丝数请求代次：换源后旧响应直接丢弃。
+    follow_generation: u64,
+    /// UP 主粉丝数（`x/relation/stat`；读到前不显示，不写死 0）。
+    owner_fans: Option<u64>,
     /// 互动状态：是否已点赞 / 已投币 / 已收藏（打开视频时读一次）。
     interaction: yk_core::InteractionState,
     /// 互动写操作进行中：按钮置灰，避免重复提交。
@@ -673,6 +604,7 @@ impl PlayerView {
             danmaku_state: DanmakuState::Idle,
             danmaku_generation: 0,
             lanes: LaneAllocator::new(1280.0, 220.0),
+            scroll_lanes: MAX_SCROLL_LANES,
             play_time: 0.0,
             danmaku_input: None,
             submit_requested: false,
@@ -689,6 +621,8 @@ impl PlayerView {
             closing_generation: 0,
             finish_handled: false,
             close_handler: None,
+            up_profile_handler: None,
+            up_avatar_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
             resume: yk_core::resume::ResumeStore::load_default(),
             resume_seed: None,
             start_position: 0.0,
@@ -696,18 +630,14 @@ impl PlayerView {
             last_resume_save: 0.0,
             tags: Vec::new(),
             comments: CommentState::Idle,
-            comment_items: Vec::new(),
-            comment_next: 0,
-            comments_is_end: false,
-            comments_loading_more: false,
-            comments_load_error: None,
-            comments_total: 0,
-            last_comment_request: None,
-            comment_rows: CommentRows::default(),
-            rendered_comment_rows: 0,
+            comment_section: crate::comment_section::Section::default(),
             meta_generation: 0,
             danmaku_visible: true,
             followed: false,
+            follow_known: false,
+            follow_busy: false,
+            follow_generation: 0,
+            owner_fans: None,
             interaction: yk_core::InteractionState::default(),
             interaction_busy: false,
             coin_panel_open: false,
@@ -826,14 +756,7 @@ impl PlayerView {
         // 滚动位置也回到顶部，否则新视频一打开就停在旧视频的评论高度。
         self.tags.clear();
         self.comments = CommentState::Idle;
-        self.comment_items.clear();
-        self.comment_next = 0;
-        self.comments_is_end = false;
-        self.comments_loading_more = false;
-        self.comments_load_error = None;
-        self.comments_total = 0;
-        self.comment_rows = CommentRows::default();
-        self.rendered_comment_rows = 0;
+        self.comment_section.reset();
         // 弹幕跟着换源清空：旧视频的弹幕不能落在新视频的画面上。
         self.danmaku.clear();
         self.danmaku_all.clear();
@@ -846,6 +769,10 @@ impl PlayerView {
         self.seek_settle_until = None;
         self.meta_generation = self.meta_generation.wrapping_add(1);
         self.followed = false;
+        self.follow_known = false;
+        self.follow_busy = false;
+        self.follow_generation = self.follow_generation.wrapping_add(1);
+        self.owner_fans = None;
         // 互动状态跟着换源重置：上一个视频的点赞 / 投币 / 收藏不能带过来。
         self.interaction = yk_core::InteractionState::default();
         self.interaction_busy = false;
@@ -954,6 +881,7 @@ impl PlayerView {
                         view.start_position = start;
                         view.state.position_secs = start;
                         let (aid, bvid, cid) = (src.aid, src.bvid.clone(), src.cid);
+                        let owner_mid = src.owner_mid;
                         view.source = Some(src);
                         view.begin_history_report(aid, bvid.clone(), cid, start);
                         // 标签 / 评论 / 弹幕不阻塞起播：源挂上之后再拉，回来一轮重绘。
@@ -961,6 +889,8 @@ impl PlayerView {
                         view.spawn_danmaku(cid, cx);
                         // 互动状态（已点赞 / 已投币 / 已收藏）也放后台：按钮高亮晚一拍无妨。
                         view.spawn_interaction_state(aid, bvid, cx);
+                        // 关注状态与粉丝数：同样是「先出画面，按钮稍后点亮」。
+                        view.spawn_follow_state(owner_mid, cx);
                     }
                     Err(e) => {
                         eprintln!("[player] 取流失败：{e}");
@@ -973,239 +903,57 @@ impl PlayerView {
         .detach();
     }
 
-    /// 拉信息面板的标签与首批评论（1 页 20 条）。
+    /// 拉信息面板的标签；评论交给共享的 `comment_section`。
     ///
     /// 起播不依赖这两个请求：取流成功、面板已有标题/UP 主之后再后台补。
     /// 失败只影响面板里的对应区块，不把整个播放器打成错误态。
-    ///
-    /// 评论只取**一页**：100 条 = 4 个连续请求，会被评论区频控打成 `-352`；
-    /// 剩下的等用户滚到列表底部，走 [`Self::spawn_more_comments`] 按页补。
     fn spawn_video_meta(&mut self, aid: i64, bvid: String, cx: &mut Context<Self>) {
         if aid <= 0 && bvid.trim().is_empty() {
             self.comments = CommentState::Ready;
-            self.comments_is_end = true;
+            self.comment_section.list.is_end = true;
             return;
         }
         self.meta_generation = self.meta_generation.wrapping_add(1);
         let generation = self.meta_generation;
         self.comments = CommentState::Loading;
-        self.comment_items.clear();
-        self.comment_next = 0;
-        self.comments_is_end = false;
-        self.comments_loading_more = false;
-        self.comments_load_error = None;
-        self.comment_rows = CommentRows::default();
-        self.rendered_comment_rows = 0;
+        // 评论目标：有 aid 才有评论区（动态 / 直播回放没有）。
+        self.comment_section
+            .set_target(
+                (aid > 0).then(|| CommentTarget {
+                    oid: aid.to_string(),
+                    kind: 1,
+                }),
+                current_session_cookie(),
+            );
+        self.comment_section.load_first(cx);
+        self.comments = CommentState::Ready;
         let cookie = current_session_cookie();
-        // 没有 aid 的视频（动态 / 直播回放）不请求评论，直接判「到底」，
-        // 否则空列表会被当成「还没加载完」。
-        let comments_available = aid > 0;
-        // 和上一次评论请求至少隔 1 秒：换源后首屏请求也算在节流里。
-        let comment_wait = if comments_available {
-            self.comment_fetch_wait()
-        } else {
-            std::time::Duration::ZERO
-        };
-        if comments_available {
-            self.note_comment_request(comment_wait);
-        }
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
+                    if bvid.trim().is_empty() {
+                        return Ok::<_, String>(Vec::new());
+                    }
                     let client = yk_core::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
-                    let tags = if bvid.trim().is_empty() {
-                        Vec::new()
-                    } else {
-                        match yk_core::api::client::fetch_video_tags(&client, &bvid, &cookie) {
-                            Ok(tags) => tags,
-                            Err(error) => {
-                                eprintln!("[player] 标签加载失败：{error}");
-                                Vec::new()
-                            }
+                    Ok(match yk_core::api::client::fetch_video_tags(&client, &bvid, &cookie) {
+                        Ok(tags) => tags,
+                        Err(error) => {
+                            eprintln!("[player] 标签加载失败：{error}");
+                            Vec::new()
                         }
-                    };
-                    // 评论 oid 用 aid；没有 aid 的视频不请求。
-                    let comments = if aid > 0 {
-                        // 距上次评论请求不足 1 秒：先等够间隔再发，
-                        // 连续请求正是 -352 的触发条件。
-                        if !comment_wait.is_zero() {
-                            std::thread::sleep(comment_wait);
-                        }
-                        let target = CommentTarget {
-                            oid: aid.to_string(),
-                            kind: 1,
-                        };
-                        yk_core::api::client::fetch_comment_page(
-                            &client,
-                            &cookie,
-                            &target,
-                            0,
-                            COMMENT_PAGE_SIZE,
-                        )
-                    } else {
-                        Ok(Default::default())
-                    };
-                    Ok::<_, String>((tags, comments))
+                    })
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 if view.meta_generation != generation {
                     return;
                 }
-                match result {
-                    Ok((tags, page)) => {
-                        if !tags.is_empty() {
-                            view.tags = tags;
-                        }
-                        match page {
-                            Ok(page) => {
-                                view.comment_items = page.items;
-                                view.comment_next = page.next;
-                                view.comments_is_end = page.is_end || !comments_available;
-                                view.comments_total = page.total;
-                                view.comments = CommentState::Ready;
-                                eprintln!(
-                                    "[comments] 首批 {} 条，总数 {}，到底={}",
-                                    view.comment_items.len(),
-                                    view.comments_total,
-                                    view.comments_is_end
-                                );
-                            }
-                            Err(error) => {
-                                eprintln!("[player] 评论加载失败：{error}");
-                                view.comments = CommentState::Error(error);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!("[player] 评论加载失败：{error}");
-                        view.comments = CommentState::Error(error);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// 评论列表离底部不足这个距离时，自动拉下一批。
-    const COMMENT_LOAD_MORE_GAP: f32 = 240.0;
-
-    /// 距下一次评论请求还要等多久（`ZERO` = 现在就能发）。
-    ///
-    /// 「一次只取 20 条」管的是单次体积，「1 秒 1 次」管的是请求频率：
-    /// 窗口化列表滚到底后每帧都会判定「该补一页」，没有这道闸门就会连发，
-    /// 评论区频控直接回 `-352`。返回的时长由调用方拿去做延迟发送。
-    fn comment_fetch_wait(&self) -> std::time::Duration {
-        comment_request_wait(self.last_comment_request, std::time::Instant::now())
-    }
-
-    /// 记下这次评论请求的**实际发送时刻**。
-    ///
-    /// 请求可能在后台线程里先等 `wait` 再发，所以记的是 `now + wait`，
-    /// 而不是 `now` —— 否则下一次的间隔会被算短。
-    fn note_comment_request(&mut self, wait: std::time::Duration) {
-        self.last_comment_request = Some(std::time::Instant::now() + wait);
-    }
-
-    /// 滚到底部附近就再拉一页（20 条）。
-    ///
-    /// 触发点有两处：滚轮事件（`on_scroll_wheel`）与每帧渲染
-    /// （首屏不够一屏时也能继续补）。这里只做判定与去重，真正发请求在
-    /// [`Self::spawn_more_comments`]。
-    fn maybe_load_more_comments(&mut self, cx: &mut Context<Self>) {
-        if self.tab != 0 || self.comments_loading_more || self.comments_is_end {
-            return;
-        }
-        if !matches!(self.comments, CommentState::Ready) || self.comments_load_error.is_some() {
-            return;
-        }
-        if comments_need_more(
-            self.panel_scroll.offset().y.as_f32(),
-            self.panel_scroll.max_offset().y.as_f32(),
-            self.panel_scroll.bounds().size.height.as_f32(),
-            self.comment_rows.total(),
-        ) {
-            self.spawn_more_comments(cx);
-        }
-    }
-
-    /// 拉下一批评论：**1 个请求、1 页 20 条**。
-    ///
-    /// 与上次请求不足 [`COMMENT_REQUEST_INTERVAL`] 时，后台线程先等够间隔
-    /// 再发；等待期间 `comments_loading_more` 保持为真，不会重复入队。
-    fn spawn_more_comments(&mut self, cx: &mut Context<Self>) {
-        let Some(source) = self.source.as_ref() else {
-            return;
-        };
-        let aid = source.aid;
-        if aid <= 0 {
-            self.comments_is_end = true;
-            cx.notify();
-            return;
-        }
-        let target = CommentTarget {
-            oid: aid.to_string(),
-            kind: 1,
-        };
-        let cursor = self.comment_next;
-        let generation = self.meta_generation;
-        let cookie = current_session_cookie();
-        let wait = self.comment_fetch_wait();
-        self.note_comment_request(wait);
-        self.comments_loading_more = true;
-        self.comments_load_error = None;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    if !wait.is_zero() {
-                        // 节流等待：1 秒内最多一个评论请求。
-                        std::thread::sleep(wait);
-                    }
-                    let client = yk_core::api::client::ReqwestClient::new()
-                        .map_err(|error| error.to_string())?;
-                    yk_core::api::client::fetch_comment_page(
-                        &client,
-                        &cookie,
-                        &target,
-                        cursor,
-                        COMMENT_PAGE_SIZE,
-                    )
-                })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                if view.meta_generation != generation {
-                    return;
-                }
-                view.comments_loading_more = false;
-                match result {
-                    Ok(page) => {
-                        let before = view.comment_items.len();
-                        let added = merge_comment_page(&mut view.comment_items, page.items);
-                        // 游标没前进、也没有新条目 = 服务端在重复同一页：
-                        // 收手。否则「滚到底就补一页」会变成每秒一次的无效
-                        // 请求，正好是触发 -352 的典型形态。
-                        let stalled = added == 0 && page.next == cursor;
-                        view.comment_next = page.next;
-                        view.comments_is_end = page.is_end || stalled;
-                        if page.total > 0 {
-                            view.comments_total = page.total;
-                        }
-                        eprintln!(
-                            "[comments] 追加 {} 条（共 {}），到底={}",
-                            view.comment_items.len() - before,
-                            view.comment_items.len(),
-                            view.comments_is_end
-                        );
-                    }
-                    Err(error) => {
-                        eprintln!("[player] 评论加载更多失败：{error}");
-                        view.comments_load_error = Some(error);
+                if let Ok(tags) = result {
+                    if !tags.is_empty() {
+                        view.tags = tags;
                     }
                 }
                 cx.notify();
@@ -1256,6 +1004,181 @@ impl PlayerView {
                     view.interaction.favoured = favoured;
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+    }
+
+    /// 打开视频后读一次 UP 主关系：是否已关注 + 粉丝数。
+    ///
+    /// 两个请求都放后台、失败静默：
+    /// - 关系状态要登录态，未登录直接跳过（按钮保持「关注」，点了会提示登录）；
+    /// - 粉丝数是公开接口，未登录也能显示。
+    fn spawn_follow_state(&mut self, owner_mid: i64, cx: &mut Context<Self>) {
+        if owner_mid <= 0 {
+            // 没有 uid 就无从查起：保持未知，点击时给出人话提示。
+            return;
+        }
+        let cookie = current_session_cookie();
+        let signed_in = !cookie.trim().is_empty();
+        self.follow_generation = self.follow_generation.wrapping_add(1);
+        let generation = self.follow_generation;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    let followed = if signed_in {
+                        match yk_core::api::client::fetch_followed(&client, &cookie, owner_mid) {
+                            Ok(followed) => {
+                                eprintln!(
+                                    "[follow] 关注状态：mid={owner_mid} followed={followed}"
+                                );
+                                Some(followed)
+                            }
+                            Err(error) => {
+                                // 失败不能静默：日志里要能看出是没登录、还是被风控。
+                                eprintln!("[follow] 关注状态读取失败：{error}");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let fans = match yk_core::api::client::fetch_relation_stat(
+                        &client, &cookie, owner_mid,
+                    ) {
+                        Ok((fans, _)) => {
+                            eprintln!("[follow] 粉丝数：mid={owner_mid} fans={fans}");
+                            Some(fans)
+                        }
+                        Err(error) => {
+                            eprintln!("[follow] 粉丝数读取失败：{error}");
+                            None
+                        }
+                    };
+                    Ok::<_, String>((followed, fans))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.follow_generation != generation {
+                    return;
+                }
+                if let Ok((followed, fans)) = result {
+                    if let Some(followed) = followed {
+                        view.followed = followed;
+                        view.follow_known = true;
+                    }
+                    if fans.is_some() {
+                        view.owner_fans = fans;
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 关注 / 取关当前 UP 主。
+    ///
+    /// 两种起点：
+    /// - 已经读到过关系状态：按钮先乐观翻转，失败再翻回来；
+    /// - 还没读到（比如刚打开视频就点）：先查一次关系，再写反状态，
+    ///   期间按钮显示「处理中」，不猜当前状态。
+    fn toggle_follow(&mut self, cx: &mut Context<Self>) {
+        if self.follow_busy {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        if source.owner_mid <= 0 {
+            self.show_interaction_note("没拿到 UP 主 uid，无法关注".into(), true, cx);
+            return;
+        }
+        let Some(session) = current_session() else {
+            self.show_interaction_note("请先登录后再关注".into(), true, cx);
+            return;
+        };
+        let mid = source.owner_mid;
+        let cookie = session.cookie_header();
+        let csrf = session.bili_jct.clone();
+        let known = self.follow_known;
+        let mut next = !self.followed;
+        self.follow_busy = true;
+        if known {
+            // 乐观更新：失败回滚（见下方 Err 分支）。
+            self.followed = next;
+            if let Some(fans) = self.owner_fans.as_mut() {
+                *fans = if next {
+                    fans.saturating_add(1)
+                } else {
+                    fans.saturating_sub(1)
+                };
+            }
+        }
+        self.follow_generation = self.follow_generation.wrapping_add(1);
+        let generation = self.follow_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    if !known {
+                        // 未知起点：先查真实状态，再决定写「关注」还是「取关」。
+                        let followed =
+                            yk_core::api::client::fetch_followed(&client, &cookie, mid)?;
+                        next = !followed;
+                    }
+                    yk_core::interaction::follow_user(&client, &cookie, &csrf, mid, next)?;
+                    Ok::<_, String>((known, next))
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.follow_generation != generation {
+                    return;
+                }
+                view.follow_busy = false;
+                match result {
+                    Ok((known, next)) => {
+                        if !known {
+                            // 未知起点只在成功后才点亮；粉丝数跟着动一下。
+                            view.followed = next;
+                            view.follow_known = true;
+                            if let Some(fans) = view.owner_fans.as_mut() {
+                                *fans = if next {
+                                    fans.saturating_add(1)
+                                } else {
+                                    fans.saturating_sub(1)
+                                };
+                            }
+                        }
+                        view.show_interaction_note(
+                            if next { "已关注" } else { "已取消关注" }.into(),
+                            false,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("[interaction] 关注失败：{error}");
+                        if known {
+                            // 乐观更新回滚：按钮与粉丝数都退回去。
+                            view.followed = !next;
+                            if let Some(fans) = view.owner_fans.as_mut() {
+                                *fans = if next {
+                                    fans.saturating_sub(1)
+                                } else {
+                                    fans.saturating_add(1)
+                                };
+                            }
+                        }
+                        view.show_interaction_note(error, true, cx);
+                    }
+                }
+                cx.notify();
             });
         })
         .detach();
@@ -1410,6 +1333,8 @@ impl PlayerView {
         }
         // 投币接口只认 av 号（bvid 会被服务端判成 -400 请求错误）。
         let aid = source.aid;
+        // bvid 只用来拼视频页 Referer（风控会核对请求来源页）。
+        let bvid = source.bvid.clone();
         if aid <= 0 {
             self.show_interaction_note("这个视频没有可投币的信息".into(), true, cx);
             return;
@@ -1427,7 +1352,7 @@ impl PlayerView {
                     let client = yk_core::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
                     yk_core::interaction::coin_video(
-                        &client, &cookie, &csrf, aid, coins, also_like,
+                        &client, &cookie, &csrf, aid, &bvid, coins, also_like,
                     )
                 })
                 .await;
@@ -1488,6 +1413,9 @@ impl PlayerView {
         self.fav_error = None;
         let cookie = session.cookie_header();
         let mid = session.dede_user_id;
+        // 带上当前视频的 aid：夹子的 `fav_state` 才是「这个视频在不在里面」，
+        // 否则面板上的勾选圈永远空着（看起来像没收藏）。
+        let rid = self.source.as_ref().map(|source| source.aid).unwrap_or(0);
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -1495,7 +1423,7 @@ impl PlayerView {
                 .spawn(async move {
                     let client = yk_core::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
-                    yk_core::interaction::fetch_fav_folders(&client, &cookie, mid)
+                    yk_core::interaction::fetch_fav_folders(&client, &cookie, mid, rid)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
@@ -1835,19 +1763,26 @@ impl PlayerView {
     /// 轨道一次排完（播放时只按时间取位置），这样 seek 到任意位置都能直接算；
     /// 同一时刻并发太多时只让前 `MAX_SCROLL_LANES` 条上屏，其余保留在列表里。
     fn install_danmaku(&mut self, set: DanmakuSet) {
+        self.layout_danmaku(set.items().to_vec());
+    }
+
+    /// 按当前轨道数把弹幕重新分配到轨道上。
+    ///
+    /// 窗口高度变化时轨道数会变，重排一次就能把弹幕铺满新的播放区；
+    /// 否则 14 条轨道在 700px 高的画面里只会占用上半屏。
+    fn layout_danmaku(&mut self, items: Vec<Danmaku>) {
+        let max_lanes = self.scroll_lanes.clamp(1, MAX_SCROLL_LANES);
         let mut lanes = LaneAllocator::new(1280.0, 220.0);
         let mut top_free = [f64::NEG_INFINITY; FIXED_LANES];
         let mut bottom_free = [f64::NEG_INFINITY; FIXED_LANES];
-        let mut placed = Vec::with_capacity(set.len());
-        let mut all = Vec::with_capacity(set.len());
+        let mut placed = Vec::with_capacity(items.len());
         let (mut scroll, mut top, mut bottom) = (0usize, 0usize, 0usize);
 
-        for d in set.items() {
-            all.push(d.clone());
+        for d in &items {
             let lane = match d.mode {
                 DanmakuMode::Scroll => {
                     // 轮转分配：短弹幕（满屏「？」）不会全挤在第 0 条轨道。
-                    let Some(lane) = lanes.assign_spread(d, MAX_SCROLL_LANES) else {
+                    let Some(lane) = lanes.assign_spread(d, max_lanes) else {
                         continue;
                     };
                     scroll += 1;
@@ -1875,13 +1810,22 @@ impl PlayerView {
         }
 
         eprintln!(
-            "[danmaku] 上屏 {} 条（滚动 {scroll} / 顶部 {top} / 底部 {bottom}），列表 {} 条",
+            "[danmaku] 上屏 {} 条（滚动 {scroll} / 顶部 {top} / 底部 {bottom}，轨道 {max_lanes}），列表 {} 条",
             placed.len(),
-            all.len()
+            items.len()
         );
         self.lanes = lanes;
         self.danmaku = placed;
-        self.danmaku_all = all;
+        self.danmaku_all = items;
+    }
+
+    /// 窗口高度变化后重排已有弹幕。
+    fn reflow_danmaku(&mut self) {
+        if self.danmaku_all.is_empty() {
+            return;
+        }
+        let items = self.danmaku_all.clone();
+        self.layout_danmaku(items);
     }
 
     /// 给用户刚发的一条滚动弹幕找一个当前空着的轨道。
@@ -1890,7 +1834,7 @@ impl PlayerView {
     /// 不能直接拿来给当前时刻的新弹幕分配；这里按「此刻每条轨道上
     /// 是否还有可见弹幕」现查，保证发出去的弹幕不会立刻叠字。
     fn pick_free_scroll_lane(&self, now: f64, area_width: f32) -> usize {
-        for lane in 0..MAX_SCROLL_LANES {
+        for lane in 0..self.scroll_lanes.clamp(1, MAX_SCROLL_LANES) {
             let occupied = self.danmaku.iter().any(|placed| {
                 matches!(placed.lane, DanmakuLane::Scroll(l) if l == lane)
                     && placed.data.time <= now + 0.2
@@ -1922,6 +1866,10 @@ impl PlayerView {
         }
         // 已经收起就没什么可收的，避免鼠标在视频区移动时反复起定时器。
         if !self.expanded {
+            return;
+        }
+        // 正在写评论：输入框还活着，不能把整个侧栏收走。
+        if self.comment_section.focused {
             return;
         }
         // 刚在面板里滚动过：滚动期间 hover 会抖，先不收起。
@@ -1956,6 +1904,10 @@ impl PlayerView {
         // 指针为了看它 / 点它跑出面板边界，不该连带把面板和弹层一起收掉。
         // 弹层关掉后（外点 / Esc / 再点触发按钮）看门狗会重新判断，该收还是会收。
         if self.action_overlay_open() {
+            return;
+        }
+        // 评论区输入框聚焦时，指针移到视频上也不能把侧栏收走。
+        if self.comment_section.focused {
             return;
         }
         // 记下这一刻的光标位置：收起后用它判断「光标有没有动过」。
@@ -2425,9 +2377,9 @@ impl PlayerView {
         total: u64,
         is_end: bool,
     ) -> Self {
-        self.comment_items = items;
-        self.comments_total = total;
-        self.comments_is_end = is_end;
+        self.comment_section.list.items = items;
+        self.comment_section.list.total = total;
+        self.comment_section.list.is_end = is_end;
         self.comments = CommentState::Ready;
         self.tab = 0;
         self
@@ -2448,7 +2400,16 @@ impl PlayerView {
     /// 测试入口：最近一帧实际创建了几个评论行（窗口化渲染验收）。
     #[doc(hidden)]
     pub fn rendered_comment_rows(&self) -> usize {
-        self.rendered_comment_rows
+        self.comment_section.rendered_rows
+    }
+
+    /// 测试入口：评论输入条是否展开 / 输入框是否拿到焦点。
+    #[doc(hidden)]
+    pub fn test_composer_state(&self) -> (bool, bool) {
+        (
+            self.comment_section.expanded,
+            self.comment_section.focused,
+        )
     }
 
     /// 测试 / 截图入口：把侧栏切到展开态（400 宽）。
@@ -2512,6 +2473,15 @@ impl PlayerView {
 
     pub fn set_close_handler(&mut self, handler: impl Fn(&mut App, bool) + 'static) {
         self.close_handler = Some(Box::new(handler));
+    }
+
+    /// 注入「点头像打开 UP 主浮窗」的回调。播放器不认识 AppRoot，
+    /// 只把 mid / 昵称 / 头像交出去，开哪一层由根节点决定。
+    pub fn set_up_profile_handler(
+        &mut self,
+        handler: impl Fn(&mut App, &mut Window, i64, String, String, Bounds<Pixels>) + 'static,
+    ) {
+        self.up_profile_handler = Some(Box::new(handler));
     }
 
     fn escape_hint_overlay(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3231,6 +3201,11 @@ fn dispatch_history_report(report: &HistoryReport, progress: u64) {
 
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let lane_capacity = scroll_lane_capacity(window);
+        if lane_capacity != self.scroll_lanes {
+            self.scroll_lanes = lane_capacity;
+            self.reflow_danmaku();
+        }
         if !self.hover_watchdog_started {
             self.hover_watchdog_started = true;
             // 鼠标快速移出窗口时，GPUI 可能来不及派发 MouseMove / MouseExit。
@@ -3895,7 +3870,7 @@ impl PlayerView {
                             color: rgb(d.rgb()).into(),
                             width: d.width,
                             scroll_x: Some(self.lanes.x_at_in(d, now, area_width)),
-                            y: 8.0 + lane as f32 * 30.0,
+                            y: 8.0 + lane as f32 * SCROLL_LANE_HEIGHT,
                             fixed: None,
                         })
                     }
@@ -3961,9 +3936,9 @@ impl PlayerView {
                         Some((top, slot)) => {
                             let x = ((area_width - d.width) * 0.5).max(8.0);
                             let y = if top {
-                                8.0 + slot as f32 * 30.0
+                                8.0 + slot as f32 * SCROLL_LANE_HEIGHT
                             } else {
-                                (area_height - 40.0 - slot as f32 * 30.0).max(8.0)
+                                (area_height - 40.0 - slot as f32 * SCROLL_LANE_HEIGHT).max(8.0)
                             };
                             (x, y)
                         }
@@ -4268,6 +4243,8 @@ impl PlayerView {
     ///
     /// 内容按 400px 排版，收起态只把右半裁掉（D-05：收起仍是 200px 半宽）。
     fn info_panel(&mut self, t: &YkTheme, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // 头像探针的句柄先取出来，避免在元素链里再借 self
+        let avatar_bounds = self.up_avatar_bounds.clone();
         let scale_factor = window.scale_factor();
         let s = &t.surfaces;
         let p = &t.palette;
@@ -4329,7 +4306,6 @@ impl PlayerView {
             } else {
                 source.owner_name.clone()
             };
-            let desc = source.desc.clone();
             div()
                 .px(px(SPACE_4))
                 .pb(px(SPACE_3))
@@ -4339,13 +4315,30 @@ impl PlayerView {
                         .items_start()
                         .gap(px(SPACE_3))
                         .child(
+                            // 点头像 = 打开 UP 主浮窗（12.9 节）。头像本身是视觉焦点，
+                            // 顺手把「这人是谁」做成一跳可达，不打断正在播的视频。
                             div()
+                                .id("player-up-avatar")
                                 .relative()
+                                // 探针：记下头像的屏幕 bounds，浮窗从它长出来
+                                .child(
+                                    canvas(
+                                        {
+                                            let sink = avatar_bounds.clone();
+                                            move |bounds, _window, _cx| sink.set(Some(bounds))
+                                        },
+                                        |_, _, _, _| {},
+                                    )
+                                    .absolute()
+                                    .inset_0(),
+                                )
                                 .w(px(46.))
                                 .h(px(46.))
                                 .flex_shrink_0()
                                 .rounded_full()
                                 .overflow_hidden()
+                                .cursor_pointer()
+                                .hover(|style| style.opacity(0.88))
                                 .bg(linear_gradient(
                                     135.,
                                     linear_color_stop(p.bili_blue, 0.0),
@@ -4360,7 +4353,33 @@ impl PlayerView {
                                             .h_full()
                                             .object_fit(ObjectFit::Cover),
                                     )
-                                }),
+                                })
+                                .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    let Some(source) = view.source.as_ref() else {
+                                        return;
+                                    };
+                                    let mid = source.owner_mid;
+                                    if mid <= 0 {
+                                        view.show_interaction_note(
+                                            "没拿到 UP 主 uid，无法打开空间".into(),
+                                            true,
+                                            cx,
+                                        );
+                                        return;
+                                    }
+                                    let name = source.owner_name.clone();
+                                    let face = source.owner_face.clone();
+                                    let opener = view.up_avatar_bounds.get().unwrap_or_else(|| {
+                                        Bounds {
+                                            origin: point(px(0.0), px(TOP_BAR_HEIGHT)),
+                                            size: size(px(46.0), px(46.0)),
+                                        }
+                                    });
+                                    if let Some(handler) = view.up_profile_handler.as_ref() {
+                                        handler(cx, window, mid, name, face, opener);
+                                    }
+                                })),
                         )
                         .child(
                             div()
@@ -4397,14 +4416,16 @@ impl PlayerView {
                                                 .child("发消息"),
                                         ),
                                 )
-                                .when(!desc.is_empty(), |el| {
+                                // UP 主自己的签名放在昵称正下方，和视频简介分开。
+                                .when(!source.owner_sign.trim().is_empty(), |el| {
                                     el.child(
                                         div()
-                                            .line_height(px(18.))
-                                            .text_size(px(FONT_SIZE_CAPTION))
-                                            .text_color(s.text_tertiary)
+                                            .mt(px(2.))
+                                            .line_height(px(16.))
+                                            .text_size(px(FONT_SIZE_MICRO))
+                                            .text_color(s.text_quaternary)
                                             .line_clamp(2)
-                                            .child(desc),
+                                            .child(source.owner_sign.clone()),
                                     )
                                 }),
                         ),
@@ -4412,6 +4433,7 @@ impl PlayerView {
                 .child(
                     div()
                         .flex()
+                        .items_center()
                         .gap(px(SPACE_2))
                         .mt(px(SPACE_3))
                         .child(
@@ -4442,22 +4464,84 @@ impl PlayerView {
                                 .gap(px(5.))
                                 .rounded(px(RADIUS_MD))
                                 .bg(s.fill_2)
+                                .when(self.follow_busy, |el| el.opacity(0.55))
                                 .cursor_pointer()
                                 .hover(|style| style.bg(s.fill_3))
                                 .text_size(px(FONT_SIZE_CAPTION))
-                                .text_color(s.text_secondary)
+                                .text_color(if self.followed {
+                                    s.text_tertiary
+                                } else {
+                                    s.text_secondary
+                                })
                                 .child(
-                                    Icon::new(IconName::List)
-                                        .size(px(ICON_SIZE_SM))
-                                        .text_color(s.text_secondary),
+                                    Icon::new(if self.followed {
+                                        IconName::UserCheck
+                                    } else {
+                                        IconName::UserPlus
+                                    })
+                                    .size(px(ICON_SIZE_SM))
+                                    .text_color(if self.followed {
+                                        s.text_tertiary
+                                    } else {
+                                        s.text_secondary
+                                    }),
                                 )
-                                .child(if self.followed { "已关注" } else { "关注" })
+                                .child(if self.follow_busy {
+                                    "处理中…"
+                                } else if self.followed {
+                                    "已关注"
+                                } else {
+                                    "关注"
+                                })
                                 .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
-                                    view.followed = !view.followed;
-                                    cx.notify();
+                                    view.toggle_follow(cx);
                                 })),
-                        ),
+                        )
+                        .when_some(self.owner_fans, |el, fans| {
+                            // 粉丝数来自 `/x/relation/stat`：紧跟关注按钮，
+                            // 关注 / 取关成功后跟着 ±1。
+                            el.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(FONT_SIZE_MICRO))
+                                    .text_color(s.text_quaternary)
+                                    .child(format!("{} 粉丝", format::count(fans))),
+                            )
+                        }),
                 )
+        });
+
+        // 视频简介单独一行，放在 UP 信息块之后：不塞进 UP 昵称下面的窄列，
+        // 也不会把「发消息 / 关注」这类 UP 操作挤成两行。
+        let desc_row = source.and_then(|source| {
+            let desc = source.desc.trim().to_string();
+            if desc.is_empty() {
+                return None;
+            }
+            let weak = cx.entity().downgrade();
+            let copy_notice = Rc::new(move |cx: &mut App| {
+                let _ = weak.update(cx, |view, cx| {
+                    view.show_interaction_note("已复制".into(), false, cx);
+                });
+            });
+            Some(
+                div().w_full().px(px(SPACE_4)).pb(px(SPACE_3)).child(
+                    div()
+                        .id("player-video-desc")
+                        .w(px(PLAYER_INFO_PANEL_WIDTH - SPACE_4 * 2.0))
+                        .child(
+                            gpui::base::SelectableText::new("player-video-desc-text", desc.clone())
+                                .text_style(gpui::TextStyleRefinement {
+                                    font_size: Some(px(FONT_SIZE_CAPTION).into()),
+                                    line_height: Some(px(18.).into()),
+                                    color: Some(s.text_tertiary),
+                                    line_clamp: Some(3),
+                                    ..Default::default()
+                                }),
+                        )
+                        .context_menu(text_copy_menu(desc, copy_notice)),
+                ),
+            )
         });
 
         // 互动行：点赞 / 投币 / 收藏 / 分享。
@@ -4650,6 +4734,7 @@ impl PlayerView {
             .child(head)
             .children(meta)
             .children(up)
+            .children(desc_row)
             .child(actions)
             .children(tags_row)
             .child(tabs_row)
@@ -4675,7 +4760,8 @@ impl PlayerView {
                     cx.notify();
                 }
                 // 滚到底部附近就补下一批评论（每批 1 页 20 条）。
-                view.maybe_load_more_comments(cx);
+                view.comment_section
+                    .maybe_load_more(&view.panel_scroll, cx);
                 // 评论是窗口化渲染：可见区随滚动变化，每滚一下都要重算窗口，
                 // 否则滚出已创建的 ~27 行之后会看到空白。
                 if view.tab == 0 {
@@ -4685,9 +4771,13 @@ impl PlayerView {
             }))
             .child(content);
 
-        // offset.y 向下滚为负；过阈值才浮出「回到顶部」。
-        let show_back_to_top =
-            self.expanded && self.panel_scroll.offset().y < px(-PANEL_BACK_TO_TOP_THRESHOLD);
+        // 「回到顶部」浮出判定与输入条让位都在共享组件里，这里只喂滚动位置。
+        self.comment_section.sync_scroll(&self.panel_scroll);
+        if !self.expanded {
+            self.comment_section.back_to_top = false;
+        }
+        // 评论输入条只活在「展开 + 评论 Tab」这一帧。
+        let composer_visible = self.tab == 0 && self.expanded;
 
         let to_width = self.panel_width();
         let from_width = if self.panel_generation == 0 {
@@ -4729,7 +4819,17 @@ impl PlayerView {
             // 互动弹层：deferred 画在所有面板内容之后（GPUI 没有 z-index）。
             .children(self.action_overlay(t, window, cx))
             // 滚动后出现：浮在内容之上，右下角 16px 内边距。
-            .children(show_back_to_top.then(|| self.panel_back_to_top(t, cx)))
+            // 收起时也占住这个子节点位置（渲染成 0 尺寸），别让兄弟节点
+            // 数量随滚动变化 —— 子树被重建会让里面的动画从头再播一遍。
+            .child(
+                self.comment_section
+                    .back_to_top(t, &self.panel_scroll, cx),
+            )
+            // 评论 Tab 的浮动输入条：与动态详情同一份组件。
+            .children(composer_visible.then(|| {
+                let width = self.panel_width();
+                self.comment_section.composer(t, window, cx, width)
+            }))
             .with_animation(
                 format!("player-panel-{}", self.panel_generation),
                 Animation::new(std::time::Duration::from_millis(200)).with_easing(ease_standard()),
@@ -5430,20 +5530,12 @@ impl PlayerView {
                 Animation::new(DURATION_FAST).with_easing(ease_entrance()),
             )
         };
-        let pill = div()
-            .rounded_full()
-            .bg(s.surface_elevated_strong)
-            .border_1()
-            .border_color(s.border_popover)
-            .shadow(t.shadows.shadow_2.clone())
+        let pill = status::toast_pill(t, text)
             .text_color(if is_error {
                 t.palette.status_error
             } else {
                 s.text_secondary
             })
-            .flex()
-            .items_center()
-            .child(text)
             .with_animation(animation_id, animation, move |el, delta| {
                 let factor = if closing {
                     1.0 - (1.0 - scale_from) * delta
@@ -5451,11 +5543,11 @@ impl PlayerView {
                     scale_from + (1.0 - scale_from) * delta
                 };
                 let opacity = if closing { 1.0 - delta } else { delta };
-                el.max_w(px(360.0 * factor))
-                    .min_h(px(34.0 * factor))
-                    .px(px(SPACE_4 * factor))
+                el.max_w(px(status::TOAST_MAX_WIDTH * factor))
+                    .min_h(px(status::TOAST_HEIGHT * factor))
+                    .px(px(status::TOAST_PADDING_X * factor))
                     .py(px(SPACE_2 * factor))
-                    .text_size(px(FONT_SIZE_CAPTION * factor))
+                    .text_size(px(FONT_SIZE_BODY * factor))
                     .opacity(opacity.clamp(0.0, 1.0))
             });
         Some(
@@ -5463,54 +5555,14 @@ impl PlayerView {
                 .absolute()
                 .left_0()
                 .right_0()
-                .bottom(px(CTRL_H + SPACE_4))
+                // 贴近控制栏上沿：比旧版再往下 12px，但仍留 4px 间隙，
+                // 不会盖住弹幕输入 / 发送按钮。
+                .bottom(px(CTRL_H + SPACE_1))
                 .flex()
                 .justify_center()
                 .child(pill)
                 .into_any_element(),
         )
-    }
-
-    /// 面板整块滚动后，右下角浮出的「回到顶部」。
-    ///
-    /// 读的是面板唯一滚动区的 offset；点击直接把 offset 归零，
-    /// 不依赖子元素索引，Tab 切换后也能稳稳回到最顶上的视频信息。
-    fn panel_back_to_top(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
-        let s = &t.surfaces;
-        // 浮在评论上：用抬升实心面 + 阴影，和面板内容拉开层级。
-        let mut shadow = t.shadows.shadow_2.clone();
-        shadow.extend(t.shadows.edge_glow_1.clone());
-        div()
-            .id("player-panel-to-top")
-            .absolute()
-            .right(px(SPACE_4))
-            .bottom(px(SPACE_4))
-            .h(px(34.))
-            .px(px(SPACE_3))
-            .flex()
-            .items_center()
-            .gap(px(SPACE_1))
-            .rounded_full()
-            .bg(s.surface_elevated_solid)
-            .border_1()
-            .border_color(s.border_popover)
-            .shadow(shadow)
-            .cursor_pointer()
-            .hover(|style| style.bg(s.surface_elevated_solid_hover))
-            .text_size(px(FONT_SIZE_CAPTION))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(s.text_secondary)
-            .child(
-                Icon::new(IconName::ChevronUp)
-                    .size(px(14.))
-                    .text_color(s.text_secondary),
-            )
-            .child("回到顶部")
-            .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
-                view.panel_scroll.set_offset(point(px(0.), px(0.)));
-                cx.notify();
-            }))
-            .into_any_element()
     }
 
     /// 面板 Tab 内容：评论 / 弹幕 / 选集。
@@ -5541,8 +5593,8 @@ impl PlayerView {
     ) -> AnyElement {
         let s = &t.surfaces;
         let p = &t.palette;
-        let total = if self.comments_total > 0 {
-            self.comments_total
+        let total = if self.comment_section.list.total > 0 {
+            self.comment_section.list.total
         } else {
             self.source
                 .as_ref()
@@ -5554,7 +5606,9 @@ impl PlayerView {
             .as_ref()
             .map(|source| (source.aid, source.bvid.clone()));
 
-        let mut list = div().w_full().px(px(SPACE_4)).pb(px(SPACE_4));
+        // 底部留出浮动评论输入框的高度，最后一条评论能滚到输入框上方。
+        // 底部同时给「回到顶部」按钮和浮动输入框留出空间。
+        let mut list = div().w_full().px(px(SPACE_4)).pb(px(116.));
         match &self.comments {
             CommentState::Idle => {}
             CommentState::Loading => {
@@ -5601,125 +5655,49 @@ impl PlayerView {
                 }
             }
             CommentState::Ready => {
-                if self.comment_items.is_empty() {
+                if self.comment_section.list.items.is_empty() {
                     // 首批都没有：只有服务端明确说到头了，才说「没有更多」。
-                    let text = if self.comments_is_end {
+                    let text = if self.comment_section.list.is_end {
                         "没有更多评论"
                     } else {
                         "评论加载中…"
                     };
                     list = list.child(panel_empty_line(t, text));
                 } else {
-                    let text_width = comment_text_width();
-                    // 行高缓存：正文折行数用文本系统按同一宽度算，渲染时再强制同高。
-                    {
-                        let items = &self.comment_items;
-                        let rows = &mut self.comment_rows;
-                        rows.ensure(items, text_width, |text| {
-                            comment_wrapped_lines(window, text, text_width)
+                    let text_width = crate::comment_section::text_width(PLAYER_INFO_PANEL_WIDTH);
+                    let weak = cx.entity().downgrade();
+                    let copy_notice = Rc::new(move |cx: &mut App| {
+                        let _ = weak.update(cx, |view, cx| {
+                            view.show_interaction_note("已复制".into(), false, cx);
                         });
-                    }
-
-                    let total_height = self.comment_rows.total();
-                    let viewport = self.panel_scroll.bounds().size.height.as_f32();
-                    let scrolled = -self.panel_scroll.offset().y.as_f32();
-                    // 播放层头部（标题 / UP / 互动）的高度取决于内容，这里不猜：
-                    // 上下各多画 `COMMENT_OVERSCAN` 就能把真实可见区盖住。
-                    let lo = (scrolled - COMMENT_OVERSCAN).max(0.0);
-                    let hi = scrolled + viewport + COMMENT_OVERSCAN;
-                    let first = self.comment_rows.first_row_at(lo);
-
-                    let mut stack = div().relative().w_full().h(px(total_height));
-                    let mut index = first;
-                    while index < self.comment_items.len() && self.comment_rows.offsets[index] < hi
-                    {
-                        let top = self.comment_rows.offsets[index];
-                        let height = self.comment_rows.heights[index];
-                        let image_extra = if self.comment_items[index].pictures.is_empty() {
-                            0.0
-                        } else {
-                            COMMENT_IMAGE_ROW_HEIGHT
-                        };
-                        let lines = ((height - COMMENT_ROW_CHROME - image_extra)
-                            / COMMENT_TEXT_LINE_HEIGHT)
-                            .round()
-                            .max(1.0) as usize;
-                        // 多段正文超过展示上限时要先压成一段，`line_clamp` 才管得住
-                        // 总行数；否则文字会撑出这行写死的高度（窗口化渲染会错位）。
-                        let flatten = self
-                            .comment_rows
-                            .line_counts
-                            .get(index)
-                            .copied()
-                            .unwrap_or(1)
-                            > COMMENT_MAX_LINES;
-                        stack = stack.child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .right_0()
-                                .top(px(top))
-                                .h(px(height))
-                                .child(comment_item(
-                                    t,
-                                    &self.comment_items[index],
-                                    lines,
-                                    flatten,
-                                    self.image_viewer.clone(),
-                                    cx,
-                                )),
-                        );
-                        index += 1;
-                    }
-                    self.rendered_comment_rows = index.saturating_sub(first);
-                    list = list.child(stack);
-
-                    // 只有服务端真的到底了才显示「没有更多评论」；
-                    // 还在翻页时只显示加载 / 失败重试。
-                    if self.comments_is_end {
-                        list = list.child(panel_empty_line(t, "没有更多评论"));
-                    } else if let Some(error) = self.comments_load_error.clone() {
-                        list = list
-                            .child(panel_empty_line(t, "加载更多评论失败"))
-                            .child(
-                                div().w_full().pb(px(SPACE_3)).flex().justify_center().child(
-                                    div()
-                                        .id("player-comments-more-retry")
-                                        .px(px(SPACE_3))
-                                        .h(px(26.))
-                                        .flex()
-                                        .items_center()
-                                        .rounded(px(RADIUS_MD))
-                                        .bg(s.fill_2)
-                                        .cursor_pointer()
-                                        .hover(|style| style.bg(s.fill_3))
-                                        .text_size(px(FONT_SIZE_CAPTION))
-                                        .text_color(p.theme_primary)
-                                        .child("重试加载更多")
-                                        .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
-                                            view.comments_load_error = None;
-                                            view.spawn_more_comments(cx);
-                                        })),
-                                ),
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .pb(px(SPACE_2))
-                                    .flex()
-                                    .justify_center()
-                                    .text_size(px(FONT_SIZE_MICRO))
-                                    .text_color(s.text_quaternary)
-                                    .child(error),
-                            );
-                    } else if self.comments_loading_more {
-                        list = list.child(panel_empty_line(t, "正在加载更多评论…"));
-                    }
+                    });
+                    let viewer = self.image_viewer.clone();
+                    let on_image = Rc::new(
+                        move |urls: Vec<String>,
+                              index: usize,
+                              window: &mut Window,
+                              cx: &mut App| {
+                            let _ = viewer.update(cx, |viewer, cx| {
+                                viewer.open(urls, index, window, cx);
+                            });
+                        },
+                    ) as Rc<dyn Fn(Vec<String>, usize, &mut Window, &mut App)>;
+                    list = list.child(self.comment_section.body(
+                        t,
+                        window,
+                        &self.panel_scroll,
+                        text_width,
+                        "player-comment",
+                        copy_notice,
+                        Some(on_image),
+                        cx,
+                    ));
                 }
             }
         }
 
-        self.maybe_load_more_comments(cx);
+        self.comment_section
+            .maybe_load_more(&self.panel_scroll, cx);
 
         div()
             .w_full()
@@ -6099,304 +6077,6 @@ fn panel_empty_line(t: &YkTheme, text: &str) -> impl IntoElement {
         .child(text.to_string())
 }
 
-/// 信息面板的一条评论。
-/// 把新一批评论合并进已加载列表（按 `rpid` 去重），返回实际新增条数。
-///
-/// 跨批重复在线上会出现（置顶评论、翻页边界），UI 不能因此多出一行。
-fn merge_comment_page(items: &mut Vec<DynamicComment>, incoming: Vec<DynamicComment>) -> usize {
-    let before = items.len();
-    for comment in incoming {
-        if items.iter().any(|existing| existing.rpid == comment.rpid) {
-            continue;
-        }
-        items.push(comment);
-    }
-    items.len() - before
-}
-
-/// 距下一次评论请求还要等多久（纯函数，便于单测）。
-///
-/// 两次请求至少隔 [`COMMENT_REQUEST_INTERVAL`]；`last` 为空表示从没请求过，
-/// 立刻可发。用 `saturating_duration_since` 是为了时钟回拨时退化成 0，
-/// 不会把评论区永久卡死。
-fn comment_request_wait(
-    last: Option<std::time::Instant>,
-    now: std::time::Instant,
-) -> std::time::Duration {
-    let Some(last) = last else {
-        return std::time::Duration::ZERO;
-    };
-    (last + COMMENT_REQUEST_INTERVAL).saturating_duration_since(now)
-}
-
-/// 评论区是否该「再拉一批」。
-///
-/// 两条触发条件：
-/// ① 已经能滚：离底部不足 [`PlayerView::COMMENT_LOAD_MORE_GAP`]（`max_offset`
-///    在布局后才更新，`max <= -1` 用来排除「还没布局」的 0）；
-/// ② 还不能滚：评论本身连一屏都不到 —— 头部高度未知，按 320 保守估算。
-fn comments_need_more(offset_y: f32, max_offset_y: f32, viewport_h: f32, rows_total: f32) -> bool {
-    let near_bottom =
-        max_offset_y <= -1.0 && offset_y - max_offset_y <= PlayerView::COMMENT_LOAD_MORE_GAP;
-    let short = viewport_h > 0.0 && rows_total + 320.0 < viewport_h;
-    near_bottom || short
-}
-
-/// 评论正文的可用宽度。
-///
-/// 面板内容始终按 400 排版（收起态只是被裁掉右半），所以这个宽度与
-/// 展开 / 收起无关：400 − 左右 padding 32 − 头像 28 − 间距 8。
-fn comment_text_width() -> f32 {
-    PLAYER_INFO_PANEL_WIDTH - SPACE_4 * 2.0 - 28.0 - SPACE_2
-}
-
-/// 评论正文在 `width` 内折成的**物理行数**（按段累加，不按展示上限截断）。
-///
-/// 用文本系统的 `shape_text` 按与渲染完全相同的字号 / 宽度 / 行数上限算。
-/// 返回值交给 `CommentRows` 截断成展示行数；超过 `COMMENT_MAX_LINES`
-/// 的多段正文还要在渲染前压成一段，否则 `line_clamp` 管不住总行数。
-fn comment_wrapped_lines(window: &mut Window, text: &str, width: f32) -> usize {
-    if text.trim().is_empty() || width <= 0.0 {
-        return 1;
-    }
-    let run = TextRun {
-        len: text.len(),
-        font: gpui::Font::default(),
-        ..Default::default()
-    };
-    match window.text_system().shape_text(
-        text.to_string().into(),
-        px(FONT_SIZE_CONTROL),
-        &[run],
-        Some(px(width)),
-        Some(COMMENT_MAX_LINES),
-    ) {
-        // `shape_text` 返回的是**段落**（按 `\n` 切），折行数要看
-        // 每段的 `wrap_boundaries`：段内折一次就多一行。
-        Ok(paragraphs) => paragraphs
-            .iter()
-            .map(|line| line.wrap_boundaries.len() + 1)
-            .sum::<usize>()
-            .max(1),
-        Err(_) => 1,
-    }
-}
-
-/// 把多段正文压成单段。
-///
-/// GPUI 的 `line_clamp` 对显式换行只按段生效，多段正文会整段铺开；
-/// 窗口化评论行的高度是提前算死的，压成一段后才能保证最多 3 行。
-fn flatten_comment_text(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// 评论正文的右键菜单。复制时优先取当前选区，没选区就复制整条。
-fn comment_copy_menu(
-    text: String,
-    view: WeakEntity<PlayerView>,
-) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-    move |menu, _, _| {
-        let view = view.clone();
-        let fallback = text.clone();
-        menu.item(
-            PopupMenuItem::new("复制文本")
-                .icon(Icon::new(IconName::Copy))
-                .on_click(move |_, window, cx| {
-                    let selected = gpui::base::TextSelection::selected_text(window, cx);
-                    let value = if selected.trim().is_empty() {
-                        fallback.clone()
-                    } else {
-                        selected
-                    };
-                    if value.trim().is_empty() {
-                        return;
-                    }
-                    cx.write_to_clipboard(ClipboardItem::new_string(value));
-                    let _ = view.update(cx, |view, cx| {
-                        view.show_interaction_note("已复制".into(), false, cx);
-                    });
-                }),
-        )
-    }
-}
-
-fn comment_item(
-    t: &YkTheme,
-    comment: &DynamicComment,
-    lines: usize,
-    flatten: bool,
-    viewer: gpui::Entity<crate::image_viewer::ImageViewer>,
-    cx: &mut Context<PlayerView>,
-) -> impl IntoElement {
-    let s = &t.surfaces;
-    let p = &t.palette;
-    let text = if flatten {
-        flatten_comment_text(&comment.text)
-    } else {
-        comment.text.clone()
-    };
-    let menu_text = text.clone();
-    // 高度必须与 `CommentRows` 算出来的完全一致（窗口化渲染按它绝对定位）：
-    // padding 16 + 作者行 16 + 两个 2px 间距 + 正文 20×行数 + 时间行 14，
-    // 有附图时再加一条缩略图条（`COMMENT_IMAGE_ROW_HEIGHT`）。
-    let image_extra = if comment.pictures.is_empty() {
-        0.0
-    } else {
-        COMMENT_IMAGE_ROW_HEIGHT
-    };
-    let height = COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * lines as f32 + image_extra;
-    div()
-        .w_full()
-        .flex()
-        .items_start()
-        .gap(px(SPACE_2))
-        .py(px(SPACE_2))
-        .h(px(height))
-        // 这里**不能裁切**：`SelectableText` 的拖选自动滚动会把最近一层
-        // 裁切当成可视区。评论行只有几十像素高，指针一进正文就落进
-        // 「上下 16px 触发区」，拖动（哪怕只是左右移动）都会被判定成
-        // 贴着边缘，持续派发滚轮，把虚拟列表滚出很远。
-        // 行内内容本来就按 `CommentRows` 的精确高度排，不会溢出。
-        .border_b_1()
-        .border_color(s.border_subtle)
-        .child(
-            div()
-                .w(px(28.))
-                .h(px(28.))
-                .flex_shrink_0()
-                .rounded_full()
-                .overflow_hidden()
-                .bg(linear_gradient(
-                    135.,
-                    linear_color_stop(p.bili_blue, 0.0),
-                    linear_color_stop(p.bili_pink, 1.0),
-                ))
-                .when(!comment.face.is_empty(), |el| {
-                    el.child(
-                        img(ImageSource::from(comment.face.clone()))
-                            .w(px(28.))
-                            .h(px(28.))
-                            .object_fit(ObjectFit::Cover),
-                    )
-                }),
-        )
-        .child(
-            div()
-                // 正文列给**确定宽度**：GPUI 的文本只在宽度确定时才折行，
-                // `flex_1` 拿到的可用宽度不足以让 shaping 主动换行。
-                // 这个宽度必须与 `comment_text_width()` / `CommentRows` 一致。
-                .w(px(comment_text_width()))
-                .flex_shrink_0()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(
-                    div()
-                        .h(px(16.))
-                        .text_size(px(FONT_SIZE_CAPTION))
-                        .line_height(px(16.))
-                        .text_color(s.text_quaternary)
-                        .truncate()
-                        .child(comment.author.clone()),
-                )
-                .child(
-                    // 评论正文用 `SelectableText`：拖动可以按字符选范围，Cmd/Ctrl+C
-                    // 复制选中部分（`gpui-base` 的窗口级选区 + Root 的复制动作）。
-                    // 高度仍然由 `CommentRows` 算好的行数决定。
-                    //
-                    // 注意别在正文外面再包 `overflow_hidden`：拖选自动滚动按
-                    // 最近一层裁切计算可视区，裁到正文高度后左右拖动也会一直
-                    // 触发滚动。让最近一层裁切保持为侧栏的滚动视口。
-                    div()
-                        .id(("comment-menu", comment.rpid.max(0) as usize))
-                        .h(px(COMMENT_TEXT_LINE_HEIGHT * lines as f32))
-                        .child(
-                            gpui::base::SelectableText::new(
-                                ("comment-body", comment.rpid.max(0) as usize),
-                                text,
-                            )
-                            .text_style(gpui::TextStyleRefinement {
-                                font_size: Some(px(FONT_SIZE_CONTROL).into()),
-                                line_height: Some(px(COMMENT_TEXT_LINE_HEIGHT).into()),
-                                color: Some(s.text_primary),
-                                line_clamp: Some(COMMENT_MAX_LINES),
-                                ..Default::default()
-                            }),
-                        )
-                        // 右键菜单：有选区就复制选区，没有就复制整条评论。
-                        .context_menu(comment_copy_menu(menu_text, cx.entity().downgrade())),
-                )
-                // 评论附图：最多 4 张 72×72 缩略图，点开进查看器（可缩放 / 左右翻）。
-                .when(!comment.pictures.is_empty(), |el| {
-                    let urls: Vec<String> = comment
-                        .pictures
-                        .iter()
-                        .map(|picture| picture.detail_url())
-                        .collect();
-                    let mut strip = div()
-                        .mt(px(6.))
-                        .h(px(COMMENT_THUMB_SIZE))
-                        .flex()
-                        .gap(px(6.))
-                        .overflow_hidden();
-                    for (i, picture) in comment
-                        .pictures
-                        .iter()
-                        .take(COMMENT_MAX_THUMBS)
-                        .enumerate()
-                    {
-                        let viewer = viewer.clone();
-                        let urls = urls.clone();
-                        strip = strip.child(
-                            div()
-                                .id(("comment-image", (comment.rpid.max(0) as usize) << 4 | i))
-                                .w(px(COMMENT_THUMB_SIZE))
-                                .h(px(COMMENT_THUMB_SIZE))
-                                .flex_shrink_0()
-                                .rounded(px(RADIUS_MD))
-                                .overflow_hidden()
-                                .bg(s.fill_3)
-                                .cursor_pointer()
-                                .child(
-                                    img(ImageSource::from(picture.thumb_url(144)))
-                                        .w(px(COMMENT_THUMB_SIZE))
-                                        .h(px(COMMENT_THUMB_SIZE))
-                                        .object_fit(ObjectFit::Cover),
-                                )
-                                .on_click(cx.listener(move |_view, _: &ClickEvent, window, cx| {
-                                    let _ = viewer.update(cx, |viewer, cx| {
-                                        viewer.open(urls.clone(), i, window, cx);
-                                    });
-                                    cx.stop_propagation();
-                                })),
-                        );
-                    }
-                    el.child(strip)
-                })
-                .child(
-                    div()
-                        .h(px(14.))
-                        .flex()
-                        .items_center()
-                        .gap(px(SPACE_3))
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .line_height(px(14.))
-                        .text_color(s.text_quaternary)
-                        .child(comment.time.clone())
-                        .when(comment.like > 0, |el| {
-                            el.child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(2.))
-                                    .child(Icon::new(IconName::ThumbsUp).size(px(11.)))
-                                    .child(format::count(comment.like)),
-                            )
-                        }),
-                ),
-        )
-}
-
 /// 占位弹幕（真实数据要从 `/x/v1/dm/list.so` 拉 XML，属于后续）。
 /// 给顶部 / 底部固定弹幕找一个空槽位。
 ///
@@ -6774,14 +6454,27 @@ fn ctrl_icon(icon: IconName, color: Hsla) -> impl IntoElement {
         .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color))
 }
 
+impl crate::comment_section::CommentHost for PlayerView {
+    fn comments(&mut self) -> &mut crate::comment_section::Section {
+        &mut self.comment_section
+    }
+
+    fn comment_notice(&mut self, text: String, error: bool, cx: &mut Context<Self>) {
+        self.show_interaction_note(text, error, cx);
+    }
+
+    fn comment_focus_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        comment_request_wait, comments_need_more, cursor_local, flatten_comment_text,
-        merge_comment_page, percent_encode, qq_share_url, share_link_text, video_page_url,
-        CommentRows,
-        COMMENT_PAGE_SIZE, COMMENT_REQUEST_INTERVAL, COMMENT_ROW_CHROME, COMMENT_TEXT_LINE_HEIGHT,
+        cursor_local, percent_encode, qq_share_url, share_link_text, video_page_url,
+        COMMENT_PAGE_SIZE, COMMENT_REQUEST_INTERVAL,
     };
+    use crate::comment_view::COMMENT_TEXT_LINE_HEIGHT;
     use gpui::{point, px};
 
     /// 可见性状态机：失焦不算不可见，不可见才停帧。
@@ -6863,33 +6556,6 @@ mod tests {
     }
 
     #[test]
-    fn comment_requests_are_spaced_at_least_one_second() {
-        let now = std::time::Instant::now();
-        // 从没请求过：立刻可发。
-        assert_eq!(comment_request_wait(None, now), std::time::Duration::ZERO);
-        // 刚发过：等满 1 秒。
-        assert_eq!(
-            comment_request_wait(Some(now), now),
-            COMMENT_REQUEST_INTERVAL
-        );
-        // 400ms 前发过：还差 600ms。
-        assert_eq!(
-            comment_request_wait(Some(now - std::time::Duration::from_millis(400)), now),
-            std::time::Duration::from_millis(600)
-        );
-        // 早就发过：不再等。
-        assert_eq!(
-            comment_request_wait(Some(now - std::time::Duration::from_secs(5)), now),
-            std::time::Duration::ZERO
-        );
-        // 记的是「未来发送时刻」（后台线程先等再发）也不能算出负数。
-        assert_eq!(
-            comment_request_wait(Some(now + std::time::Duration::from_millis(400)), now),
-            std::time::Duration::from_millis(1400)
-        );
-    }
-
-    #[test]
     fn comment_batch_is_one_small_request() {
         // 一次「加载更多」= 1 页 20 条：不许再回到「拼 4 页凑 100 条」。
         assert!(COMMENT_PAGE_SIZE <= 20);
@@ -6897,91 +6563,6 @@ mod tests {
             COMMENT_REQUEST_INTERVAL >= std::time::Duration::from_millis(500),
             "请求间隔太短，评论区会再次被 -352 拦"
         );
-    }
-
-    #[test]
-    fn merge_comment_page_dedupes_across_batches() {
-        let item = |rpid: i64| yk_core::dynamic::DynamicComment {
-            rpid,
-            ..Default::default()
-        };
-        let mut items = vec![item(1), item(2), item(3)];
-        let added = merge_comment_page(&mut items, vec![item(3), item(4), item(5)]);
-        assert_eq!(added, 2, "重复的 rpid 不能算新增");
-        assert_eq!(
-            items.iter().map(|c| c.rpid).collect::<Vec<_>>(),
-            vec![1, 2, 3, 4, 5]
-        );
-    }
-
-    #[test]
-    fn comments_need_more_only_near_bottom_or_when_short() {
-        // 长列表、停在顶部：不能补页。
-        assert!(!comments_need_more(0.0, -10_000.0, 650.0, 21_000.0));
-        // 长列表、离底部还有 1000px：不补。
-        assert!(!comments_need_more(-9_000.0, -10_000.0, 650.0, 21_000.0));
-        // 长列表、离底部 200px：补。
-        assert!(comments_need_more(-9_800.0, -10_000.0, 650.0, 21_000.0));
-        // 短列表（几条评论，连头部一起算都不到一屏）：即使还没布局也要补。
-        assert!(comments_need_more(0.0, 0.0, 650.0, 200.0));
-        // 还没布局（viewport=0）：不要误触发。
-        assert!(!comments_need_more(0.0, 0.0, 0.0, 0.0));
-    }
-
-    #[test]
-    fn comment_rows_offsets_and_window_lookup() {
-        let items: Vec<yk_core::dynamic::DynamicComment> = (0..4)
-            .map(|i| yk_core::dynamic::DynamicComment {
-                rpid: i as i64 + 1,
-                text: "x".repeat(i as usize + 1),
-                ..Default::default()
-            })
-            .collect();
-        let mut rows = CommentRows::default();
-        // 第 i 条折 1/2/3/3 行（3 行封顶）。
-        rows.ensure(&items, 332.0, |text| text.len());
-        assert_eq!(rows.heights.len(), 4);
-        // 物理行数保留未截断值，渲染时据此决定要不要把多段正文压成一段。
-        assert_eq!(rows.line_counts, vec![1, 2, 3, 4]);
-        assert_eq!(
-            rows.heights[0],
-            COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT
-        );
-        assert_eq!(
-            rows.heights[1],
-            COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * 2.0
-        );
-        assert_eq!(
-            rows.heights[3],
-            COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT * 3.0,
-            "正文最多 3 行"
-        );
-        let total: f32 = rows.heights.iter().sum();
-        assert!((rows.total() - total).abs() < 0.01);
-        // 追加不重算前面的行。
-        let mut more = items.clone();
-        more.push(yk_core::dynamic::DynamicComment {
-            rpid: 5,
-            text: "x".into(),
-            ..Default::default()
-        });
-        rows.ensure(&more, 332.0, |_| 1);
-        assert_eq!(rows.heights.len(), 5);
-        assert!((rows.total() - (total + COMMENT_ROW_CHROME + COMMENT_TEXT_LINE_HEIGHT)).abs() < 0.01);
-
-        // 窗口查找：y=0 从 0 开始；越过前两行后从第 2 行开始。
-        assert_eq!(rows.first_row_at(0.0), 0);
-        assert_eq!(rows.first_row_at(rows.offsets[2] + 1.0), 2);
-        assert_eq!(rows.first_row_at(rows.total()), 5);
-    }
-
-    #[test]
-    fn flatten_comment_text_collapses_explicit_breaks() {
-        assert_eq!(
-            flatten_comment_text("第一行\n第二行\n\n第三行"),
-            "第一行 第二行 第三行"
-        );
-        assert_eq!(flatten_comment_text("没有换行"), "没有换行");
     }
 
     #[test]

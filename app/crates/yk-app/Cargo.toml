@@ -89,6 +89,11 @@ path = "tests/dynamic_detail_copy.rs"
 harness = false
 
 [[test]]
+name = "dynamic_comment_select"
+path = "tests/dynamic_comment_select.rs"
+harness = false
+
+[[test]]
 name = "following_card_copy"
 path = "tests/following_card_copy.rs"
 harness = false

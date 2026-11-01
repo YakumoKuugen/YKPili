@@ -9,9 +9,13 @@
 //! - 滚轮：以**指针位置**为中心缩放（1×–6×），缩到 1× 自动回中；
 //! - 拖动：放大后按住左键平移；1× 时拖动不生效（避免误移）；
 //! - ←/→ 或 A/D：上一张 / 下一张，切换后回到 1× 并居中；
+//! - 右下角「复制」：把当前图片写入系统剪贴板；
 //! - 右下角「还原」：只把缩放与位移还原成初始值，不关闭查看器；
 //! - Esc / 右键 / 点击图片外的背景：关闭。
 
+use gpui::assets::IconName;
+use gpui::component::Icon;
+use gpui::TestSupportExt as _;
 use gpui::prelude::*;
 use gpui::{
     div, img, point, px, AnyElement, App, Context, FocusHandle, ImageSource, KeyDownEvent,
@@ -23,6 +27,8 @@ pub const ZOOM_MIN: f32 = 1.0;
 pub const ZOOM_MAX: f32 = 6.0;
 /// 滚轮一格（约 40px）对应的缩放倍率变化。
 const ZOOM_STEP: f32 = 0.24;
+/// 复制结果在按钮上的停留时长。
+const COPY_FEEDBACK_MS: u64 = 1800;
 
 /// 纯状态：缩放 / 位移 / 当前第几张。
 ///
@@ -106,6 +112,12 @@ pub struct ImageViewer {
     dragging: bool,
     drag_from: Option<Point<Pixels>>,
     focus_handle: FocusHandle,
+    /// 当前图片正在写剪贴板。
+    copying: bool,
+    /// 复制结果文案（「已复制」/「复制失败」），短暂显示后清空。
+    copy_feedback: Option<(String, bool)>,
+    /// 防止旧的复制结果 / 清理定时器覆盖新状态。
+    copy_generation: u64,
 }
 
 impl ImageViewer {
@@ -116,6 +128,9 @@ impl ImageViewer {
             dragging: false,
             drag_from: None,
             focus_handle: cx.focus_handle(),
+            copying: false,
+            copy_feedback: None,
+            copy_generation: 0,
         }
     }
 
@@ -138,6 +153,9 @@ impl ImageViewer {
         self.open = true;
         self.dragging = false;
         self.drag_from = None;
+        self.copying = false;
+        self.copy_feedback = None;
+        self.copy_generation = self.copy_generation.wrapping_add(1);
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -151,7 +169,68 @@ impl ImageViewer {
         self.open = true;
         self.dragging = false;
         self.drag_from = None;
+        self.copying = false;
+        self.copy_feedback = None;
+        self.copy_generation = self.copy_generation.wrapping_add(1);
         cx.notify();
+    }
+
+    /// 复制当前这张图：优先取原图地址，读完字节后写入系统图片剪贴板。
+    fn copy_current_image(&mut self, cx: &mut Context<Self>) {
+        if self.copying {
+            return;
+        }
+        let Some(url) = self.transform.urls.get(self.transform.index).cloned() else {
+            return;
+        };
+        let url = original_image_url(&url);
+        if url.is_empty() {
+            return;
+        }
+        self.copying = true;
+        self.copy_feedback = None;
+        self.copy_generation = self.copy_generation.wrapping_add(1);
+        let generation = self.copy_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::http::read_image_bytes(&url) })
+                .await;
+            let alive = this
+                .update(cx, |view, cx| {
+                    if view.copy_generation != generation {
+                        return false;
+                    }
+                    view.copying = false;
+                    match result {
+                        Ok((bytes, format)) => {
+                            crate::http::copy_image_to_clipboard(cx, bytes, format);
+                            view.copy_feedback = Some(("已复制".into(), false));
+                        }
+                        Err(error) => {
+                            eprintln!("[image-viewer] 复制图片失败：{error}");
+                            view.copy_feedback = Some(("复制失败".into(), true));
+                        }
+                    }
+                    cx.notify();
+                    true
+                })
+                .unwrap_or(false);
+            if !alive {
+                return;
+            }
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(COPY_FEEDBACK_MS))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.copy_generation == generation {
+                    view.copy_feedback = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
@@ -161,6 +240,9 @@ impl ImageViewer {
         self.open = false;
         self.dragging = false;
         self.drag_from = None;
+        self.copying = false;
+        self.copy_feedback = None;
+        self.copy_generation = self.copy_generation.wrapping_add(1);
         self.transform.reset();
         cx.notify();
     }
@@ -189,6 +271,17 @@ impl Render for ImageViewer {
         let (vw, vh) = (viewport.width.as_f32(), viewport.height.as_f32());
         // 初始展示区：屏幕的 86%，图片按 Contain 缩放。
         let zoom = self.transform.zoom;
+        let copy_label = if self.copying {
+            "复制中…".to_string()
+        } else if let Some((text, _)) = self.copy_feedback.as_ref() {
+            text.clone()
+        } else {
+            "复制".to_string()
+        };
+        let copy_error = self
+            .copy_feedback
+            .as_ref()
+            .is_some_and(|(_, is_error)| *is_error);
         let w = (vw * 0.86 * zoom).max(1.0);
         let h = (vh * 0.86 * zoom).max(1.0);
         let offset = self.transform.offset;
@@ -347,6 +440,33 @@ impl Render for ImageViewer {
                 .flex()
                 .items_center()
                 .gap(px(8.))
+                .child(
+                    div()
+                        .id("image-viewer-copy")
+                        .test_support()
+                        .px(px(12.))
+                        .h(px(30.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .rounded(px(8.))
+                        .bg(surfaces.surface_elevated_solid)
+                        .text_size(px(12.))
+                        .text_color(if copy_error {
+                            palette.status_error
+                        } else {
+                            surfaces.text_secondary
+                        })
+                        .cursor_pointer()
+                        .hover(|style| style.opacity(0.88))
+                        .when(self.copying, |el| el.opacity(0.65))
+                        .child(Icon::new(IconName::Copy).size(px(14.)))
+                        .child(copy_label)
+                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.copy_current_image(cx);
+                        })),
+                )
                 .when(transformed, |el| {
                     el.child(
                         div()
@@ -387,10 +507,37 @@ impl Render for ImageViewer {
     }
 }
 
+/// 查看器里的地址通常是 `...jpg@1280w.webp` 的显示用缩略图；复制取原图。
+fn original_image_url(url: &str) -> String {
+    let url = url.trim();
+    if let Some((base, suffix)) = url.split_once('@') {
+        if base.contains("hdslb.com") && suffix.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+            return base.to_string();
+        }
+    }
+    url.to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ViewerTransform, ZOOM_MAX, ZOOM_MIN};
+    use super::{original_image_url, ViewerTransform, ZOOM_MAX, ZOOM_MIN};
     use gpui::{point, px};
+
+    #[test]
+    fn copy_url_strips_bilibili_resize_suffix() {
+        assert_eq!(
+            original_image_url("https://i0.hdslb.com/bfs/a.jpg@1280w.webp"),
+            "https://i0.hdslb.com/bfs/a.jpg"
+        );
+        assert_eq!(
+            original_image_url("https://i0.hdslb.com/bfs/a.jpg"),
+            "https://i0.hdslb.com/bfs/a.jpg"
+        );
+        assert_eq!(
+            original_image_url("https://example.com/a@2x.png"),
+            "https://example.com/a@2x.png"
+        );
+    }
 
     #[test]
     fn zoom_is_clamped_and_reset_clears_offset() {

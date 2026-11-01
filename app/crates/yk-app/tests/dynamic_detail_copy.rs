@@ -214,6 +214,7 @@ fn main() {
         rpid: 4242,
         author: "评论用户".into(),
         text: "这是一条用于验证评论右键复制的正文。".into(),
+        is_top: true,
         ..Default::default()
     };
     cx.update(|cx| {
@@ -226,6 +227,9 @@ fn main() {
         window.render_frame(cx);
     })
     .unwrap();
+    if std::env::var("YK_VISUAL").is_ok() {
+        capture(&mut cx, handle, "/tmp/ykpili-dynamic-comments.ppm");
+    }
     let comment_center = cx
         .update_window(handle, |_, window, _| {
             window
@@ -292,13 +296,10 @@ fn main() {
     })
     .unwrap();
 
-    let scale_factor = cx
-        .update_window(handle, |_, window, _| window.scale_factor())
-        .unwrap();
-    let media_w = 1120.0_f32 * 0.56;
-    let fitted = image.fit_url(media_w, scale_factor);
+    // 复制按钮取的是原图（`copy_url`），缓存也要按同一个地址预置，
+    // 否则会走网络并 404。缩略图地址只用于屏幕显示，不参与复制。
     let cache = yk_core::ImageDiskCache::new(&cache_dir, 16 * 1024 * 1024);
-    cache.put(&fitted, &png_bytes());
+    cache.put(&image.copy_url(), &png_bytes());
 
     cx.update_window(handle, |_, window, cx| {
         window.click("dynamic-image-copy", cx);

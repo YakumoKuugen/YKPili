@@ -30,6 +30,8 @@ use yk_core::models::CoverItem;
 use yk_core::Feed;
 
 pub mod account_view;
+pub mod comment_section;
+pub mod comment_view;
 pub mod components;
 pub mod dynamic_feed;
 pub mod dynamic_view;
@@ -45,6 +47,7 @@ pub mod player;
 pub mod rank_view;
 pub mod search_view;
 pub mod settings_view;
+pub mod up_profile;
 pub mod video;
 pub mod video_worker;
 #[cfg(target_os = "windows")]
@@ -131,6 +134,8 @@ pub struct AppRoot {
     login: Option<Entity<login_view::LoginView>>,
     /// 已登录账号面板；None = 未打开。
     account: Option<Entity<account_view::AccountView>>,
+    /// UP 主浮窗（他人空间）；None = 未打开。点 UP 主头像打开，Esc 或点遮罩回收。
+    up_profile: Option<Entity<up_profile::UpProfileView>>,
     /// 设置浮层（缓存管理）；None = 未打开。
     settings: Option<Entity<settings_view::SettingsView>>,
     /// 页面级图片缓存：只绑定在内容区，顶栏/浮层不受影响。
@@ -727,6 +732,7 @@ impl AppRoot {
         let theme = self.theme.clone();
         self.playing = Some(cx.new(|cx| player::PlayerView::new(theme, cx)));
         self.install_player_close_handler(cx);
+        self.install_player_up_profile_handler(cx);
         // 入场动画（280ms）结束、播放器完全盖住内容区后，把背后的页面停绘。
         // 入场期间仍要真实网格做展开背景，所以延迟到动画结束后再置位。
         self.player_page_hidden = false;
@@ -866,6 +872,148 @@ impl AppRoot {
         });
         self.account = Some(account);
         cx.notify();
+    }
+
+    /// 从任意一处封面打开播放浮窗：封面几何 → 播放器入场动画。
+    ///
+    /// 首页卡片、UP 主浮窗的投稿网格、视频类动态都走这一个入口，
+    /// 保证「点了封面就长成播放器」只有一份逻辑。
+    pub(crate) fn play_from_cover(
+        &mut self,
+        mut source: player::CoverSource,
+        bvid: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if bvid.is_empty() || self.playing.is_some() || self.close_player_requested {
+            return;
+        }
+        // 浮窗层级是「UP 主浮窗 65 > 播放浮窗 60」：从浮窗里点封面起播时，
+        // 先让浮窗走回收（260ms 淡出），播放器的入场（280ms）在它下面同时开始——
+        // 两个动作重叠，观感是「浮窗退开、视频从封面长出来」。
+        if let Some(up) = self.up_profile.clone() {
+            let _ = up.update(cx, |view, cx| view.begin_close(cx));
+        }
+        if let Some(root) = self.layout_bounds.get() {
+            source.root_size = root.size;
+        }
+        self.ensure_player(cx);
+        if let Some(player) = self.playing.clone() {
+            let _ = player.update(cx, |view, cx| view.set_entrance(source, cx));
+            let _ = player.update(cx, |view, cx| view.open_bvid(bvid, cx));
+        }
+        window.refresh();
+        cx.notify();
+    }
+
+    /// 点 UP 主头像：打开 UP 主浮窗（他人空间，12.9 节）。
+    ///
+    /// 同一个人已经开着就复用，避免重复请求；换人则重建实体。
+    /// 入场起点先用「顶栏下方 34 圆点」近似——头像的精确 bounds 要 canvas 探测，
+    /// 动画观感一致，锚点可以后面再精修。
+    pub fn ensure_up_profile(
+        &mut self,
+        mid: i64,
+        name: String,
+        face: String,
+        opener: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if mid <= 0 {
+            return;
+        }
+        if let Some(existing) = self.up_profile.as_ref() {
+            if existing.read(cx).mid() == mid {
+                return;
+            }
+            self.up_profile = None;
+        }
+        self.search.open = false;
+        let theme = self.theme.clone();
+        let viewport = window.viewport_size();
+        let view = cx.new(|cx| {
+            up_profile::UpProfileView::new(theme, mid, name, face, opener, viewport, cx)
+        });
+        let root = cx.entity().downgrade();
+        let root_for_play = cx.entity().downgrade();
+        let _ = view.update(cx, |view, _| {
+            view.set_close_handler(move |cx| {
+                let _ = root.update(cx, |root, cx| {
+                    root.up_profile = None;
+                    cx.notify();
+                });
+            });
+            view.set_play_handler(move |cx, window, bvid, source| {
+                let _ = root_for_play.update(cx, |root, cx| {
+                    root.play_from_cover(source, bvid, window, cx);
+                });
+            });
+        });
+        self.up_profile = Some(view);
+        cx.notify();
+    }
+
+    /// 给任意头像挂上「点击打开 UP 主浮窗」：canvas 探针记下元素的屏幕 bounds，
+    /// 点击时把 mid / 昵称 / 头像 / bounds 一起交给本实体。
+    ///
+    /// 探针必须是这一帧新建的 `Rc`：元素树每帧重建，点击处理器捕获的就是
+    /// 同一帧 prepaint 写进来的那组 bounds，所以不会读到上一帧的旧坐标。
+    pub(crate) fn up_profile_avatar(
+        id: SharedString,
+        mid: i64,
+        name: String,
+        face: String,
+        size_px: f32,
+        child: AnyElement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let sink = bounds.clone();
+        div()
+            .id(id)
+            .relative()
+            .w(px(size_px))
+            .h(px(size_px))
+            .flex_shrink_0()
+            .cursor_pointer()
+            .hover(|style| style.opacity(0.86))
+            .child(
+                canvas(
+                    move |element_bounds, _window, _cx| sink.set(Some(element_bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(child)
+            .on_click(cx.listener(move |root, _: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                if mid <= 0 {
+                    return;
+                }
+                let opener = bounds.get().unwrap_or_else(|| Bounds {
+                    origin: point(px(0.0), px(TOP_BAR_HEIGHT)),
+                    size: size(px(size_px), px(size_px)),
+                });
+                root.ensure_up_profile(mid, name.clone(), face.clone(), opener, window, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// 把「打开 UP 主浮窗」的回调注入 PlayerView。
+    pub fn install_player_up_profile_handler(&mut self, cx: &mut Context<Self>) {
+        let Some(player) = self.playing.clone() else {
+            return;
+        };
+        let app = cx.entity().downgrade();
+        let _ = player.update(cx, |view, _| {
+            view.set_up_profile_handler(move |cx, window, mid, name, face, opener| {
+                let _ = app.update(cx, |root, cx| {
+                    root.ensure_up_profile(mid, name, face, opener, window, cx);
+                });
+            });
+        });
     }
 
     /// 退出账号：清 session.json / 内存会话，回到匿名推荐并打开登录卡片。
@@ -1882,6 +2030,7 @@ impl AppRoot {
             session: None,
             login: None,
             account: None,
+            up_profile: None,
             settings: None,
             page_image_cache: None,
             active_images: Rc::new(RefCell::new(ImageResidency::default())),
@@ -2196,6 +2345,14 @@ impl Render for AppRoot {
             .capture_key_down(cx.listener(
                 |view, event: &KeyDownEvent, _window, cx| {
                     let keystroke = &event.keystroke;
+                    // Esc 只关最上面一层：UP 主浮窗优先于播放器的两次 Esc 退出。
+                    if keystroke.key.eq_ignore_ascii_case("escape") && view.up_profile.is_some() {
+                        if let Some(up) = view.up_profile.clone() {
+                            let _ = up.update(cx, |view, cx| view.begin_close(cx));
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
                     // macOS 的「平台键」是 Command；Windows 用 Alt+Q：
                     // Win+Q 会被系统搜索抢走，Ctrl+Q 又容易和输入框快捷键混淆。
                     // 两边都走同一套「第一次提示、3 秒内再按一次才退出」的状态机。
@@ -2384,6 +2541,9 @@ impl Render for AppRoot {
             .children(self.playing.clone())
             // 动态详情浮层压在页面与播放器之上；点外部缩回原卡片。
             .children(self.dynamic_detail.clone())
+            // UP 主浮窗（层 65）：从卡片署名 / 播放器面板的 UP 主头像打开，
+            // 压在播放浮窗（60）之上，播放器继续出声。
+            .children(self.up_profile.clone())
             // 登录卡片在播放器之上，保证登录时不会被视频窗口盖住。
             .children(self.login.clone())
             // 已登录账号面板压在页面之上；点顶栏头像打开。
@@ -3178,118 +3338,32 @@ fn card(
 
     // 封面只有「卡面」参与 1.04 缓推：渐变/真实封面在 art 层，
     // 数据层、时长、操作按钮、进度条都留在固定层上，不跟着放大。
-    let cover_bg = placeholder_gradient(&item.placeholder_color, s.fill_3);
-    let mut art = div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .w_full()
-        .h_full()
-        .bg(cover_bg)
-        // 渐变卡面中央的大标题（设计稿 `.thumb .art`）：
-        // 真实封面加载后盖在上面；加载中 / 失败时这里就是卡面主视觉。
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .p(px(SPACE_3))
-                .child(
-                    div()
-                        .text_size(px(16.))
-                        .line_height(px(20.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xFFFFFF))
-                        .text_center()
-                        .line_clamp(3)
-                        .child(title.clone()),
-                ),
-        );
-
+    // 封面走公共组件：同一个 `cover_art` + `cover_visual`，
+    // UP 主浮窗里的投稿/动态也调这两个，样式不会漂。
     let cover_url = item.cover_thumb_url();
-    if load_cover && !cover_url.is_empty() {
+    let show_cover = load_cover && !cover_url.is_empty();
+    if show_cover {
         active_images.borrow_mut().mark(&cover_url);
-        art = art.child(
-            // 封面图：B 站图床走 384×216 缩略图（内存/解码开销），
-            // 显式 100% 宽高 + Cover 才能铺满封面；只写 inset 会退回原图尺寸，
-            // 表现为「只看见左上角」。
-            img(ImageSource::from(cover_url))
-                .absolute()
-                .top_0()
-                .left_0()
-                .w_full()
-                .h_full()
-                .object_fit(ObjectFit::Cover),
-        );
     }
-
-    let art = animate_cover_zoom(art, hovered, leaving, idx, hover_generation);
-    let mut cover = div()
-        .relative()
-        // 封面宽 = 卡片内容宽（192）；卡片 hover 时内容层外扩，
-        // 封面跟着变宽，而不是只平移。高用同一比例的 108/168。
-        .w_full()
-        .h(relative(
-            COVER_ITEM_HEIGHT / (COVER_CELL_HEIGHT - 2.0 * SPACE_2),
-        ))
-        .rounded(px(MEDIA_RADIUS))
-        .overflow_hidden()
-        .child(art);
-
-    // 直播角标：粉色实心胶囊 + 白字 + 18 高（设计文档 13.9）。
-    if item.is_live {
-        cover = cover.child(live_badge(t));
-    }
-
-    // 底部压暗：设计稿要求数据层文字在任何封面上都可读（GPUI 没有
-    // text-shadow，用一层透明→黑的线性渐变兜底，位置固定在封面下沿 40px）。
-    cover = cover.child(
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .h(px(40.))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(rgba(0x00000000), 0.),
-                linear_color_stop(rgba(0x000000B3), 1.),
-            )),
+    let art = cover_art(
+        &title,
+        if show_cover { cover_url.as_str() } else { "" },
+        Some(&item.placeholder_color),
+        s.fill_3,
     );
-
-    // 数据层：左下 播放量 + 弹幕数，右下 时长。
-    cover = cover
-        .child(
-            div()
-                .absolute()
-                .left(px(SPACE_2))
-                .bottom(px(6.))
-                .flex()
-                .items_center()
-                .gap(px(SPACE_3))
-                .child(cover_stat(
-                    IconName::Play,
-                    yk_core::format::count(item.view_count),
-                ))
-                .child(cover_stat(
-                    IconName::MessageCircle,
-                    yk_core::format::count(item.danmaku_count),
-                )),
-        )
-        .when(item.duration_secs > 0, |el| {
-            el.child(
-                div()
-                    .absolute()
-                    .right(px(SPACE_2))
-                    .bottom(px(6.))
-                    .text_size(px(FONT_SIZE_DATA_OVERLAY))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(0xFFFFFF))
-                    .child(item.duration_text()),
-            )
-        });
+    let art = animate_cover_zoom(art, hovered, leaving, idx, hover_generation);
+    let mut cover = cover_visual(
+        t,
+        CoverVisual {
+            art: art.into_any_element(),
+            views: item.view_count,
+            danmaku: item.danmaku_count,
+            duration_secs: item.duration_secs,
+            is_live: item.is_live,
+            show_stats: true,
+        },
+        COVER_ITEM_WIDTH / COVER_ITEM_HEIGHT,
+    );
 
     // 悬停操作：进入 150ms 浮出（opacity 0→1 + 4px 下移到位）；
     // 离开也保留 150ms 收尾。只在 hovered / leaving 时挂进树里。
@@ -3356,7 +3430,7 @@ fn card(
                         .line_clamp(2)
                         .child(title.clone()),
                 )
-                .child(byline(t, item, load_cover, active_images.clone())),
+                .child(byline(t, item, load_cover, active_images.clone(), cx)),
         )
         // 子元素 0 是封面。记录实际布局（含 hover 放大后的 inset），
         // 点击时用它作为浮窗展开的起点；这里只写 Rc，不触发重绘。
@@ -3513,6 +3587,139 @@ fn animate_card_scale(
     } else {
         card_scale(el, 0.0).into_any_element()
     }
+}
+
+/// 封面「画」：渐变卡面 + 大标题 + 真实封面图。
+///
+/// 首页卡片与 UP 主浮窗的投稿/动态共用这一份——封面只有一个实现，
+/// 改一次三处同步，不会出现「同一条视频两个封面样式」。
+pub(crate) fn cover_art(
+    title: &str,
+    image_url: &str,
+    placeholder: Option<&str>,
+    fallback: Hsla,
+) -> Div {
+    let bg = match placeholder {
+        Some(color) => placeholder_gradient(color, fallback),
+        None => linear_gradient(
+            135.0,
+            linear_color_stop(fallback, 0.0),
+            linear_color_stop(fallback.opacity(0.72), 1.0),
+        ),
+    };
+    let mut art = div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .w_full()
+        .h_full()
+        .bg(bg)
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p(px(SPACE_3))
+                .child(
+                    div()
+                        .text_size(px(16.))
+                        .line_height(px(20.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xFFFFFF))
+                        .text_center()
+                        .line_clamp(3)
+                        .child(title.to_string()),
+                ),
+        );
+    if !image_url.is_empty() {
+        art = art.child(
+            img(ImageSource::from(image_url.to_string()))
+                .absolute()
+                .top_0()
+                .left_0()
+                .w_full()
+                .h_full()
+                .object_fit(ObjectFit::Cover),
+        );
+    }
+    art
+}
+
+/// 封面外壳：圆角裁切 + 直播角标 + 底部压暗 + 左下播放/弹幕 + 右下时长。
+///
+/// `ratio` 是 CSS 语义的「宽 / 高」（16/9 就是 16:9），
+/// 高度由 `aspect_ratio` 按宽度算出来——不要用 `relative()`，
+/// 那是父容器**高度**的百分比，父容器高度不定时会塌成一条线。
+pub(crate) struct CoverVisual {
+    pub art: AnyElement,
+    pub views: u64,
+    pub danmaku: u64,
+    pub duration_secs: u64,
+    pub is_live: bool,
+    /// 有统计口径才画左下那行；历史记录这类没有播放/弹幕数据的列表传 false，
+    /// 否则会渲染成「▶0 💬0」这种假数据。
+    pub show_stats: bool,
+}
+
+pub(crate) fn cover_visual(t: &YkTheme, v: CoverVisual, ratio: f32) -> Div {
+    let mut cover = div()
+        .relative()
+        .w_full()
+        .aspect_ratio(ratio)
+        .rounded(px(MEDIA_RADIUS))
+        .overflow_hidden()
+        .child(v.art);
+    if v.is_live {
+        cover = cover.child(live_badge(t));
+    }
+    cover = cover.child(
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .h(px(40.))
+            .bg(linear_gradient(
+                180.,
+                linear_color_stop(rgba(0x00000000), 0.),
+                linear_color_stop(rgba(0x000000B3), 1.),
+            )),
+    );
+    if v.show_stats {
+        cover = cover.child(
+            div()
+                .absolute()
+                .left(px(SPACE_2))
+                .bottom(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(SPACE_3))
+                .child(cover_stat(
+                    IconName::Play,
+                    yk_core::format::count(v.views),
+                ))
+                .child(cover_stat(
+                    IconName::MessageCircle,
+                    yk_core::format::count(v.danmaku),
+                )),
+        );
+    }
+    cover = cover
+        .when(v.duration_secs > 0, |el| {
+            el.child(
+                div()
+                    .absolute()
+                    .right(px(SPACE_2))
+                    .bottom(px(6.))
+                    .text_size(px(FONT_SIZE_DATA_OVERLAY))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(0xFFFFFF))
+                    .child(yk_core::format::duration(v.duration_secs)),
+            )
+        });
+    cover
 }
 
 fn animate_cover_zoom(
@@ -3701,6 +3908,7 @@ fn byline(
     item: &CoverItem,
     load_image: bool,
     active_images: Rc<RefCell<ImageResidency>>,
+    cx: &mut Context<AppRoot>,
 ) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
@@ -3727,7 +3935,12 @@ fn byline(
         .mt(px(2.))
         .text_size(px(FONT_SIZE_CAPTION))
         .text_color(s.text_tertiary)
-        .child(
+        .child(AppRoot::up_profile_avatar(
+            SharedString::from(format!("byline-up-{}", item.bvid)),
+            item.up_mid,
+            item.up_name.clone(),
+            item.up_face.clone(),
+            18.0,
             // 头像兜底：蓝→粉渐变圆；有 up_face 时真图盖在上面。
             div()
                 .relative()
@@ -3747,8 +3960,10 @@ fn byline(
                             .h(px(18.))
                             .object_fit(ObjectFit::Cover),
                     )
-                }),
-        )
+                })
+                .into_any_element(),
+            cx,
+        ))
         .child(
             div()
                 .flex_1()
@@ -3757,6 +3972,7 @@ fn byline(
                 .text_color(s.text_tertiary)
                 .child(name),
         )
+
         .when(!published.is_empty(), |el| {
             el.child(
                 div()

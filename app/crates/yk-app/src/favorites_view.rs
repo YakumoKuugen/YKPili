@@ -181,7 +181,8 @@ impl AppRoot {
                 .background_executor()
                 .spawn(async move {
                     let client = ReqwestClient::new()?;
-                    fetch_fav_folders(&client, &cookie, mid)
+                    // 收藏夹页只关心夹子本身，不需要「某个视频在不在夹里」。
+                    fetch_fav_folders(&client, &cookie, mid, 0)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {

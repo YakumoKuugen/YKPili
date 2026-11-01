@@ -1026,14 +1026,26 @@ fn video_block(
     let cover_url = video.cover_url(thumb_w, scale_factor);
     let root_for_prepaint = root_bounds;
     let cover_for_prepaint = cover_bounds;
-    let mut thumb = div()
+    // 封面走公共组件：渐变卡面 + 真实封面 + 播放 / 弹幕 / 时长。
+    // 外层固定 w/h 保留原几何（窄卡高度有 96 下限，不能硬套 16:9），
+    // 所以按实际 w/h 传 ratio；canvas 继续负责记录播放浮窗的入场矩形。
+    if load_image && !cover_url.is_empty() {
+        active_images.borrow_mut().mark(&cover_url);
+    }
+    let art = crate::cover_art(
+        &video.title,
+        if load_image { cover_url.as_str() } else { "" },
+        Some("#333333"),
+        s.fill_3,
+    )
+    .into_any_element();
+    let thumb = div()
         .relative()
         .w(px(thumb_w))
         .h(px(thumb_h))
         .flex_shrink_0()
         .rounded(px(RADIUS_LG))
         .overflow_hidden()
-        .bg(crate::placeholder_gradient("#333333", s.fill_3))
         .child(
             canvas(
                 move |bounds, _window, _cx| {
@@ -1051,48 +1063,19 @@ fn video_block(
             )
             .absolute()
             .inset_0(),
-        );
-    if load_image && !cover_url.is_empty() {
-        active_images.borrow_mut().mark(&cover_url);
-        thumb = thumb.child(
-            img(ImageSource::from(cover_url.clone()))
-                .absolute()
-                .inset_0()
-                .w_full()
-                .h_full()
-                .object_fit(ObjectFit::Cover),
-        );
-    }
-    thumb = thumb
-        .child(
-            div()
-                .absolute()
-                .right(px(5.))
-                .bottom(px(5.))
-                .px(px(4.))
-                .rounded(px(RADIUS_SM))
-                .bg(rgba(0x00000099))
-                .text_size(px(FONT_SIZE_MICRO))
-                .text_color(rgb(0xFFFFFF))
-                .child(video.duration_text.clone()),
         )
-        .child(
-            div()
-                .absolute()
-                .left(px(5.))
-                .bottom(px(5.))
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .text_size(px(FONT_SIZE_MICRO))
-                .text_color(rgb(0xFFFFFF))
-                .child(
-                    Icon::new(IconName::Play)
-                        .size(px(11.))
-                        .text_color(rgb(0xFFFFFF)),
-                )
-                .child(format::count(video.play_count)),
-        );
+        .child(crate::cover_visual(
+            t,
+            crate::CoverVisual {
+                art,
+                views: video.play_count,
+                danmaku: video.danmaku_count,
+                duration_secs: yk_core::search::parse_duration(&video.duration_text),
+                is_live: false,
+                show_stats: true,
+            },
+            thumb_w / thumb_h,
+        ));
 
     div()
         .mt(px(8.))

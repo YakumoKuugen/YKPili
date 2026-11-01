@@ -993,7 +993,6 @@ fn card(
 ) -> AnyElement {
     let s = &t.surfaces;
     let p = &t.palette;
-    let cover_h = COVER_ITEM_HEIGHT;
     let kid = entry.kid;
     let bvid = entry.bvid.clone();
     let title = entry.title.clone();
@@ -1003,8 +1002,6 @@ fn card(
     let batch = state.batch;
     let progress = entry.progress_percent();
     let state_label = entry.state_label();
-    let progress_label = entry.progress_label();
-    let duration = entry.duration_text();
     let live = entry.is_live();
     let watched = entry.watched_text();
     let author = entry.author_name.clone();
@@ -1021,78 +1018,23 @@ fn card(
     let source_bvid = bvid.clone();
     let source_title = title.clone();
 
-    let mut cover = div()
-        .relative()
-        .w_full()
-        .h(px(cover_h))
-        .rounded(px(MEDIA_RADIUS))
-        .overflow_hidden()
-        .bg(s.fill_3)
-        .child(
-            div()
-                .absolute()
-                .inset_0()
-                .p(px(SPACE_3))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_size(px(15.))
-                        .line_height(px(20.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xFFFFFF))
-                        .text_center()
-                        .line_clamp(3)
-                        .opacity(0.85)
-                        .child(title.clone()),
-                ),
-        );
-    if !cover_url.is_empty() {
-        cover = cover.child(
-            img(ImageSource::from(cover_url))
-                .absolute()
-                .inset_0()
-                .w_full()
-                .h_full()
-                .object_fit(ObjectFit::Cover),
-        );
-    }
-
-    // 底部压暗：数据层在亮封面上也要读得清。
-    cover = cover.child(
-        div()
-            .absolute()
-            .left_0()
-            .right_0()
-            .bottom_0()
-            .h(px(52.))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(rgba(0x00000000), 0.),
-                linear_color_stop(rgba(0x000000C4), 1.),
-            )),
+    // 封面走公共组件：渐变卡面 + 真实封面 + 直播角标 + 底部压暗 + 时长
+    // 全部交给 `cover_art` / `cover_visual`，历史页只额外叠自己的进度条。
+    let art = crate::cover_art(&title, &cover_url, None, s.fill_3).into_any_element();
+    let mut cover = crate::cover_visual(
+        t,
+        crate::CoverVisual {
+            art,
+            // 历史接口不返回播放 / 弹幕数，这里只能是 0。
+            views: 0,
+            danmaku: 0,
+            duration_secs: entry.duration_secs,
+            is_live: live,
+            // 历史接口没有播放/弹幕数：不画那行，免得出现「▶0 💬0」。
+            show_stats: false,
+        },
+        COVER_ITEM_WIDTH / COVER_ITEM_HEIGHT,
     );
-
-    if live {
-        cover = cover.child(
-            div()
-                .absolute()
-                .top(px(8.))
-                .left(px(8.))
-                .h(px(20.))
-                .px(px(6.))
-                .flex()
-                .items_center()
-                .gap(px(3.))
-                .rounded(px(RADIUS_SM))
-                .bg(p.bili_pink)
-                .text_size(px(FONT_SIZE_MICRO))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0xFFFFFF))
-                .child("直播"),
-        );
-    }
 
     // 进度条：只画在封面内侧，避免和圆角打架。
     if progress > 0 && !live {
@@ -1113,40 +1055,6 @@ fn card(
                 )),
         );
     }
-
-    if !progress_label.is_empty() {
-        cover = cover.child(
-            div()
-                .absolute()
-                .left(px(SPACE_2))
-                .bottom(px(7.))
-                .flex()
-                .items_center()
-                .gap(px(SPACE_1))
-                .child(
-                    Icon::new(IconName::Clock)
-                        .size(px(11.))
-                        .text_color(rgba(0xFFFFFFCC)),
-                )
-                .child(
-                    div()
-                        .text_size(px(FONT_SIZE_DATA_OVERLAY))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(rgb(0xFFFFFF))
-                        .child(progress_label),
-                ),
-        );
-    }
-    cover = cover.child(
-        div()
-            .absolute()
-            .right(px(SPACE_2))
-            .bottom(px(7.))
-            .text_size(px(FONT_SIZE_DATA_OVERLAY))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0xFFFFFF))
-            .child(duration),
-    );
 
     // 批量模式：左上角圆形复选框。盖在封面上，点击只切换选中。
     if batch {

@@ -1321,7 +1321,15 @@ fn entry_row(
                     hsla(0., 0., 0., 0.)
                 }),
         )
-        .child(avatar(t, &face, &initial, 40.0))
+        .child(AppRoot::up_profile_avatar(
+            SharedString::from(format!("msg-up-{}", id as u64)),
+            entry.user.mid,
+            entry.user.nickname.clone(),
+            entry.user.avatar.clone(),
+            40.0,
+            avatar(t, &face, &initial, 40.0).into_any_element(),
+            cx,
+        ))
         .child(
             div()
                 .flex_1()
@@ -1601,7 +1609,15 @@ fn like_entry_row(
                     hsla(0., 0., 0., 0.)
                 }),
         )
-        .child(avatar(t, &face, &initial, 40.0))
+        .child(AppRoot::up_profile_avatar(
+            SharedString::from(format!("msg-like-up-{}", id as u64)),
+            entry.user.mid,
+            entry.user.nickname.clone(),
+            entry.user.avatar.clone(),
+            40.0,
+            avatar(t, &face, &initial, 40.0).into_any_element(),
+            cx,
+        ))
         .child(
             div()
                 .flex_1()
@@ -1937,7 +1953,15 @@ fn conversation_row(
             this.messages_open_conversation(id, window, cx);
             window.refresh();
         }))
-        .child(avatar(t, &face, &initial, 40.0))
+        .child(AppRoot::up_profile_avatar(
+            SharedString::from(format!("msg-dm-up-{}", id as u64)),
+            conversation.talker_id,
+            conversation.nickname.clone(),
+            conversation.avatar.clone(),
+            40.0,
+            avatar(t, &face, &initial, 40.0).into_any_element(),
+            cx,
+        ))
         .child(
             div()
                 .flex_1()
@@ -2494,7 +2518,6 @@ fn initial(nickname: &str) -> String {
 
 /// 消息页的轻提示（复制成功 / 已读未同步 / 动态未接入）。
 pub(crate) fn notice(t: &YkTheme, text: &str) -> AnyElement {
-    let s = &t.surfaces;
     div()
         .absolute()
         .left_0()
@@ -2502,21 +2525,7 @@ pub(crate) fn notice(t: &YkTheme, text: &str) -> AnyElement {
         .bottom(px(DOCK_RESERVED + SPACE_4))
         .flex()
         .justify_center()
-        .child(
-            div()
-                .h(px(34.))
-                .px(px(SPACE_4))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .bg(s.surface_elevated_strong)
-                .border_1()
-                .border_color(s.border_popover)
-                .shadow(t.shadows.shadow_2.clone())
-                .text_size(px(FONT_SIZE_CAPTION))
-                .text_color(s.text_secondary)
-                .child(text.to_string()),
-        )
+        .child(status::toast_pill(t, text))
         .into_any_element()
 }
 

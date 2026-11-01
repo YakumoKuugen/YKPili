@@ -11,13 +11,16 @@ use gpui::component::Icon;
 use gpui::prelude::*;
 use gpui::TestSupportExt as _;
 use gpui::*;
+use std::rc::Rc;
 use std::time::Duration;
-use yk_core::api::client::{fetch_dynamic_comments, ReqwestClient};
 use yk_core::dynamic::{
     asset_url, fitted_width, DynamicComment, DynamicImage, DynamicItem, DynamicKind,
 };
 use yk_core::format;
+use yk_ui::status;
 use yk_ui::theme::*;
+
+use crate::comment_view::text_copy_menu;
 
 use crate::dynamic_feed::card_ghost;
 use crate::placeholder_gradient;
@@ -38,7 +41,7 @@ pub struct CardOrigin {
 enum CommentState {
     None,
     Loading,
-    Ready(Vec<DynamicComment>),
+    Ready,
     Error(String),
 }
 
@@ -49,7 +52,8 @@ pub struct DynamicDetailView {
     origin: Option<CardOrigin>,
     cookie: String,
     comments: CommentState,
-    comments_generation: u64,
+    /// 评论区：与播放器信息面板共用同一份实现（列表 / 翻页 / 输入条 / 回到顶部）。
+    comments_section: crate::comment_section::Section,
     image_index: usize,
     left_scroll: ScrollHandle,
     right_scroll: ScrollHandle,
@@ -85,7 +89,7 @@ impl DynamicDetailView {
             origin,
             cookie,
             comments: CommentState::None,
-            comments_generation: 0,
+            comments_section: crate::comment_section::Section::default(),
             image_index: 0,
             left_scroll: ScrollHandle::new(),
             right_scroll: ScrollHandle::new(),
@@ -119,48 +123,37 @@ impl DynamicDetailView {
     /// 测试入口：直接灌入评论，跳过网络请求。
     #[doc(hidden)]
     pub fn set_test_comments(&mut self, comments: Vec<DynamicComment>) {
-        self.comments = CommentState::Ready(comments);
+        self.comments_section.list.apply_first(
+            yk_core::api::client::CommentPage {
+                items: comments,
+                next: 0,
+                is_end: true,
+                total: 0,
+            },
+            true,
+        );
+        self.comments = CommentState::Ready;
     }
 
+    /// 测试入口：挂一个评论目标（不发请求），用来验证输入条等交互。
+    #[doc(hidden)]
+    pub fn set_test_comment_target(&mut self, target: yk_core::dynamic::CommentTarget) {
+        self.comments_section
+            .set_target(Some(target.clone()), String::new());
+        self.item.comment_target = Some(target);
+        self.comments = CommentState::Ready;
+    }
+
+    /// 拉评论第一页。翻页 / 去重 / 输入条全在共享的 `comment_section` 里。
     fn spawn_comments(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = self.item.comment_target.clone() else {
-            self.comments = CommentState::Ready(Vec::new());
-            return;
-        };
-        self.comments_generation = self.comments_generation.wrapping_add(1);
-        let generation = self.comments_generation;
-        let cookie = self.cookie.clone();
+        self.comments_section
+            .set_target(self.item.comment_target.clone(), self.cookie.clone());
         self.comments = CommentState::Loading;
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let client = ReqwestClient::new().map_err(|e| e.to_string())?;
-                    fetch_dynamic_comments(&client, &cookie, &target)
-                })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                if view.comments_generation != generation {
-                    return;
-                }
-                view.comments = match result {
-                    Ok(list) => CommentState::Ready(list),
-                    Err(e) => {
-                        eprintln!("[dynamic] 评论加载失败：{e}");
-                        CommentState::Error(e)
-                    }
-                };
-                cx.notify();
-            });
-        })
-        .detach();
+        self.comments_section.load_first(cx);
+        self.comments = CommentState::Ready;
     }
 
     fn retry_comments(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.comments, CommentState::Loading) {
-            return;
-        }
         self.spawn_comments(cx);
     }
 
@@ -279,6 +272,7 @@ impl DynamicDetailView {
         t: &YkTheme,
         target: Bounds<Pixels>,
         scale_factor: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let s = &t.surfaces;
@@ -363,6 +357,13 @@ impl DynamicDetailView {
                     .child(item.kind.label()),
             );
 
+        // 评论列宽度 = 详情目标宽的 44% − 左右 padding − 头像 − 间距；
+        // 给 `SelectableText` 一个确定宽度，正文才能正常折行。
+        let comments_width = target.size.width.as_f32() * 0.44 - 1.0;
+        let comment_text_width =
+            (comments_width - SPACE_6 * 2.0 - 28.0 - SPACE_2).max(120.0);
+        let body_text_width = (comments_width - SPACE_6 * 2.0).max(160.0);
+        let left_text_width = (target.size.width.as_f32() * 0.56 - SPACE_6 * 2.0).max(160.0);
         let body = if has_media {
             // 封面也按原图复制：显示用的 `cover_url` 带 `@xxxw.webp` 缩放后缀。
             let cover_copy_url = if cover.is_empty() {
@@ -379,7 +380,14 @@ impl DynamicDetailView {
                 scale_factor,
                 cx,
             );
-            let right = self.article_column(t, cx);
+            let right = self.article_column(
+                t,
+                body_text_width,
+                comment_text_width,
+                comments_width,
+                window,
+                cx,
+            );
             div()
                 .flex()
                 .flex_row()
@@ -397,8 +405,29 @@ impl DynamicDetailView {
                 .child(div().flex_1().h_full().min_w(px(0.)).child(right))
                 .into_any_element()
         } else {
-            let left = self.text_column(t, cx);
-            let right = self.comments_column(t, true, cx);
+            let left = self.text_column(t, left_text_width, cx);
+            // 右栏 = [评论滚动区][输入条]：输入条常驻底部，不跟列表一起滚。
+            let can_comment = self.item.comment_target.is_some();
+            let composer_width = comments_width;
+            self.comments_section.sync_scroll(&self.right_scroll);
+            let right = div()
+                .relative()
+                .flex()
+                .flex_col()
+                .h_full()
+                .min_h(px(0.))
+                .child(self.comments_column(t, true, comment_text_width, window, cx))
+                // 输入条 / 回到顶部与播放器评论区是同一份组件。
+                .when(can_comment, |el| {
+                    el.child(
+                        self.comments_section
+                            .composer(t, window, cx, composer_width),
+                    )
+                })
+                .child(
+                    self.comments_section
+                        .back_to_top(t, &self.right_scroll, cx),
+                );
             div()
                 .flex()
                 .flex_row()
@@ -411,17 +440,19 @@ impl DynamicDetailView {
                 .into_any_element()
         };
 
-        let mut root = div()
+        div()
             .flex()
             .flex_col()
             .h_full()
             .w_full()
+            // 拖选文字时选区只在鼠标事件里更新；没有这一层 notify，
+            // 高亮要等到松手才出现（播放器面板本来就有 on_mouse_move）。
+            .on_mouse_move(cx.listener(|_: &mut Self, _: &MouseMoveEvent, _, cx| {
+                cx.notify();
+            }))
             .child(header)
-            .child(body);
-        if let Some(text) = self.notice.clone() {
-            root = root.child(notice_chip(t, &text));
-        }
-        root.into_any_element()
+            .child(body)
+            .into_any_element()
     }
 
     fn media_column(
@@ -514,14 +545,26 @@ impl DynamicDetailView {
                 );
             }
         } else if !cover_url.is_empty() {
-            column = column.child(
-                img(ImageSource::from(cover_url.to_string()))
-                    .absolute()
-                    .inset_0()
-                    .w_full()
-                    .h_full()
-                    .object_fit(ObjectFit::Contain),
-            );
+            if self.item.kind == DynamicKind::Video {
+                // 视频封面复用公共卡面（渐变兜底 + 真实封面），
+                // 不再各画各的；这里是详情页整块媒体区、不限 16:9，
+                // 所以只借 `cover_art` 的画，播放按钮仍由下面单独叠。
+                column = column.child(crate::cover_art(
+                    &self.item.title,
+                    cover_url,
+                    Some(&self.item.placeholder_color),
+                    t.surfaces.fill_3,
+                ));
+            } else {
+                column = column.child(
+                    img(ImageSource::from(cover_url.to_string()))
+                        .absolute()
+                        .inset_0()
+                        .w_full()
+                        .h_full()
+                        .object_fit(ObjectFit::Contain),
+                );
+            }
         }
 
         if self.item.kind == DynamicKind::Video {
@@ -644,47 +687,108 @@ impl DynamicDetailView {
     }
 
     /// 媒体右侧：正文 + 操作 + 评论。
-    fn article_column(&mut self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn article_column(
+        &mut self,
+        t: &YkTheme,
+        body_text_width: f32,
+        comment_text_width: f32,
+        column_width: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let s = &t.surfaces;
         let weak = cx.entity().downgrade();
-        let body = self.article_body(t, &weak);
-        div()
+        let body = self.article_body(t, &weak, body_text_width);
+        let scroll = div()
             .id("dynamic-detail-article")
             .flex()
             .flex_col()
-            .h_full()
+            .flex_1()
             .w_full()
             .min_h(px(0.))
             .min_w(px(0.))
             .track_scroll(&self.right_scroll)
             .overflow_y_scroll()
-            .child(div().w_full().px(px(SPACE_6)).pt(px(SPACE_4)).child(body))
+            // 滚到底部附近自动补下一页评论。
+            .on_scroll_wheel(cx.listener(
+                |view, _: &ScrollWheelEvent, _window, cx| {
+                    view.comments_section
+                        .maybe_load_more(&view.right_scroll, cx);
+                    cx.notify();
+                },
+            ))
+            .child(
+                div()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px(px(SPACE_6))
+                    .pt(px(SPACE_4))
+                    .child(body),
+            )
             .child(self.action_row(t))
             .child(div().mx(px(SPACE_6)).h(px(1.)).bg(s.border_subtle))
-            .child(self.comments_column(t, false, cx))
+            .child(self.comments_column(t, false, comment_text_width, window, cx));
+        let can_comment = self.item.comment_target.is_some();
+        let composer_width = column_width;
+        self.comments_section.sync_scroll(&self.right_scroll);
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .h_full()
+            .w_full()
+            .min_h(px(0.))
+            .child(scroll)
+            .when(can_comment, |el| {
+                el.child(
+                    self.comments_section
+                        .composer(t, window, cx, composer_width),
+                )
+            })
+            .child(
+                self.comments_section
+                    .back_to_top(t, &self.right_scroll, cx),
+            )
             .into_any_element()
     }
 
     /// 标题 + 正文 + 转发引用。
     ///
     /// 每段文字都挂同一个右键菜单（只有「复制文本」一项），复制内容跟随
-    /// 被点击的那一段；评论正文在 `comment_row` 里单独挂。
-    fn article_body(&self, t: &YkTheme, weak: &WeakEntity<Self>) -> AnyElement {
+    /// 被点击的那一段；评论正文走共用的 `comment_view::comment_row`。
+    fn article_body(&self, t: &YkTheme, weak: &WeakEntity<Self>, text_width: f32) -> AnyElement {
         let s = &t.surfaces;
         let item = &self.item;
-        let mut col = div().flex().flex_col().gap(px(SPACE_3)).w_full();
+        let copy_notice = {
+            let weak = weak.clone();
+            Rc::new(move |cx: &mut App| {
+                let _ = weak.update(cx, |view, cx| view.show_notice("已复制", cx));
+            })
+        };
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_3))
+            .w_full()
+            .flex_shrink_0();
         if !item.title.trim().is_empty() {
             let title = item.title.clone();
             col = col.child(
                 div()
                     .id("dynamic-detail-title")
                     .debug_selector(|| "dynamic-detail-title".into())
-                    .text_size(px(FONT_SIZE_HEADING))
-                    .line_height(px(LINE_HEIGHT_HEADING))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(s.text_primary)
-                    .child(title.clone())
-                    .context_menu(copy_text_menu(title, weak.clone())),
+                    .w(px(text_width))
+                    .child(
+                        gpui::base::SelectableText::new("dynamic-detail-title-text", title.clone())
+                            .text_style(gpui::TextStyleRefinement {
+                                font_size: Some(px(FONT_SIZE_HEADING).into()),
+                                line_height: Some(px(LINE_HEIGHT_HEADING).into()),
+                                font_weight: Some(FontWeight::SEMIBOLD),
+                                color: Some(s.text_primary),
+                                ..Default::default()
+                            }),
+                    )
+                    .context_menu(text_copy_menu(title, copy_notice.clone())),
             );
         }
         if !item.text.trim().is_empty() {
@@ -693,11 +797,20 @@ impl DynamicDetailView {
                 div().id("dynamic-detail-body").test_support().child(
                     div()
                         .id("dynamic-detail-body-text")
-                        .text_size(px(FONT_SIZE_BODY))
-                        .line_height(px(LINE_HEIGHT_BODY))
-                        .text_color(s.text_secondary)
-                        .child(text.clone())
-                        .context_menu(copy_text_menu(text, weak.clone())),
+                        .w(px(text_width))
+                        .child(
+                            gpui::base::SelectableText::new(
+                                "dynamic-detail-body-text-select",
+                                text.clone(),
+                            )
+                            .text_style(gpui::TextStyleRefinement {
+                                font_size: Some(px(FONT_SIZE_BODY).into()),
+                                line_height: Some(px(LINE_HEIGHT_BODY).into()),
+                                color: Some(s.text_secondary),
+                                ..Default::default()
+                            }),
+                        )
+                        .context_menu(text_copy_menu(text, copy_notice.clone())),
                 ),
             );
         }
@@ -721,6 +834,7 @@ impl DynamicDetailView {
                     .border_color(s.border_subtle)
                     .flex()
                     .flex_col()
+                    .flex_shrink_0()
                     .gap(px(SPACE_1))
                     .child(
                         div()
@@ -732,11 +846,22 @@ impl DynamicDetailView {
                     .child(
                         div()
                             .id("dynamic-origin-text")
-                            .text_size(px(FONT_SIZE_CONTROL))
-                            .line_height(px(LINE_HEIGHT_CONTROL))
-                            .text_color(s.text_secondary)
-                            .child(quote_text.clone())
-                            .context_menu(copy_text_menu(quote_text, weak.clone())),
+                            .w(px((text_width - SPACE_3 * 2.0).max(120.0)))
+                            .child(
+                                gpui::base::SelectableText::new(
+                                    "dynamic-origin-text-select",
+                                    quote_text.clone(),
+                                )
+                                .text_style(
+                                    gpui::TextStyleRefinement {
+                                        font_size: Some(px(FONT_SIZE_CONTROL).into()),
+                                        line_height: Some(px(LINE_HEIGHT_CONTROL).into()),
+                                        color: Some(s.text_secondary),
+                                        ..Default::default()
+                                    },
+                                ),
+                            )
+                            .context_menu(text_copy_menu(quote_text, copy_notice.clone())),
                     ),
             );
         }
@@ -763,6 +888,7 @@ impl DynamicDetailView {
         let stats = &self.item.stats;
         div()
             .flex()
+            .flex_shrink_0()
             .items_center()
             .gap(px(SPACE_6))
             .h(px(52.))
@@ -786,7 +912,7 @@ impl DynamicDetailView {
     }
 
     /// 纯文字模式的左栏：标题 + 正文，可滚动。
-    fn text_column(&mut self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
+    fn text_column(&mut self, t: &YkTheme, text_width: f32, cx: &mut Context<Self>) -> AnyElement {
         let s = &t.surfaces;
         let weak = cx.entity().downgrade();
         div()
@@ -802,16 +928,17 @@ impl DynamicDetailView {
             .child(
                 div()
                     .w_full()
+                    .flex_shrink_0()
                     .px(px(SPACE_6))
                     .py(px(SPACE_5))
-                    .child(self.article_body(t, &weak)),
+                    .child(self.article_body(t, &weak, text_width)),
             )
             .child(self.action_row(t))
             .child(div().mx(px(SPACE_6)).h(px(1.)).bg(s.border_subtle))
             .into_any_element()
     }
 
-    /// 评论栏。
+    /// 评论栏：列表与播放器信息面板共用 `comment_section`。
     ///
     /// `standalone = true` 时它是「纯文字模式」的右栏，自带滚动；
     /// 否则嵌在正文右侧的滚动容器里，只负责评论列表本身。
@@ -819,12 +946,19 @@ impl DynamicDetailView {
         &mut self,
         t: &YkTheme,
         standalone: bool,
+        comment_text_width: f32,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let s = &t.surfaces;
-        let count = self.item.stats.comment;
+        // 服务端返回的总数比卡片上的计数更新（发完评论后会 +1）。
+        let count = if self.comments_section.list.total > 0 {
+            self.comments_section.list.total
+        } else {
+            self.item.stats.comment
+        };
         let weak = cx.entity().downgrade();
-        let mut list = div().flex().flex_col().w_full();
+        let mut list = div().flex().flex_col().w_full().flex_shrink_0();
         match &self.comments {
             CommentState::None => {}
             CommentState::Loading => {
@@ -898,8 +1032,8 @@ impl DynamicDetailView {
                         ),
                 );
             }
-            CommentState::Ready(comments) => {
-                if comments.is_empty() {
+            CommentState::Ready => {
+                if self.comments_section.list.items.is_empty() {
                     list = list.child(
                         div()
                             .py(px(SPACE_6))
@@ -908,9 +1042,39 @@ impl DynamicDetailView {
                             .child("还没有评论，来抢沙发吧"),
                     );
                 } else {
-                    for comment in comments {
-                        list = list.child(comment_row(t, comment, &weak));
-                    }
+                    let copy_notice = {
+                        let weak = weak.clone();
+                        Rc::new(move |cx: &mut App| {
+                            let _ = weak.update(cx, |view, cx| {
+                                view.show_notice("已复制", cx);
+                            });
+                        })
+                    };
+                    let on_image = {
+                        let weak = weak.clone();
+                        Rc::new(
+                            move |urls: Vec<String>,
+                                  index: usize,
+                                  window: &mut Window,
+                                  cx: &mut App| {
+                                let _ = weak.update(cx, |view, cx| {
+                                    if let Some(handler) = view.image_open_handler.as_ref() {
+                                        handler(cx, window, urls, index);
+                                    }
+                                });
+                            },
+                        ) as Rc<dyn Fn(Vec<String>, usize, &mut Window, &mut App)>
+                    };
+                    list = list.child(self.comments_section.body(
+                        t,
+                        window,
+                        &self.right_scroll,
+                        comment_text_width,
+                        "dynamic-comment",
+                        copy_notice,
+                        Some(on_image),
+                        cx,
+                    ));
                 }
             }
         }
@@ -945,12 +1109,20 @@ impl DynamicDetailView {
                 .id("dynamic-detail-comments")
                 .flex()
                 .flex_col()
-                .h_full()
+                // 外层是「[滚动区][输入条]」的 flex 列，这里吃剩余高度。
+                .flex_1()
                 .w_full()
                 .min_h(px(0.))
                 .min_w(px(0.))
                 .track_scroll(&self.right_scroll)
                 .overflow_y_scroll()
+                .on_scroll_wheel(cx.listener(
+                    |view, _: &ScrollWheelEvent, _window, cx| {
+                        view.comments_section
+                            .maybe_load_more(&view.right_scroll, cx);
+                        cx.notify();
+                    },
+                ))
                 .child(div().w_full().px(px(SPACE_6)).child(header))
                 .child(div().w_full().px(px(SPACE_6)).child(list))
                 .into_any_element()
@@ -958,11 +1130,28 @@ impl DynamicDetailView {
             div()
                 .flex()
                 .flex_col()
+                .flex_shrink_0()
                 .px(px(SPACE_6))
                 .child(header)
                 .child(list)
                 .into_any_element()
         }
+    }
+
+}
+
+impl crate::comment_section::CommentHost for DynamicDetailView {
+    fn comments(&mut self) -> &mut crate::comment_section::Section {
+        &mut self.comments_section
+    }
+
+    fn comment_notice(&mut self, text: String, error: bool, cx: &mut Context<Self>) {
+        self.show_notice(text, cx);
+        let _ = error;
+    }
+
+    fn comment_focus_root(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus_handle, cx);
     }
 }
 
@@ -987,7 +1176,7 @@ impl Render for DynamicDetailView {
             .map(|o| o.bounds)
             .unwrap_or_else(|| fallback_origin(target));
         let scale_factor = window.scale_factor();
-        let content = self.content(&t, target, scale_factor, cx);
+        let content = self.content(&t, target, scale_factor, window, cx);
         let weak = cx.entity().downgrade();
         let shell = DetailShell {
             theme: t,
@@ -997,6 +1186,7 @@ impl Render for DynamicDetailView {
             progress: 1.0,
             closing: self.closing,
             content: Some(content),
+            notice: self.notice.clone(),
             weak: weak.clone(),
             focus_handle: self.focus_handle.clone(),
         };
@@ -1031,6 +1221,8 @@ struct DetailShell {
     progress: f32,
     closing: bool,
     content: Option<AnyElement>,
+    /// 复制成功 / 失败提示。挂在整窗层而不是详情页内层，才能落到窗口底部。
+    notice: Option<String>,
     weak: WeakEntity<DynamicDetailView>,
     focus_handle: FocusHandle,
 }
@@ -1045,6 +1237,7 @@ impl RenderOnce for DetailShell {
             progress,
             closing,
             content,
+            notice,
             weak,
             focus_handle,
         } = self;
@@ -1099,8 +1292,11 @@ impl RenderOnce for DetailShell {
             .occlude()
             .key_context("DynamicDetail")
             .track_focus(&focus_handle)
-            .on_key_down(detail_escape_handler(weak.clone()))
-            .on_click(|_: &ClickEvent, _window, cx| cx.stop_propagation());
+            .on_key_down(detail_escape_handler(weak.clone()));
+        // 不再在外壳上 `on_click(stop_propagation)`：那会把 MouseUp 从
+        // 冒泡链上截断，`TextSelection` 的窗口级收尾监听收不到
+        // （`is_selecting` 一直是 true），于是「点一下 A、再点一下 B」
+        // 会把中间的文字选中。壳子已经 `.occlude()`，点击不会漏到下层。
 
         // 详情页按最终尺寸排版，由正在缩放的外壳裁剪；临时卡片填满外壳，
         // 因此关闭时它从「详情页同尺寸」开始，随外壳一起缩回原卡片位置。
@@ -1164,7 +1360,14 @@ impl RenderOnce for DetailShell {
                 }),
         );
 
-        div().absolute().inset_0().child(scrim).child(shell)
+        div()
+            .absolute()
+            .inset_0()
+            .child(scrim)
+            .child(shell)
+            // Toast 在整窗层：详情卡片本身会被 shell 裁切，放里面只能贴在卡片
+            // 底部；用户预期是贴近窗口底部、压在 Dock 上方的位置。
+            .children(notice.map(|text| notice_chip(&theme, &text)))
     }
 }
 
@@ -1408,115 +1611,8 @@ fn detail_action(t: &YkTheme, icon: IconName, label: &'static str, count: u64) -
         )
 }
 
-fn comment_row(
-    t: &YkTheme,
-    comment: &DynamicComment,
-    view: &WeakEntity<DynamicDetailView>,
-) -> impl IntoElement {
-    let s = &t.surfaces;
-    let p = &t.palette;
-    let text = comment.text.clone();
-    div()
-        .flex()
-        .items_start()
-        .gap(px(SPACE_2))
-        .py(px(SPACE_3))
-        .border_b_1()
-        .border_color(s.border_subtle)
-        .w_full()
-        .child(
-            div()
-                .w(px(28.))
-                .h(px(28.))
-                .flex_shrink_0()
-                .rounded_full()
-                .overflow_hidden()
-                .bg(linear_gradient(
-                    135.,
-                    linear_color_stop(p.bili_blue, 0.),
-                    linear_color_stop(p.bili_pink, 1.),
-                ))
-                .when(!comment.face.is_empty(), |el| {
-                    el.child(
-                        img(ImageSource::from(comment.face.clone()))
-                            .w(px(28.))
-                            .h(px(28.))
-                            .object_fit(ObjectFit::Cover),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(3.))
-                .child(
-                    div()
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(s.text_tertiary)
-                        .child(comment.author.clone()),
-                )
-                .child(
-                    div()
-                        .id(ElementId::Name(
-                            format!("dynamic-comment-text-{}", comment.rpid).into(),
-                        ))
-                        .test_support()
-                        .text_size(px(FONT_SIZE_CONTROL))
-                        .line_height(px(LINE_HEIGHT_CONTROL))
-                        .text_color(s.text_secondary)
-                        .child(text.clone())
-                        .context_menu(copy_text_menu(text, view.clone())),
-                )
-                .child(
-                    div()
-                        .text_size(px(FONT_SIZE_MICRO))
-                        .text_color(s.text_quaternary)
-                        .child(comment.time.clone()),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(2.))
-                .text_size(px(FONT_SIZE_MICRO))
-                .text_color(s.text_quaternary)
-                .child(Icon::new(IconName::ThumbsUp).size(px(12.)))
-                .child(format::count(comment.like)),
-        )
-}
-
-/// 正文 / 评论共用的右键菜单：只放「复制文本」一项。
-///
-/// 菜单项用闭包直接写剪贴板，不依赖全局 action；同时把结果回传给详情页，
-/// 让底部轻提示显示「已复制」。
-fn copy_text_menu(
-    text: String,
-    view: WeakEntity<DynamicDetailView>,
-) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-    move |menu, _, _| {
-        let view = view.clone();
-        let text = text.clone();
-        menu.item(
-            PopupMenuItem::new("复制文本")
-                .icon(Icon::new(IconName::Copy))
-                .on_click(move |_, _, cx| {
-                    if text.trim().is_empty() {
-                        return;
-                    }
-                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                    let _ = view.update(cx, |view, cx| view.show_notice("已复制", cx));
-                }),
-        )
-    }
-}
-
 /// 详情页底部的轻提示（复制成功 / 失败）。
 fn notice_chip(t: &YkTheme, text: &str) -> AnyElement {
-    let s = &t.surfaces;
     div()
         .absolute()
         .left_0()
@@ -1524,20 +1620,15 @@ fn notice_chip(t: &YkTheme, text: &str) -> AnyElement {
         .bottom(px(SPACE_4))
         .flex()
         .justify_center()
-        .child(
-            div()
-                .h(px(32.))
-                .px(px(SPACE_4))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .bg(s.surface_elevated_strong)
-                .border_1()
-                .border_color(s.border_popover)
-                .shadow(t.shadows.shadow_2.clone())
-                .text_size(px(FONT_SIZE_CAPTION))
-                .text_color(s.text_secondary)
-                .child(text.to_string()),
-        )
+        .child(status::toast_pill(t, text))
         .into_any_element()
+}
+
+/// 当前登录会话；未登录 / 旧文件损坏返回 None。
+///
+/// 详情页只在发评论时需要会话（cookie / CSRF / 昵称头像），
+/// 构造时拿到的 `cookie` 只用于读评论。
+fn current_session() -> Option<yk_core::models::UserSession> {
+    let path = yk_core::session::session_path();
+    yk_core::session::load(&path).filter(|session| session.is_valid())
 }
