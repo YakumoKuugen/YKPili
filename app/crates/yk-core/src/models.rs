@@ -48,6 +48,8 @@ pub struct CoverItem {
     pub up_name: String,
     /// UP 主头像 URL。
     pub up_face: String,
+    /// UP 主 mid（点头像打开空间浮窗用；拿不到时为 0）。
+    pub up_mid: i64,
     /// 播放量（原始值，显示时走 `format::count`）。
     pub view_count: u64,
     /// 弹幕数（原始值）。
@@ -73,6 +75,7 @@ impl Default for CoverItem {
             cid: 0,
             up_name: String::new(),
             up_face: String::new(),
+            up_mid: 0,
             view_count: 0,
             danmaku_count: 0,
             duration_secs: 0,
@@ -98,6 +101,7 @@ impl CoverItem {
             cid: 0,
             up_name: v.owner.as_ref().map(|o| o.name.clone()).unwrap_or_default(),
             up_face: v.owner.as_ref().map(|o| o.face.clone()).unwrap_or_default(),
+            up_mid: v.owner.as_ref().map(|o| o.mid).unwrap_or(0),
             view_count: v.stat.as_ref().map(|s| s.view).unwrap_or(0),
             danmaku_count: v.stat.as_ref().map(|s| s.danmaku).unwrap_or(0),
             duration_secs: v.duration,

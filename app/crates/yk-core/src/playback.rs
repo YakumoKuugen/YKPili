@@ -35,10 +35,14 @@ pub struct PlaybackSource {
     pub bvid: String,
     /// 当前分 P 的 cid；观看历史心跳上报用。
     pub cid: i64,
+    /// UP 主 uid；查关注状态 / 粉丝数 / 关注 / 取关都用它（0 = 没拿到）。
+    pub owner_mid: i64,
     /// UP 主昵称。
     pub owner_name: String,
     /// UP 主头像 URL（原始地址，视图侧再按尺寸取）。
     pub owner_face: String,
+    /// UP 主签名（来自 `/x/web-interface/card`，可能为空）。
+    pub owner_sign: String,
     /// 播放量。
     pub view_count: u64,
     /// 弹幕数。
@@ -96,8 +100,10 @@ fn meta_from_info(info: &VideoInfoData, duration_secs: u64, quality: String) -> 
             info.bvid.clone()
         },
         cid: info.cid.max(0),
+        owner_mid: owner.map(|o| o.mid).unwrap_or(0),
         owner_name: owner.map(|o| o.name.trim().to_string()).unwrap_or_default(),
         owner_face: owner.map(|o| o.face.trim().to_string()).unwrap_or_default(),
+        owner_sign: String::new(),
         view_count: count(|s| s.view),
         danmaku_count: count(|s| s.danmaku),
         reply_count: count(|s| s.reply),
@@ -311,6 +317,7 @@ mod tests {
     fn carries_panel_metadata_and_quality() {
         let mut info = info();
         info.owner = Some(VideoOwner {
+            mid: 2333,
             name: "UP".into(),
             face: "https://i0.hdslb.com/f.jpg".into(),
             ..Default::default()
@@ -336,6 +343,7 @@ mod tests {
         };
         let src = select_playback(&info, &play).unwrap();
         assert_eq!(src.quality, "1080P 高清");
+        assert_eq!(src.owner_mid, 2333);
         assert_eq!(src.owner_name, "UP");
         assert_eq!(src.owner_face, "https://i0.hdslb.com/f.jpg");
         assert_eq!(src.view_count, 1234);

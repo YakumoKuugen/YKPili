@@ -11,6 +11,7 @@ pub mod api;
 pub mod auth;
 pub mod cache;
 pub mod danmaku;
+pub mod device;
 pub mod dynamic;
 pub mod favorites;
 pub mod feed;
@@ -30,6 +31,7 @@ pub mod resume;
 pub mod search;
 pub mod session;
 pub mod settings;
+pub mod space;
 
 pub use cache::CacheManager;
 pub use danmaku::{Danmaku, DanmakuMode, DanmakuSet, LaneAllocator};

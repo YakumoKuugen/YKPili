@@ -175,6 +175,7 @@ impl SearchVideo {
             cid: 0,
             up_name: self.author.clone(),
             up_face: self.up_face.clone(),
+            up_mid: self.mid,
             view_count: self.view_count,
             danmaku_count: self.danmaku_count,
             duration_secs: self.duration_secs,

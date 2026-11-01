@@ -291,6 +291,27 @@ pub struct LevelInfo {
     pub current_level: u8,
 }
 
+/// `/x/web-interface/card`：名片里的 UP 主签名。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UserCardResponse {
+    #[serde(default)]
+    pub code: i64,
+    pub data: Option<UserCardData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct UserCardData {
+    pub card: Option<UserCardInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct UserCardInfo {
+    #[serde(default)]
+    pub sign: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct WbiImg {
     #[serde(default)]
@@ -600,7 +621,21 @@ pub struct ReplyMainResponse {
 pub struct ReplyMainData {
     #[serde(deserialize_with = "de_vec_or_null")]
     pub replies: Vec<ReplyRaw>,
+    /// 置顶评论（UP 主置顶 / 管理员置顶），通常与 `replies` 分开返回。
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub top_replies: Vec<ReplyRaw>,
+    /// 新版接口的置顶信息：管理员置顶 / UP 主置顶 / 投票置顶各一条。
+    pub top: Option<ReplyTopRaw>,
     pub cursor: Option<ReplyCursorRaw>,
+}
+
+/// 新版评论区 `data.top`：三种置顶各占一个字段，可能为 null。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ReplyTopRaw {
+    pub admin: Option<ReplyRaw>,
+    pub upper: Option<ReplyRaw>,
+    pub vote: Option<ReplyRaw>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -621,7 +656,21 @@ pub struct ReplyCursorRaw {
 pub struct ReplyData {
     #[serde(deserialize_with = "de_vec_or_null")]
     pub replies: Vec<ReplyRaw>,
+    /// 旧接口的置顶评论可能放在这里（新接口放在 `top_replies`）。
+    #[serde(deserialize_with = "de_vec_or_null")]
+    pub top_replies: Vec<ReplyRaw>,
+    /// 旧接口（`/x/v2/reply`）把 UP 主置顶放在 `upper.top`。
+    pub upper: Option<ReplyUpperRaw>,
+    /// 少数旧响应也会给 `data.top`，结构与新版一致。
+    pub top: Option<ReplyTopRaw>,
     pub page: Option<ReplyPageRaw>,
+}
+
+/// 旧版评论区里的 UP 主信息；目前只取置顶评论。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct ReplyUpperRaw {
+    pub top: Option<ReplyRaw>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1064,4 +1113,26 @@ pub struct RelationData {
     /// 6 = 已互粉，128 = 已拉黑。
     #[serde(deserialize_with = "de_i64_or_string")]
     pub attribute: i64,
+}
+
+/// 关注 / 粉丝数（`/x/relation/stat?vmid=`）。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct RelationStatResponse {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<RelationStatData>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct RelationStatData {
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub mid: i64,
+    /// 该用户关注了多少人。
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub following: i64,
+    /// 该用户的粉丝数。
+    #[serde(deserialize_with = "de_i64_or_string")]
+    pub follower: i64,
 }

@@ -329,6 +329,15 @@ pub fn session_messages(talker_id: i64, begin_seqno: Option<i64>, size: u32, coo
     }
 }
 
+/// 用户名片（取 UP 主签名）。不需要 WBI 签名。
+pub fn user_card(mid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/web-interface/card?mid={mid}"),
+        cookie: cookie.to_string(),
+        name: "user_card",
+    }
+}
+
 /// 用户名片：补私信会话的昵称与头像。
 pub fn user_cards(uids: &[i64], cookie: &str) -> Request {
     let joined = uids
@@ -360,6 +369,172 @@ pub fn relation_attribute(fid: i64, cookie: &str) -> Request {
         url: format!("{API_BASE}/x/relation?fid={fid}"),
         cookie: cookie.to_string(),
         name: "relation_attribute",
+    }
+}
+
+/// 关注数 / 粉丝数（视频页 UP 主信息用；公开接口，未登录也能读）。
+pub fn relation_stat(vmid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/relation/stat?vmid={vmid}"),
+        cookie: cookie.to_string(),
+        name: "relation_stat",
+    }
+}
+
+/// 关注 / 取关的地址（写接口；表单在 `interaction::relation_modify_form` 里拼）。
+pub fn relation_modify_url() -> String {
+    format!("{API_BASE}/x/relation/modify")
+}
+
+/// 设备指纹（`buvid3` / `buvid4`）：写接口的风控会看这两个 cookie。
+pub fn finger_spi(cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/frontend/finger/spi"),
+        cookie: cookie.to_string(),
+        name: "finger_spi",
+    }
+}
+
+// ================= UP 主空间 =================
+
+/// UP 主空间资料（`/x/space/wbi/acc/info`，**需要** WBI 签名）。
+///
+/// 这是空间页唯一必需的接口：昵称、头像、签名、等级、认证、会员档位都在这里。
+pub fn space_acc_info(mid: i64, img_key: &str, sub_key: &str, cookie: &str, wts: u64) -> Request {
+    let params = vec![("mid".to_string(), mid.to_string())];
+    Request {
+        url: wbi::signed_url(
+            &format!("{API_BASE}/x/space/wbi/acc/info"),
+            &params,
+            img_key,
+            sub_key,
+            wts,
+        ),
+        cookie: cookie.to_string(),
+        name: "space_acc_info",
+    }
+}
+
+/// UP 主空间标签（`/x/space/acc/tags`，不需要签名）。
+///
+/// 服务端最多给 5 条、每条不足 10 字；内容可能带 HTML 转义。
+pub fn space_tags(mid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/space/acc/tags?mid={mid}"),
+        cookie: cookie.to_string(),
+        name: "space_tags",
+    }
+}
+
+/// UP 主总播放 / 获赞（`/x/space/upstat`，不需要签名）。
+///
+/// 未登录时整块 `data` 可能不返回 —— 调用方按 0 处理。
+pub fn space_upstat(mid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/space/upstat?mid={mid}"),
+        cookie: cookie.to_string(),
+        name: "space_upstat",
+    }
+}
+
+/// UP 主投稿列表（`/x/space/wbi/arc/search`，**需要** WBI 签名）。
+///
+/// `order` 只认 `pubdate` / `click` / `stow`（见 [`crate::space::SpaceOrder`]）。
+pub fn space_arc_search(
+    mid: i64,
+    pn: u32,
+    ps: u32,
+    order: &str,
+    img_key: &str,
+    sub_key: &str,
+    cookie: &str,
+    wts: u64,
+) -> Request {
+    let params = vec![
+        ("mid".to_string(), mid.to_string()),
+        ("ps".to_string(), ps.to_string()),
+        ("pn".to_string(), pn.to_string()),
+        ("order".to_string(), order.to_string()),
+    ];
+    Request {
+        url: wbi::signed_url(
+            &format!("{API_BASE}/x/space/wbi/arc/search"),
+            &params,
+            img_key,
+            sub_key,
+            wts,
+        ),
+        cookie: cookie.to_string(),
+        name: "space_arc_search",
+    }
+}
+
+/// 置顶稿件（`/x/space/top/arc?mid=`，不需要签名）。
+///
+/// `code=53016` 表示该 UP 主没有置顶，属正常状态；调用方应把它当 `None`。
+pub fn space_top_arc(mid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/space/top/arc?mid={mid}"),
+        cookie: cookie.to_string(),
+        name: "space_top_arc",
+    }
+}
+
+/// UP 主公开名片（`/x/web-interface/card?mid=`，不需要签名）。
+///
+/// `photo=false` 省掉头图的尺寸协商；名片一个请求就带齐昵称、等级、
+/// 认证、会员、粉丝数、投稿数与获赞。
+pub fn space_card(mid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/web-interface/card?mid={mid}&photo=false"),
+        cookie: cookie.to_string(),
+        name: "space_card",
+    }
+}
+
+/// UP 主空间动态流（`/x/polymer/web-dynamic/v1/feed/space`，不需要签名）。
+///
+/// `offset` 是上一页 `data.offset` 原样回传的游标，空串表示第一页；
+/// `features=itemOpusStyle` 打开新版图文（Opus）结构。
+pub fn space_dynamics(mid: i64, offset: &str, cookie: &str) -> Request {
+    Request {
+        url: format!(
+            "{API_BASE}/x/polymer/web-dynamic/v1/feed/space?host_mid={mid}&offset={}&timezone_offset=-480&platform=web&features=itemOpusStyle",
+            offset.trim()
+        ),
+        cookie: cookie.to_string(),
+        name: "space_dynamics",
+    }
+}
+
+/// UP 主专栏列表（`/x/space/wbi/article`，**需要** WBI 签名）。
+///
+/// `pn` 从 1 开始，`order=pubdate` 按发布时间倒序。
+pub fn space_articles(
+    mid: i64,
+    pn: u32,
+    ps: u32,
+    img_key: &str,
+    sub_key: &str,
+    cookie: &str,
+    wts: u64,
+) -> Request {
+    let params = vec![
+        ("mid".to_string(), mid.to_string()),
+        ("pn".to_string(), pn.to_string()),
+        ("ps".to_string(), ps.to_string()),
+        ("order".to_string(), "pubdate".to_string()),
+    ];
+    Request {
+        url: wbi::signed_url(
+            &format!("{API_BASE}/x/space/wbi/article"),
+            &params,
+            img_key,
+            sub_key,
+            wts,
+        ),
+        cookie: cookie.to_string(),
+        name: "space_articles",
     }
 }
 

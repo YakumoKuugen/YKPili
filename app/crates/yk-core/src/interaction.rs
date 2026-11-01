@@ -118,13 +118,21 @@ fn favoured_request(aid: i64, cookie: &str) -> Request {
 /// 构造「收藏夹列表」的请求。
 ///
 /// `up_mid` 是**当前登录用户**的 mid —— 只能列自己的收藏夹。
-fn fav_folders_request(mid: i64, cookie: &str) -> Request {
+///
+/// 带上 `rid`（视频 aid）与 `type=2` 时，响应里每个夹子的 `fav_state`
+/// 是「这个视频在不在这个夹里」（1 / 0）；不带的话永远是 0 ——
+/// 面板上的勾选圈会全部空着，看起来像没收藏。
+fn fav_folders_request(mid: i64, rid: i64, cookie: &str) -> Request {
+    let mut url = format!(
+        "{}/x/v3/fav/folder/created/list-all?up_mid={}",
+        crate::api::bilibili::API_BASE,
+        mid
+    );
+    if rid > 0 {
+        url.push_str(&format!("&rid={rid}&type=2"));
+    }
     Request {
-        url: format!(
-            "{}/x/v3/fav/folder/created/list-all?up_mid={}",
-            crate::api::bilibili::API_BASE,
-            mid
-        ),
+        url,
         cookie: cookie.to_string(),
         name: "fav_folders",
     }
@@ -180,18 +188,28 @@ where
         let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
         return Err(format!("读取收藏状态失败：code={code} {message}"));
     }
-    Ok(parsed
-        .get("data")
+    let data = parsed.get("data");
+    // 线上返回的是对象：`{"count":1,"favoured":true}`；
+    // 老版本 / 某些兜底路径会直接给 bool，两种都接。
+    let favoured = data
+        .and_then(|data| data.get("favoured"))
         .and_then(|v| v.as_bool())
-        .unwrap_or(false))
+        .or_else(|| data.and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    Ok(favoured)
 }
 
-/// 拉取当前账号的收藏夹列表。
-pub fn fetch_fav_folders<C>(client: &C, cookie: &str, mid: i64) -> Result<Vec<FavFolder>, String>
+/// 拉取当前账号的收藏夹列表。`rid > 0` 时顺便带回「这个视频在不在该夹」。
+pub fn fetch_fav_folders<C>(
+    client: &C,
+    cookie: &str,
+    mid: i64,
+    rid: i64,
+) -> Result<Vec<FavFolder>, String>
 where
     C: HttpClient<Error = String>,
 {
-    let body = client.get(&fav_folders_request(mid, cookie))?;
+    let body = client.get(&fav_folders_request(mid, rid, cookie))?;
     let parsed: FavFoldersResponse =
         serde_json::from_str(&body).map_err(|e| format!("收藏夹列表解析失败：{e}"))?;
     if parsed.code != 0 {
@@ -270,11 +288,56 @@ pub fn like_video(
     check_write_code(&body, if like { "点赞" } else { "取消点赞" })
 }
 
+/// `coin/add` 的表单字段（拆出来方便单测，不需要联网）。
+///
+/// **`select_like` 必须传 `1` / `0`，不是 `"true"` / `"false"`** ——
+/// 服务端按整数解析这个字段，传布尔字符串会直接回 `code=-400`（请求错误），
+/// 硬币一枚都投不出去。这是「投币一直 400」的根因（2026-11-01 实测对照：
+/// `select_like=true` → -400，`select_like=1` → 进入业务校验回 -404）。
+///
+/// **`ramval` 必带**：网页版点投币时前端会顺手带一个随机值（实测 25 / 30
+/// 都可以，说明服务端只把它当「来自页面」的信号）。不带这个字段，即使
+/// `aid` / `multiply` / `select_like` / `csrf` 全对，风控也会直接回
+/// `-401 非法访问`（`decisions: ["verify_captcha_level2"]`）或 `-403 账号异常`。
+/// 用真实浏览器请求逐项二分出来的结论：最小表单 + `ramval` → 放行（回业务错误
+/// 34005），最小表单不带 → -403。
+///
+/// `multiply` 是硬币数（1 / 2，上限 2）；`csrf_token` 是顺手多带的同一值，
+/// 服务端会忽略多余字段。
+pub(crate) fn coin_form(
+    aid: i64,
+    multiply: u8,
+    also_like: bool,
+    csrf: &str,
+    ramval: u32,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("aid", aid.to_string()),
+        ("multiply", multiply.clamp(1, 2).to_string()),
+        // 1 = 同时点赞，0 = 不点赞。
+        ("select_like", if also_like { "1" } else { "0" }.to_string()),
+        ("csrf", csrf.to_string()),
+        ("csrf_token", csrf.to_string()),
+        // 网页版同样会带；缺了会被风控当成脚本。
+        ("ramval", ramval.to_string()),
+    ]
+}
+
+/// 每次投币带一个新随机值：网页版也是随机的，写死一个常量反而像脚本。
+pub(crate) fn next_ramval() -> u32 {
+    use rand::Rng as _;
+    rand::thread_rng().gen_range(1..=100)
+}
+
 /// 投币。
 ///
 /// **必须传 `aid`（av 号），不能只传 `bvid`** —— B 站的 `coin/add` 只认 av 号：
 /// 只带 bvid 会拿到 `code=-400`（请求错误），投币永远失败。
-/// 浏览器发的就是这个组合：`aid` / `multiply` / `select_like` / `csrf` / `csrf_token`。
+/// 浏览器发的组合是：`aid` / `multiply` / `select_like`（0 / 1）/ `csrf` /
+/// `ramval`（见 [`coin_form`]）。
+///
+/// `bvid` 只用来拼 `Referer`（视频页）：浏览器是在视频页点的投币，
+/// 固定发首页 Referer 会被风控当成脚本。
 ///
 /// `multiply` 是硬币数（1 / 2）；`also_like` 为真时同时点赞。
 pub fn coin_video(
@@ -282,6 +345,7 @@ pub fn coin_video(
     cookie: &str,
     csrf: &str,
     aid: i64,
+    bvid: &str,
     multiply: u8,
     also_like: bool,
 ) -> Result<(), String> {
@@ -289,22 +353,19 @@ pub fn coin_video(
     if aid <= 0 {
         return Err("缺少视频 aid，无法投币".into());
     }
-    let body = client.post_form(
+    let referer = if bvid.trim().is_empty() {
+        "https://www.bilibili.com/".to_string()
+    } else {
+        format!("https://www.bilibili.com/video/{}/", bvid.trim())
+    };
+    let body = client.post_form_with_referer(
         &format!(
             "{}/x/web-interface/coin/add",
             crate::api::bilibili::API_BASE
         ),
-        &[
-            ("aid", aid.to_string()),
-            ("multiply", multiply.clamp(1, 2).to_string()),
-            (
-                "select_like",
-                if also_like { "true" } else { "false" }.to_string(),
-            ),
-            ("csrf", csrf.to_string()),
-            ("csrf_token", csrf.to_string()),
-        ],
+        &coin_form(aid, multiply, also_like, csrf, next_ramval()),
         cookie,
+        &referer,
     )?;
     check_write_code(&body, "投币")
 }
@@ -343,6 +404,48 @@ pub fn fav_video(
         cookie,
     )?;
     check_write_code(&body, if add { "收藏" } else { "取消收藏" })
+}
+
+/// `x/relation/modify` 的表单字段（单独拆出来，方便单测不联网校验）。
+///
+/// `act` 是 B 站的关注动作码：**1 = 关注，2 = 取关**（不是布尔值）。
+/// `re_src = 11` 表示「视频播放页」来源，与浏览器一致，少这个字段容易被风控。
+pub(crate) fn relation_modify_form(
+    fid: i64,
+    follow: bool,
+    csrf: &str,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("fid", fid.to_string()),
+        ("act", if follow { "1" } else { "2" }.to_string()),
+        ("re_src", "11".to_string()),
+        ("csrf", csrf.to_string()),
+        ("csrf_token", csrf.to_string()),
+    ]
+}
+
+/// 关注 / 取关一个 UP 主。
+///
+/// 成功时服务端回 `code = 0`；`-101` 是未登录，`22014`/`-400` 这类带
+/// 服务端人话的失败原样透给界面，换成「关注失败：…」的 toast。
+pub fn follow_user(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    fid: i64,
+    follow: bool,
+) -> Result<(), String> {
+    let action = if follow { "关注" } else { "取消关注" };
+    require_csrf(csrf, action)?;
+    if fid <= 0 {
+        return Err("缺少用户 uid，无法关注".into());
+    }
+    let body = client.post_form(
+        &crate::api::bilibili::relation_modify_url(),
+        &relation_modify_form(fid, follow, csrf),
+        cookie,
+    )?;
+    check_write_code(&body, action)
 }
 
 /// 把视频分享到自己的动态（发一条带视频链接的动态）。
@@ -517,7 +620,7 @@ mod tests {
                 {"id":11,"title":"默认收藏夹","media_count":3,"attr":1,"fav_state":1},
                 {"id":22,"title":"硬件","media_count":1,"attr":0,"fav_state":0}]}}"#,
         );
-        let folders = fetch_fav_folders(&client, "", 42).unwrap();
+        let folders = fetch_fav_folders(&client, "", 42, 0).unwrap();
         assert_eq!(folders.len(), 2);
         assert_eq!(folders[0].id, 11);
         assert_eq!(folders[0].title, "默认收藏夹");
@@ -531,7 +634,41 @@ mod tests {
     #[test]
     fn fav_folders_empty_list_is_ok() {
         let client = FakeClient::new(r#"{"code":0,"data":{"count":0,"list":[]}}"#);
-        assert!(fetch_fav_folders(&client, "", 42).unwrap().is_empty());
+        assert!(fetch_fav_folders(&client, "", 42, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn fav_folders_carry_video_id_when_given() {
+        // 播放器展开收藏面板时要顺带问「这个视频在不在夹里」，
+        // 不带 rid 时每个夹子的 fav_state 都是 0（勾选圈全空）。
+        let client = FakeClient::new(r#"{"code":0,"data":{"count":0,"list":[]}}"#);
+        let _ = fetch_fav_folders(&client, "", 42, 113_753_081_383_484);
+        let url = client.last.borrow().clone().unwrap().url;
+        assert!(url.contains("up_mid=42"), "{url}");
+        assert!(url.contains("rid=113753081383484"), "{url}");
+        assert!(url.contains("type=2"), "{url}");
+
+        // 收藏夹页只要夹子本身，不要多这两个参数。
+        let client = FakeClient::new(r#"{"code":0,"data":{"count":0,"list":[]}}"#);
+        let _ = fetch_fav_folders(&client, "", 42, 0);
+        let url = client.last.borrow().clone().unwrap().url;
+        assert!(!url.contains("rid="), "{url}");
+    }
+
+    #[test]
+    fn favoured_reads_object_and_legacy_bool() {
+        // 线上是 `data: {count, favoured}`；老版本直接给 bool。两种都要接住。
+        let object = FakeClient::new(r#"{"code":0,"data":{"count":1,"favoured":true}}"#);
+        assert!(fetch_favoured(&object, "SESSDATA=x", 123).unwrap());
+        let object_no = FakeClient::new(r#"{"code":0,"data":{"count":0,"favoured":false}}"#);
+        assert!(!fetch_favoured(&object_no, "SESSDATA=x", 123).unwrap());
+        let legacy = FakeClient::new(r#"{"code":0,"data":true}"#);
+        assert!(fetch_favoured(&legacy, "SESSDATA=x", 123).unwrap());
+
+        let error = FakeClient::new(r#"{"code":-101,"message":"账号未登录"}"#);
+        assert!(fetch_favoured(&error, "", 123)
+            .unwrap_err()
+            .contains("未登录"));
     }
 
     #[test]
@@ -541,7 +678,7 @@ mod tests {
         assert!(like_video(&client, "", "", "BV1abc", true)
             .unwrap_err()
             .contains("bili_jct"));
-        assert!(coin_video(&client, "", "", 123, 1, false)
+        assert!(coin_video(&client, "", "", 123, "BV1abc", 1, false)
             .unwrap_err()
             .contains("bili_jct"));
         assert!(fav_video(&client, "", "", 1, 2, true)
@@ -565,8 +702,96 @@ mod tests {
         // coin/add 只认 av 号：没有 aid 就直接失败，不发请求
         // （带上 bvid 也不行 —— 服务端会回 -400 请求错误）。
         let client = ReqwestClient::new().unwrap();
-        assert!(coin_video(&client, "", "csrf", 0, 1, false)
+        assert!(coin_video(&client, "", "csrf", 0, "BV1abc", 1, false)
             .unwrap_err()
             .contains("aid"));
+    }
+
+    fn form_value<'a>(form: &'a [(&str, String)], key: &str) -> Option<&'a str> {
+        form.iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn coin_form_sends_integer_select_like() {
+        // 回归：`select_like` 传 "true" 会被服务端判 -400（2026-11-01 实测：
+        // true → -400 请求错误；1 → 通过参数校验进入业务错误 -404）。
+        let with_like = coin_form(117_489_652_602_947, 2, true, "csrf-token", 25);
+        assert_eq!(form_value(&with_like, "select_like"), Some("1"));
+        assert_eq!(form_value(&with_like, "multiply"), Some("2"));
+        assert_eq!(form_value(&with_like, "aid"), Some("117489652602947"));
+        assert_eq!(form_value(&with_like, "csrf"), Some("csrf-token"));
+
+        let without_like = coin_form(1, 1, false, "csrf-token", 25);
+        assert_eq!(form_value(&without_like, "select_like"), Some("0"));
+    }
+
+    #[test]
+    fn coin_form_carries_ramval() {
+        // 回归：不带 `ramval` 时，参数全对也会被风控拦成 -401 / -403
+        // （2026-11-01 用浏览器真实请求二分确认：最小表单 + ramval → 放行）。
+        let form = coin_form(1, 1, false, "csrf", 42);
+        assert_eq!(form_value(&form, "ramval"), Some("42"));
+
+        // 生成器给的是 1..=100 的随机值，每次都带。
+        for _ in 0..20 {
+            let ramval = next_ramval();
+            assert!((1..=100).contains(&ramval), "ramval 越界：{ramval}");
+        }
+    }
+
+    #[test]
+    fn coin_form_clamps_multiply_to_one_or_two() {
+        // 服务端只接受 1 / 2：多传会被判参数错误，少传会 0 枚。
+        assert_eq!(
+            form_value(&coin_form(1, 0, false, "x", 1), "multiply"),
+            Some("1")
+        );
+        assert_eq!(
+            form_value(&coin_form(1, 5, false, "x", 1), "multiply"),
+            Some("2")
+        );
+    }
+
+    #[test]
+    fn relation_form_uses_act_codes() {
+        // B 站的 act 是动作码：1 = 关注，2 = 取关；别把 bool 直接塞进去。
+        let follow = relation_modify_form(2333, true, "csrf-token");
+        assert_eq!(
+            follow
+                .iter()
+                .find(|(key, _)| *key == "act")
+                .map(|(_, value)| value.as_str()),
+            Some("1")
+        );
+        let unfollow = relation_modify_form(2333, false, "csrf-token");
+        assert_eq!(
+            unfollow
+                .iter()
+                .find(|(key, _)| *key == "act")
+                .map(|(_, value)| value.as_str()),
+            Some("2")
+        );
+        // 表单要带 fid / csrf / re_src：少一个都可能被服务端判 -400。
+        for (key, value) in &follow {
+            match *key {
+                "fid" => assert_eq!(value, "2333"),
+                "csrf" | "csrf_token" => assert_eq!(value, "csrf-token"),
+                "re_src" => assert_eq!(value, "11"),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn follow_user_rejects_missing_csrf_and_uid() {
+        let client = ReqwestClient::new().unwrap();
+        assert!(follow_user(&client, "", "", 2333, true)
+            .unwrap_err()
+            .contains("bili_jct"));
+        assert!(follow_user(&client, "", "csrf", 0, true)
+            .unwrap_err()
+            .contains("uid"));
     }
 }

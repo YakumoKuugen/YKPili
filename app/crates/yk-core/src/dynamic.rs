@@ -566,6 +566,8 @@ pub struct DynamicComment {
     pub like: u64,
     /// 评论附图（最多几张由接口决定，视图侧一般只展示前 3 张）。
     pub pictures: Vec<DynamicImage>,
+    /// 是否为置顶评论（UP / 管理员置顶）。
+    pub is_top: bool,
 }
 
 impl DynamicComment {
@@ -610,8 +612,30 @@ impl DynamicComment {
                     height: picture.img_height.min(u32::MAX as u64) as u32,
                 })
                 .collect(),
+            is_top: false,
         }
     }
+
+    /// 标记为置顶评论；解析置顶列表时使用。
+    pub fn as_top(mut self) -> Self {
+        self.is_top = true;
+        self
+    }
+}
+
+/// 把新一页评论并进已有列表，按 `rpid` 去重；返回实际新增条数。
+///
+/// 翻页边界会重复给同一条（置顶、被过滤后重新排序都可能），不去重
+/// 列表里就会出现两份。播放器评论区和动态详情评论区共用这一份实现。
+pub fn merge_comments(items: &mut Vec<DynamicComment>, incoming: Vec<DynamicComment>) -> usize {
+    let before = items.len();
+    for comment in incoming {
+        if items.iter().any(|existing| existing.rpid == comment.rpid) {
+            continue;
+        }
+        items.push(comment);
+    }
+    items.len() - before
 }
 
 /// 一页关注动态。
@@ -626,6 +650,23 @@ pub struct DynamicPage {
 mod tests {
     use super::*;
     use crate::api::models::{DynamicFeedResponse, ReplyResponse};
+
+    #[test]
+    fn merge_comments_dedupes_by_rpid() {
+        let item = |rpid: i64| DynamicComment {
+            rpid,
+            ..Default::default()
+        };
+        let mut items = vec![item(1), item(2), item(3)];
+        let added = merge_comments(&mut items, vec![item(3), item(4), item(5)]);
+        assert_eq!(added, 2, "重复的 rpid 不能算新增");
+        assert_eq!(
+            items.iter().map(|c| c.rpid).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        // 全是重复时返回 0（调用方据此判断「服务端在重复同一页」）。
+        assert_eq!(merge_comments(&mut items, vec![item(1)]), 0);
+    }
 
     #[test]
     fn copy_url_prefers_original_image() {

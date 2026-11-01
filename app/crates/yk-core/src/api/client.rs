@@ -15,13 +15,14 @@ use crate::api::bilibili::{self, HttpClient, Request};
 use crate::api::limits;
 use crate::api::models::{
     DynamicFeedResponse, HistoryResponse, MsgfeedInboxResponse, MsgfeedUnreadResponse, PlayUrlData,
-    RecommendResponse, RecommendVideoItem, RelationFriendsResponse, RelationResponse, ReplyMainResponse,
-    ReplyResponse,
-    SessionListResponse, SessionMsgsResponse, UserCardsResponse, UserInfoResponse, VideoInfoData,
+    RecommendResponse, RecommendVideoItem, RelationFriendsResponse, RelationResponse,
+    RelationStatResponse, ReplyMainResponse, ReplyRaw, ReplyResponse, SessionListResponse,
+    SessionMsgsResponse, UserCardResponse, UserCardsResponse, UserInfoResponse, VideoInfoData,
     VideoInfoResponse, VideoPlayUrlResponse, VideoTagsResponse,
 };
 use crate::api::wbi;
 use crate::danmaku::DanmakuSet;
+use crate::device::DeviceCookies;
 use crate::dynamic::{CommentTarget, DynamicComment, DynamicItem, DynamicPage};
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -48,6 +49,8 @@ const ORIGIN: &str = "https://www.bilibili.com";
 /// 基于 `reqwest::blocking` 的客户端。
 pub struct ReqwestClient {
     inner: reqwest::blocking::Client,
+    /// 设备指纹（`buvid3` / `buvid4`）：本地有就带上，写操作时会按需补取。
+    device: Option<DeviceCookies>,
 }
 
 impl ReqwestClient {
@@ -56,7 +59,26 @@ impl ReqwestClient {
             .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
             .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            device: crate::device::load(),
+        })
+    }
+
+    /// 这次请求实际要发的 Cookie：会话 cookie + 设备指纹。
+    fn cookie_header(&self, cookie: &str, device: Option<&DeviceCookies>) -> String {
+        match device {
+            Some(device) => device.merge_into(cookie),
+            None => cookie.to_string(),
+        }
+    }
+
+    /// 写操作前确保有设备指纹：没有就取一次并落盘，取不到也不挡功能。
+    fn ensure_device(&self, cookie: &str) -> Option<DeviceCookies> {
+        if let Some(device) = self.device.clone() {
+            return Some(device);
+        }
+        crate::device::ensure(self, cookie)
     }
 }
 
@@ -77,15 +99,39 @@ impl ReqwestClient {
         form: &[(&str, String)],
         cookie: &str,
     ) -> Result<String, String> {
+        self.post_form_with_referer(url, form, cookie, "https://www.bilibili.com/")
+    }
+
+    /// 带自定义 `Referer` 的表单提交。
+    ///
+    /// 风控会用 `Referer` 判断请求是不是从对应页面发出来的：投币这种动作
+    /// 在浏览器里是从视频页发的（`https://www.bilibili.com/video/BV.../`），
+    /// 固定成首页反而像个脚本。拿得到 bvid 的写操作都走这里。
+    pub fn post_form_with_referer(
+        &self,
+        url: &str,
+        form: &[(&str, String)],
+        cookie: &str,
+        referer: &str,
+    ) -> Result<String, String> {
+        // 风控看设备指纹：第一次写操作前先补上 buvid3 / buvid4。
+        let device = self.ensure_device(cookie);
+        let cookie = self.cookie_header(cookie, device.as_ref());
         let mut rb = self
             .inner
             .post(url)
             .header("User-Agent", UA)
-            .header("Referer", "https://www.bilibili.com/")
+            .header("Referer", referer)
             .header("Origin", ORIGIN)
-            .header("Accept", "application/json, text/plain, */*");
+            .header("Accept", "application/json, text/plain, */*")
+            // 和浏览器对齐的附加头：风控会看这几个 Fetch Metadata，
+            // 缺了会被判成「不是页面里发出来的请求」。
+            .header("Accept-Language", "zh-CN,zh;q=0.9")
+            .header("Sec-Fetch-Site", "same-site")
+            .header("Sec-Fetch-Mode", "cors")
+            .header("Sec-Fetch-Dest", "empty");
         if !cookie.is_empty() {
-            rb = rb.header("Cookie", cookie);
+            rb = rb.header("Cookie", &cookie);
         }
         // 写操作一律进 `Write` 桶：点赞 / 投币 / 收藏 / 发动态被连点最容易吃风控。
         limits::acquire_for(url, true);
@@ -113,6 +159,8 @@ impl ReqwestClient {
         body: &serde_json::Value,
         cookie: &str,
     ) -> Result<String, String> {
+        let device = self.ensure_device(cookie);
+        let cookie = self.cookie_header(cookie, device.as_ref());
         let mut rb = self
             .inner
             .post(url)
@@ -122,7 +170,7 @@ impl ReqwestClient {
             .header("Accept", "application/json, text/plain, */*")
             .header("Content-Type", "application/json");
         if !cookie.is_empty() {
-            rb = rb.header("Cookie", cookie);
+            rb = rb.header("Cookie", &cookie);
         }
         limits::acquire_for(url, true);
         let resp = rb
@@ -144,14 +192,15 @@ impl ReqwestClient {
     /// 不启用 reqwest 的 `deflate` feature：少一个依赖树分支，
     /// 解压交给 `fetch_danmaku` 里显式做，测试也更容易覆盖。
     pub fn get_bytes(&self, req: &Request) -> Result<Vec<u8>, String> {
+        let cookie = self.cookie_header(&req.cookie, self.device.as_ref());
         let mut rb = self
             .inner
             .get(&req.url)
             .header("User-Agent", UA)
             .header("Referer", "https://www.bilibili.com/")
             .header("Accept", "text/xml, application/octet-stream, */*");
-        if !req.cookie.is_empty() {
-            rb = rb.header("Cookie", &req.cookie);
+        if !cookie.is_empty() {
+            rb = rb.header("Cookie", &cookie);
         }
         limits::acquire_for(&req.url, false);
         let resp = rb
@@ -180,14 +229,15 @@ impl HttpClient for ReqwestClient {
     }
 
     fn get(&self, req: &Request) -> Result<String, Self::Error> {
+        let cookie = self.cookie_header(&req.cookie, self.device.as_ref());
         let mut rb = self
             .inner
             .get(&req.url)
             .header("User-Agent", UA)
             .header("Referer", "https://www.bilibili.com/")
             .header("Accept", "application/json, text/plain, */*");
-        if !req.cookie.is_empty() {
-            rb = rb.header("Cookie", &req.cookie);
+        if !cookie.is_empty() {
+            rb = rb.header("Cookie", &cookie);
         }
         limits::acquire_for(&req.url, false);
         let resp = rb
@@ -418,6 +468,30 @@ where
 /// 点击卡片后的完整取流：详情取 cid → playurl → 选一条视频 + 可选音频。
 ///
 /// 只取一次 WBI keys，两次接口复用；cookie 从登录会话传入（未登录也能拿 480P）。
+/// 取 UP 主签名。失败不阻塞播放：取不到就空字符串，面板不显示签名行。
+fn fetch_user_sign<C>(client: &C, cookie: &str, mid: i64) -> String
+where
+    C: HttpClient<Error = String>,
+{
+    if mid <= 0 {
+        return String::new();
+    }
+    let Ok(body) = client.get(&bilibili::user_card(mid, cookie)) else {
+        return String::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<UserCardResponse>(&body) else {
+        return String::new();
+    };
+    if parsed.code != 0 {
+        return String::new();
+    }
+    parsed
+        .data
+        .and_then(|data| data.card)
+        .map(|card| card.sign.trim().to_string())
+        .unwrap_or_default()
+}
+
 pub fn fetch_playback<C>(client: &C, bvid: &str, cookie: &str) -> Result<PlaybackSource, String>
 where
     C: HttpClient<Error = String>,
@@ -462,6 +536,12 @@ where
         return Err("播放地址被 B 站风控拦截（v_voucher），请稍后重试".into());
     }
     let mut source = select_playback(&info, &play)?;
+    // UP 主签名不在视频详情里，单独拉一次名片；失败不影响播放。
+    source.owner_sign = fetch_user_sign(
+        client,
+        cookie,
+        info.owner.as_ref().map(|owner| owner.mid).unwrap_or(0),
+    );
     // 详情里 cid 有时是 0（分 P），播放地址用的是 pages 里的 cid；
     // 心跳上报必须用真正播放的那一 P。
     source.cid = cid;
@@ -476,6 +556,87 @@ where
         source.bvid = bvid.to_string();
     }
     Ok(source)
+}
+
+/// 发一条视频评论（`/x/v2/reply/add`）。
+///
+/// 写操作必须带登录 Cookie 和 `bili_jct`（CSRF）；`message` 由调用方先 trim。
+pub fn post_video_comment(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    aid: i64,
+    message: &str,
+) -> Result<Option<i64>, String> {
+    if aid <= 0 {
+        return Err("缺少视频 aid，无法发表评论".into());
+    }
+    post_comment(client, cookie, csrf, 1, &aid.to_string(), message)
+}
+
+/// 发一条评论（视频 / 动态共用 `/x/v2/reply/add`）。
+///
+/// `kind` 是评论区的 `type`：1 = 视频，17 = 动态（见 [`CommentTarget::kind`]）。
+/// 返回服务端给的新评论 `rpid`（拿不到时 `None`），调用方可以据此做乐观插入。
+pub fn post_comment(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    kind: i64,
+    oid: &str,
+    message: &str,
+) -> Result<Option<i64>, String> {
+    if cookie.trim().is_empty() {
+        return Err("未登录，无法发表评论".into());
+    }
+    if csrf.trim().is_empty() {
+        return Err("登录会话缺少 bili_jct，无法发表评论".into());
+    }
+    if kind <= 0 || oid.trim().is_empty() {
+        return Err("缺少评论目标（type / oid），无法发表评论".into());
+    }
+    let message = message.trim();
+    if message.is_empty() {
+        return Err("评论内容不能为空".into());
+    }
+    let form = [
+        ("type", kind.to_string()),
+        ("oid", oid.trim().to_string()),
+        ("message", message.to_string()),
+        ("csrf", csrf.to_string()),
+    ];
+    let body = client.post_form(
+        &format!("{}/x/v2/reply/add", bilibili::API_BASE),
+        &form,
+        cookie,
+    )?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("评论发送响应解析失败：{e}"))?;
+    let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code == 0 {
+        // `/x/v2/reply/add` 正常会回 `data.rpid`；数字 / 字符串都见过。
+        let rpid = parsed.get("data").and_then(|data| {
+            data.get("rpid")
+                .or_else(|| data.get("rpid_str"))
+                .and_then(|v| {
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+                })
+        });
+        return Ok(rpid);
+    }
+    let message = parsed
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    match code {
+        -101 => Err("登录态已失效，请重新登录后再评论".into()),
+        -352 => Err("评论发送太频繁，已被 B 站风控拦截，请稍后再试".into()),
+        -111 => Err("评论内容包含敏感词或被限制".into()),
+        _ if message.is_empty() => Err(format!("评论接口返回 code={code}")),
+        _ => Err(format!("评论接口返回 code={code}：{message}")),
+    }
 }
 
 /// 拉一页观看历史。
@@ -594,6 +755,29 @@ where
     })
 }
 
+/// 合并置顶与普通评论：置顶排最前、打标记，并按 rpid 去重。
+///
+/// 置顶既可能出现在 `top_replies` 数组里，也可能在 `top.{admin,upper,vote}`
+/// 或旧接口的 `upper.top` 里；三处都喂进来，同一 rpid 只保留第一条。
+fn collect_comments<'a>(
+    pinned: impl Iterator<Item = &'a ReplyRaw>,
+    replies: &'a [ReplyRaw],
+) -> Vec<DynamicComment> {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for raw in pinned {
+        if seen.insert(raw.rpid) {
+            items.push(DynamicComment::from_raw(raw).as_top());
+        }
+    }
+    for raw in replies {
+        if seen.insert(raw.rpid) {
+            items.push(DynamicComment::from_raw(raw));
+        }
+    }
+    items
+}
+
 /// 拉动态评论第一页。
 ///
 /// 评论失败不应该影响详情浮层本身，因此调用方会把它当成「评论加载失败」而不是
@@ -616,10 +800,17 @@ where
     if parsed.code != 0 {
         return Err(format!("评论接口返回 code={}", parsed.code));
     }
-    Ok(parsed
-        .data
-        .map(|data| data.replies.iter().map(DynamicComment::from_raw).collect())
-        .unwrap_or_default())
+    let Some(data) = parsed.data else {
+        return Ok(Vec::new());
+    };
+    let pinned = data
+        .top
+        .iter()
+        .flat_map(|top| [top.admin.as_ref(), top.upper.as_ref(), top.vote.as_ref()])
+        .flatten()
+        .chain(data.top_replies.iter())
+        .chain(data.upper.iter().filter_map(|upper| upper.top.as_ref()));
+    Ok(collect_comments(pinned, &data.replies))
 }
 
 /// 每页评论要多少条 —— **每次只发 1 个请求**。
@@ -684,13 +875,14 @@ where
         .data
         .ok_or_else(|| "评论响应缺少 data".to_string())?;
     let cursor = data.cursor.clone().unwrap_or_default();
-    let mut seen = HashSet::new();
-    let items = data
-        .replies
+    // 新版置顶在 `top.{admin,upper,vote}`；旧响应也可能给 `top_replies`。
+    let pinned = data
+        .top
         .iter()
-        .filter(|raw| seen.insert(raw.rpid))
-        .map(DynamicComment::from_raw)
-        .collect();
+        .flat_map(|top| [top.admin.as_ref(), top.upper.as_ref(), top.vote.as_ref()])
+        .flatten()
+        .chain(data.top_replies.iter());
+    let items = collect_comments(pinned, &data.replies);
     Ok(CommentPage {
         items,
         next: cursor.next,
@@ -856,9 +1048,34 @@ pub(crate) fn check_write_code(body: &str, action: &str) -> Result<(), String> {
     let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
     if code != 0 {
         let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        // 风控判定只在响应体里（界面只显示一句话），日志留一份原始 body 方便排查。
+        eprintln!("[api] {action}失败（code={code}）：{body}");
+        // 风控拦截：`-401 非法访问` / `-403 账号异常` 的响应体里带
+        // `data.ga_data.decisions = ["verify_captcha_level3"]`。这不是参数问题，
+        // 用户看到裸 code 会以为「少了参数」，所以补一句人话。
+        if code == -401 || write_hits_captcha(&parsed) {
+            return Err(format!(
+                "{action}失败：code={code} {message}（B 站风控要求安全验证：请先在浏览器里完成一次{action}，稍后再试）"
+            ));
+        }
         return Err(format!("{action}失败：code={code} {message}"));
     }
     Ok(())
+}
+
+/// 写操作响应里是否带「要求验证码」的风控决策。
+fn write_hits_captcha(body: &serde_json::Value) -> bool {
+    body.get("data")
+        .and_then(|data| data.get("ga_data"))
+        .and_then(|ga| ga.get("decisions"))
+        .and_then(|decisions| decisions.as_array())
+        .map(|decisions| {
+            decisions
+                .iter()
+                .filter_map(|decision| decision.as_str())
+                .any(|decision| decision.contains("captcha"))
+        })
+        .unwrap_or(false)
 }
 
 // ================= 消息中心 =================
@@ -1012,6 +1229,49 @@ where
         serde_json::from_str(&body).map_err(|e| format!("关系解析失败：{e}"))?;
     check_message_code(parsed.code, &parsed.message, "关系")?;
     Ok(parsed.data.map(|data| data.attribute).unwrap_or(0))
+}
+
+/// `x/relation` 的 `attribute` 是否代表「已关注」。
+///
+/// B 站把这个字段当位标志用：`2` = 已关注，`128` = 已拉黑。
+/// 所以互关 `6`、拉黑 + 关注 `130` 都带着「已关注」这一位；
+/// `1` 是「悄悄关注」（不是按位加出来的值，单独判一次）。
+pub fn relation_attribute_follows(attribute: i64) -> bool {
+    attribute == 1 || attribute & 2 != 0
+}
+
+/// 查「我有没有关注这个 UP 主」。未登录直接判错，不把 `-101` 当成「没关注」。
+pub fn fetch_followed<C>(client: &C, cookie: &str, fid: i64) -> Result<bool, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if cookie.trim().is_empty() {
+        return Err("未登录，无法读取关注状态".into());
+    }
+    if fid <= 0 {
+        return Err("缺少用户 uid，无法读取关注状态".into());
+    }
+    let attribute = fetch_relation_attribute(client, cookie, fid)?;
+    Ok(relation_attribute_follows(attribute))
+}
+
+/// 关注数 / 粉丝数（公开接口，未登录也能读）。
+pub fn fetch_relation_stat<C>(client: &C, cookie: &str, vmid: i64) -> Result<(u64, u64), String>
+where
+    C: HttpClient<Error = String>,
+{
+    if vmid <= 0 {
+        return Err("缺少用户 uid，无法读取粉丝数".into());
+    }
+    let body = client.get(&bilibili::relation_stat(vmid, cookie))?;
+    let parsed: RelationStatResponse =
+        serde_json::from_str(&body).map_err(|e| format!("关注统计解析失败：{e}"))?;
+    check_message_code(parsed.code, &parsed.message, "关注统计")?;
+    let data = parsed.data.ok_or_else(|| "关注统计缺少 data".to_string())?;
+    Ok((
+        data.follower.max(0) as u64,
+        data.following.max(0) as u64,
+    ))
 }
 
 /// 私信会话列表 + 用户名片。昵称 / 头像不在会话响应里，必须二次补。
@@ -1542,6 +1802,62 @@ mod tests {
     }
 
     #[test]
+    fn comment_page_prepends_pinned_comments() {
+        struct PinnedClient;
+        impl HttpClient for PinnedClient {
+            type Error = String;
+            fn get(&self, _req: &Request) -> Result<String, String> {
+                Ok(r#"{"code":0,"data":{"top_replies":[{"rpid":900,"content":{"message":"pinned"}}],"replies":[{"rpid":1,"content":{"message":"normal"}},{"rpid":900,"content":{"message":"dup"}}],"cursor":{"next":0,"is_end":true,"all_count":2}}}"#.into())
+            }
+        }
+
+        let page = fetch_comment_page(&PinnedClient, "", &comment_target(), 0, 20).unwrap();
+        assert_eq!(page.items.len(), 2, "置顶与普通评论各一条，重复 rpid 去重");
+        assert_eq!(page.items[0].rpid, 900);
+        assert!(page.items[0].is_top, "置顶评论必须带标记");
+        assert_eq!(page.items[1].rpid, 1);
+        assert!(!page.items[1].is_top);
+    }
+
+    #[test]
+    fn comment_page_reads_top_admin_and_upper() {
+        struct TopClient;
+        impl HttpClient for TopClient {
+            type Error = String;
+            fn get(&self, _req: &Request) -> Result<String, String> {
+                Ok(r#"{"code":0,"data":{"top":{"admin":{"rpid":901,"content":{"message":"admin"}},"upper":{"rpid":900,"content":{"message":"up"}},"vote":null},"replies":[{"rpid":1,"content":{"message":"normal"}},{"rpid":900,"content":{"message":"dup"}}],"cursor":{"next":0,"is_end":true,"all_count":3}}}"#.into())
+            }
+        }
+
+        let page = fetch_comment_page(&TopClient, "", &comment_target(), 0, 20).unwrap();
+        assert_eq!(page.items.len(), 3, "两条置顶 + 一条普通；置顶在 replies 里不重复");
+        assert_eq!(page.items[0].rpid, 901, "管理员置顶排最前");
+        assert!(page.items[0].is_top);
+        assert_eq!(page.items[1].rpid, 900);
+        assert!(page.items[1].is_top);
+        assert_eq!(page.items[2].rpid, 1);
+        assert!(!page.items[2].is_top);
+    }
+
+    #[test]
+    fn legacy_dynamic_comments_include_upper_pinned() {
+        struct PinnedLegacyClient;
+        impl HttpClient for PinnedLegacyClient {
+            type Error = String;
+            fn get(&self, _req: &Request) -> Result<String, String> {
+                Ok(r#"{"code":0,"data":{"upper":{"top":{"rpid":7,"content":{"message":"up pinned"}}},"replies":[{"rpid":1,"content":{"message":"normal"}}]}}"#.into())
+            }
+        }
+
+        let target = comment_target();
+        let items = fetch_dynamic_comments(&PinnedLegacyClient, "", &target).unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].rpid, 7);
+        assert!(items[0].is_top, "旧接口的 upper.top 也要置顶");
+        assert!(!items[1].is_top);
+    }
+
+    #[test]
     fn playback_pipeline_selects_video_and_audio() {
         struct PlayClient;
         impl HttpClient for PlayClient {
@@ -1549,7 +1865,8 @@ mod tests {
             fn get(&self, req: &Request) -> Result<String, String> {
                 match req.name {
                     "user_info" => Ok(r#"{"code":0,"data":{"wbi_img":{"img_url":"a.png","sub_url":"b.png"}}}"#.into()),
-                    "video_info" => Ok(r#"{"code":0,"data":{"bvid":"BV1","cid":42,"title":"T","duration":100}}"#.into()),
+                    "video_info" => Ok(r#"{"code":0,"data":{"bvid":"BV1","cid":42,"title":"T","duration":100,"owner":{"mid":7,"name":"UP","face":""}}}"#.into()),
+                    "user_card" => Ok(r#"{"code":0,"data":{"card":{"sign":"UP 的签名"}}}"#.into()),
                     "play_url" => Ok(r#"{"code":0,"data":{"timelength":107000,"dash":{"video":[{"id":80,"baseUrl":"v80","codecs":"avc1","width":1920,"height":1080},{"id":32,"baseUrl":"v32","codecs":"avc1","width":640,"height":360}],"audio":[{"id":30280,"baseUrl":"a80","codecs":"mp4a"}]}}}"#.into()),
                     other => Err(format!("未预期请求：{other}")),
                 }
@@ -1559,6 +1876,7 @@ mod tests {
         assert_eq!(src.video_url, "v80");
         assert_eq!(src.audio_url.as_deref(), Some("a80"));
         assert_eq!(src.duration_secs, 107);
+        assert_eq!(src.owner_sign, "UP 的签名", "UP 主签名要带进信息面板");
     }
 
     #[test]
@@ -1726,4 +2044,80 @@ mod tests {
         assert_eq!(conversations[0].preview(), "[视频] 视频标题");
     }
 
+    #[test]
+    fn relation_attribute_bits_mean_followed() {
+        // 位标志：2 = 已关注，128 = 拉黑；6 是互关，130 是「拉黑 + 关注」。
+        assert!(!relation_attribute_follows(0));
+        assert!(!relation_attribute_follows(128));
+        assert!(relation_attribute_follows(1), "悄悄关注也算已关注");
+        assert!(relation_attribute_follows(2));
+        assert!(relation_attribute_follows(6));
+        assert!(relation_attribute_follows(130));
+    }
+
+    /// 关系接口假客户端：`attribute` 由测试指定，`stat` 回一份固定统计。
+    struct RelationClient {
+        attribute: i64,
+    }
+
+    impl HttpClient for RelationClient {
+        type Error = String;
+        fn get(&self, req: &Request) -> Result<String, String> {
+            match req.name {
+                "relation_attribute" => {
+                    assert!(req.url.contains("fid=2333"), "关系接口要带 fid");
+                    Ok(format!(
+                        r#"{{"code":0,"data":{{"mid":2333,"attribute":{}}}}}"#,
+                        self.attribute
+                    ))
+                }
+                "relation_stat" => {
+                    assert!(req.url.contains("vmid=2333"), "统计接口要带 vmid");
+                    // 线上粉丝数 / 关注数可能是数字，也可能是字符串。
+                    Ok(r#"{"code":0,"data":{"mid":2333,"following":"42","follower":98765}}"#.into())
+                }
+                other => Err(format!("未预期的请求：{other}")),
+            }
+        }
+    }
+
+    #[test]
+    fn followed_and_stat_parse_in_one_place() {
+        assert!(fetch_followed(&RelationClient { attribute: 6 }, "SESSDATA=x", 2333).unwrap());
+        assert!(!fetch_followed(&RelationClient { attribute: 0 }, "SESSDATA=x", 2333).unwrap());
+        let (fans, following) =
+            fetch_relation_stat(&RelationClient { attribute: 0 }, "", 2333).unwrap();
+        assert_eq!(fans, 98_765);
+        assert_eq!(following, 42);
+    }
+
+    #[test]
+    fn followed_state_needs_login() {
+        // 未登录时 `-101` 不能被当成「没关注」，直接报错由上层兜。
+        assert!(fetch_followed(&RelationClient { attribute: 0 }, "", 2333)
+            .unwrap_err()
+            .contains("未登录"));
+    }
+
+    #[test]
+    fn write_risk_control_gets_a_human_hint() {
+        // 真实响应：-401 非法访问 + ga_data.decisions=["verify_captcha_level3"]。
+        let captcha = r#"{"code":-401,"message":"非法访问","data":{"ga_data":{"decisions":["verify_captcha_level3"],"risk_level":1}}}"#;
+        let error = check_write_code(captcha, "投币").unwrap_err();
+        assert!(error.contains("风控"), "要说明这是风控不是参数错：{error}");
+        assert!(error.contains("安全验证"), "{error}");
+        assert!(error.contains("-401"), "{error}");
+
+        // 403 带同一条决策也算风控。
+        let blocked = r#"{"code":-403,"message":"账号异常,操作失败","data":{"ga_data":{"decisions":["verify_captcha_level3"]}}}"#;
+        assert!(check_write_code(blocked, "投币")
+            .unwrap_err()
+            .contains("风控"));
+
+        // 普通业务错误保持原样，不要乱加风控提示。
+        let normal = check_write_code(r#"{"code":34005,"message":"超过投币上限"}"#, "投币")
+            .unwrap_err();
+        assert!(normal.contains("34005"));
+        assert!(!normal.contains("风控"));
+    }
 }

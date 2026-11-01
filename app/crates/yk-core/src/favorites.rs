@@ -68,6 +68,7 @@ impl FavVideo {
             cid: 0,
             up_name: self.up_name.clone(),
             up_face: self.face_thumb_url(),
+            up_mid: self.up_mid,
             view_count: self.view_count,
             danmaku_count: self.danmaku_count,
             duration_secs: self.duration_secs,

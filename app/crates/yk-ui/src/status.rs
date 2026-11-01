@@ -144,3 +144,50 @@ pub fn spinner(theme: &YkTheme) -> impl IntoElement {
         )
 }
 
+/// Toast 胶囊的统一高度。
+///
+/// 旧版各页面各写一份 30–34px，播放器那条还带缩放动画，视觉尺度不一致；
+/// 统一成 48 高后面积约为旧版的 2 倍，字号也抬到正文档。
+pub const TOAST_HEIGHT: f32 = 48.0;
+/// Toast 胶囊的左右内边距。
+pub const TOAST_PADDING_X: f32 = SPACE_4 + SPACE_2;
+/// Toast 胶囊的最大宽度（超长文案先换行，不横向撑爆）。
+pub const TOAST_MAX_WIDTH: f32 = 520.0;
+
+/// 全局统一的 toast 胶囊：播放器互动反馈、搜索 / 消息提示、详情复制提示共用。
+pub fn toast_pill(theme: &YkTheme, text: impl Into<String>) -> Div {
+    let s = &theme.surfaces;
+    div()
+        .min_h(px(TOAST_HEIGHT))
+        .max_w(px(TOAST_MAX_WIDTH))
+        .px(px(TOAST_PADDING_X))
+        .py(px(SPACE_2))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(s.surface_elevated_strong)
+        .border_1()
+        .border_color(s.border_popover)
+        .shadow(theme.shadows.shadow_2.clone())
+        .text_size(px(FONT_SIZE_BODY))
+        .text_color(s.text_secondary)
+        .child(text.into())
+}
+
+/// 评论「置顶」徽标：播放器评论区与动态详情评论区共用。
+pub fn pinned_badge(theme: &YkTheme) -> Div {
+    div()
+        .h(px(14.))
+        .px(px(4.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .bg(theme.palette.theme_primary_20)
+        .text_size(px(FONT_SIZE_MICRO))
+        .line_height(px(14.))
+        .text_color(theme.palette.theme_primary)
+        .child("置顶")
+}
