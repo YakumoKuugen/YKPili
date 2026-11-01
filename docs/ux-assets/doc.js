@@ -231,6 +231,7 @@
     fitCols(bodyEl);
     bindToggles(bodyEl);
     initPlayer(bodyEl);
+    initCreator(bodyEl);
 
     /* 给 h3 编号，生成「本章目录」 */
     var hs = Array.prototype.slice.call(bodyEl.querySelectorAll('h3'));
@@ -354,6 +355,136 @@
       });
     }
     syncIcon();
+  }
+
+  /* 12.9 UP 主浮窗：弹 / 收动画、Tab 切换（roving tabindex）、关注撤销、排序 */
+  function initCreator(scope) {
+    var tabs = Array.prototype.slice.call(scope.querySelectorAll('.s129-tab[data-pane]'));
+    if (!tabs.length) return;
+    var panes = Array.prototype.slice.call(scope.querySelectorAll('.s129-pane'));
+
+    function show(key) {
+      tabs.forEach(function (t) {
+        var on = t.getAttribute('data-pane') === key;
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+        t.tabIndex = on ? 0 : -1;
+      });
+      panes.forEach(function (p) { p.hidden = p.getAttribute('data-pane') !== key; });
+    }
+    tabs.forEach(function (tab, i) {
+      tab.tabIndex = tab.getAttribute('aria-selected') === 'true' ? 0 : -1;
+      tab.addEventListener('click', function () { show(tab.getAttribute('data-pane')); });
+      tab.addEventListener('keydown', function (e) {
+        var next = null;
+        if (e.key === 'ArrowRight') next = (i + 1) % tabs.length;
+        else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+        else if (e.key === 'Home') next = 0;
+        else if (e.key === 'End') next = tabs.length - 1;
+        if (next === null) return;
+        e.preventDefault();
+        show(tabs[next].getAttribute('data-pane'));
+        tabs[next].focus();
+      });
+    });
+    Array.prototype.forEach.call(scope.querySelectorAll('[data-goto]'), function (b) {
+      b.addEventListener('click', function () { show(b.getAttribute('data-goto')); });
+    });
+
+    Array.prototype.forEach.call(scope.querySelectorAll('.s129-sortbar button'), function (b) {
+      b.addEventListener('click', function () {
+        Array.prototype.forEach.call(scope.querySelectorAll('.s129-sortbar button'), function (x) {
+          x.setAttribute('aria-pressed', 'false');
+        });
+        b.setAttribute('aria-pressed', 'true');
+      });
+    });
+
+    /* ---------- 浮窗：弹出 280ms / 回收 260ms ---------- */
+    var flo = scope.querySelector('.s129-float');
+    var scrim = scope.querySelector('.s129-scrim');
+    var closeBtn = scope.querySelector('.s129-close');
+    var btnIn = scope.querySelector('[data-anim="in"]');
+    var btnOut = scope.querySelector('[data-anim="out"]');
+    var popTimer = null;
+
+    function openFloat(restart) {
+      if (!flo) return;
+      clearTimeout(popTimer);
+      flo.classList.remove('is-out');
+      scrim.classList.remove('is-out');
+      flo.hidden = false;
+      scrim.hidden = false;
+      if (restart) {
+        /* 同一帧内先摘再挂，CSS 动画才会重跑（改 class 不会重跑） */
+        flo.hidden = true; scrim.hidden = true;
+        void flo.offsetWidth;
+        flo.hidden = false; scrim.hidden = false;
+      }
+    }
+    function closeFloat(done) {
+      if (!flo || flo.hidden) return;
+      flo.classList.add('is-out');
+      scrim.classList.add('is-out');
+      clearTimeout(popTimer);
+      popTimer = setTimeout(function () {          /* = PLAYER_EXIT_MS */
+        flo.hidden = true; scrim.hidden = true;
+        flo.classList.remove('is-out'); scrim.classList.remove('is-out');
+        if (done) done();
+      }, 260);
+    }
+    if (btnIn) btnIn.addEventListener('click', function () { openFloat(true); });
+    if (btnOut) btnOut.addEventListener('click', function () { closeFloat(); });
+    if (closeBtn) closeBtn.addEventListener('click', function () {
+      closeFloat(function () { if (btnIn) btnIn.focus({ preventScroll: true }); });
+    });
+    if (scrim) scrim.addEventListener('click', function () { closeFloat(); });
+
+    /* Esc 只关最上面这一层。文档全局 Esc 是「回概览」，
+       所以必须走捕获阶段把它拦下来，否则按一下就被踢出本章。 */
+    function onKey(e) {
+      if (!document.body.contains(flo)) {
+        document.removeEventListener('keydown', onKey, true);
+        return;
+      }
+      if (e.key !== 'Escape' || flo.hidden) return;
+      e.preventDefault();
+      e.stopPropagation();
+      closeFloat(function () { if (btnIn) btnIn.focus({ preventScroll: true }); });
+    }
+    if (flo) document.addEventListener('keydown', onKey, true);
+
+    /* ---------- 关注：乐观更新 + 5 秒撤销 ---------- */
+    var follow = scope.querySelector('[data-follow]');
+    var toast = scope.querySelector('.s129-toast');
+    if (!follow || !toast) return;
+    var timer = null;
+    var fans = scope.querySelector('[data-fans]');
+
+    function setFollowed(on) {
+      follow.setAttribute('aria-pressed', on ? 'true' : 'false');
+      follow.setAttribute('aria-label', on
+        ? '已关注 墨鱼实验室，再按一次取消关注'
+        : '关注 墨鱼实验室');
+      if (fans) fans.textContent = on ? '62.5万' : '62.4万';
+    }
+    function flash(text) {
+      clearTimeout(timer);
+      toast.hidden = false;
+      toast.querySelector('.txt').textContent = text;
+      timer = setTimeout(function () { toast.hidden = true; }, 5000);
+    }
+    var lastBefore = false;   /* 撤销要回到的那一态 */
+    follow.addEventListener('click', function () {
+      var wasOn = follow.getAttribute('aria-pressed') === 'true';
+      lastBefore = wasOn;
+      setFollowed(!wasOn);
+      flash(!wasOn ? '已关注 墨鱼实验室' : '已取消关注 墨鱼实验室');
+    });
+    var undo = toast.querySelector('.undo');
+    if (undo) undo.addEventListener('click', function () {
+      setFollowed(lastBefore);
+      flash(lastBefore ? '已关注 墨鱼实验室' : '已取消关注 墨鱼实验室');
+    });
   }
 
   /* ------------------------------------------------------------ 搜索过滤 */
