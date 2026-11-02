@@ -95,21 +95,22 @@ pub fn comment_row(t: &YkTheme, comment: &DynamicComment, opts: CommentRowOption
 
     // 这里不能裁切：`SelectableText` 的拖选自动滚动会把最近一层裁切当成
     // 可视区，裁到正文高度后左右拖动会一直触发滚动。
-    let text_box = div()
-        .id(opts.text_id)
-        .test_support()
-        .flex_shrink_0()
-        .child(
-            gpui::base::SelectableText::new(("comment-select", comment.rpid.max(0) as usize), text)
-                .text_style(gpui::TextStyleRefinement {
-                    font_size: Some(px(FONT_SIZE_CONTROL).into()),
-                    line_height: Some(px(COMMENT_TEXT_LINE_HEIGHT).into()),
-                    color: Some(s.text_primary),
-                    ..Default::default()
-                }),
-        )
-        // 右键菜单：有选区复制选区，没有则复制整条评论。
-        .context_menu(text_copy_menu(menu_text, opts.copy_notice));
+    // 评论区与 UP 主浮窗共用同一个可选文本组件（见 `selectable_text`）。
+    let text_box = selectable_text(
+        opts.text_id,
+        ("comment-select", comment.rpid.max(0) as usize),
+        opts.text_width,
+        true,
+        text,
+        gpui::TextStyleRefinement {
+            font_size: Some(px(FONT_SIZE_CONTROL).into()),
+            line_height: Some(px(COMMENT_TEXT_LINE_HEIGHT).into()),
+            color: Some(s.text_primary),
+            ..Default::default()
+        },
+        menu_text,
+        opts.copy_notice,
+    );
     content = content.child(text_box);
 
     if !comment.pictures.is_empty() {
@@ -125,29 +126,22 @@ pub fn comment_row(t: &YkTheme, comment: &DynamicComment, opts: CommentRowOption
             .gap(px(6.))
             .overflow_hidden();
         for (index, picture) in comment.pictures.iter().take(COMMENT_MAX_THUMBS).enumerate() {
-            let mut tile = div()
-                .id(("comment-image", (comment.rpid.max(0) as usize) << 4 | index))
-                .w(px(COMMENT_THUMB_SIZE))
-                .h(px(COMMENT_THUMB_SIZE))
-                .flex_shrink_0()
-                .rounded(px(RADIUS_MD))
-                .overflow_hidden()
-                .bg(s.fill_3)
-                .child(
-                    img(ImageSource::from(picture.thumb_url(144)))
-                        .w(px(COMMENT_THUMB_SIZE))
-                        .h(px(COMMENT_THUMB_SIZE))
-                        .object_fit(ObjectFit::Cover),
-                );
-            if let Some(on_image) = opts.on_image.as_ref() {
+            let on_click = opts.on_image.as_ref().map(|on_image| {
                 let on_image = on_image.clone();
                 let urls = urls.clone();
-                tile = tile.cursor_pointer().on_click(move |_, window, cx| {
-                    on_image(urls.clone(), index, window, cx);
-                    cx.stop_propagation();
-                });
-            }
-            strip = strip.child(tile);
+                std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                    on_image(urls.clone(), index, window, cx)
+                }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>
+            });
+            strip = strip.child(media_tile(
+                ("comment-image", (comment.rpid.max(0) as usize) << 4 | index),
+                s.fill_3,
+                picture.thumb_url(144),
+                COMMENT_THUMB_SIZE,
+                COMMENT_THUMB_SIZE,
+                RADIUS_MD,
+                on_click,
+            ));
         }
         content = content.child(strip);
     }
@@ -196,6 +190,97 @@ pub fn comment_row(t: &YkTheme, comment: &DynamicComment, opts: CommentRowOption
             }),
     )
     .child(content)
+}
+
+/// 一张可点预览的媒体格（正方形或任意比例的缩略图）。
+///
+/// 评论区图片条、UP 主浮窗动态的图文网格、以及投稿卡片的封面格子
+/// 都走这一份——以前是三份各自拼 `div + img + on_click`。
+pub fn media_tile(
+    id: impl Into<gpui::ElementId>,
+    background: Hsla,
+    url: String,
+    width: f32,
+    height: f32,
+    radius: f32,
+    on_click: Option<std::rc::Rc<dyn Fn(&mut Window, &mut App)>>,
+) -> AnyElement {
+    let tile = div()
+        .id(id)
+        .w(px(width))
+        .h(px(height))
+        .flex_shrink_0()
+        .rounded(px(radius))
+        .overflow_hidden()
+        .bg(background)
+        .child(
+            img(ImageSource::from(url))
+                .w(px(width))
+                .h(px(height))
+                .object_fit(ObjectFit::Cover),
+        );
+    match on_click {
+        Some(on_click) => tile
+            .cursor_pointer()
+            .on_click(move |_, window, cx| {
+                on_click(window, cx);
+                cx.stop_propagation();
+            })
+            .into_any_element(),
+        None => tile.into_any_element(),
+    }
+}
+
+/// 可选文本 + 右键「复制文本」——评论区与 UP 主浮窗的动态正文共用这一份。
+///
+/// 结构按评论区的写法来（它能正常拖选）：**外层带 id 的 div 直接包
+/// `SelectableText`**，中间不要再套一层定宽/裁切容器——多一层会让选区的
+/// 自动滚动把错误的一层当成可视区，表现为「按下就选中、松手还在跟」。
+pub fn selectable_text(
+    id: impl Into<gpui::ElementId>,
+    // 内层 `SelectableText` 必须有**自己独立的 id 命名空间**：
+    // 抽公共件时我把它统一成 `("selectable-text", key)`，于是评论区的 rpid
+    // 和浮窗动态的 index 落进了同一个 id 空间——同窗里两处一旦撞号，
+    // 选区状态就串了（表现正是「松手还在跟」）。这里要求调用方各自传。
+    inner_id: impl Into<gpui::ElementId>,
+    // **必须给确定宽度**：`SelectableText` 只有拿到确定值才按它折行，
+    // 宽度是 auto 时选区算出来的行列位置会漂，表现就是「松手还在跟」。
+    width: f32,
+    // 是否挂右键菜单。浮窗里先走 `false`：菜单是唯一会改变选区状态机的东西，
+    // 用它做一次对照实验（右键改为直接复制，不弹模态）。
+    with_menu: bool,
+    text: String,
+    style: gpui::TextStyleRefinement,
+    menu_text: String,
+    notice: std::rc::Rc<dyn Fn(&mut App)>,
+) -> impl IntoElement {
+    let box_el = div()
+        .id(id)
+        // 测试可见：评论区的用例就是靠这个节点定位正文的。
+        .test_support()
+        .w(px(width))
+        .flex_shrink_0()
+        // 拖动时选区变化只更新窗口状态，不一定会让这一块重绘：
+        // 在受保留渲染复用的子树里，`SelectableText::paint` 不会重跑，
+        // 蓝框就要等到松手（那次一定会重绘）才出现。指针移动时主动刷一帧。
+        .on_mouse_move(|_, window, _| window.refresh())
+        .child(gpui::base::SelectableText::new(inner_id, text).text_style(style));
+    if with_menu {
+        box_el.context_menu(text_copy_menu(menu_text, notice)).into_any_element()
+    } else {
+        // 不弹菜单：右键直接复制「有选区则选区、否则整段」，自己取一次选区。
+        box_el
+            .on_mouse_down(gpui::MouseButton::Right, move |_, window, cx| {
+                let selected = gpui::base::TextSelection::selected_text(window, cx);
+                let value = if selected.trim().is_empty() { menu_text.clone() } else { selected };
+                if !value.trim().is_empty() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(value));
+                    notice(cx);
+                }
+                cx.stop_propagation();
+            })
+            .into_any_element()
+    }
 }
 
 /// 任意文本的右键复制菜单：有选区复制选区，没有则复制整段。

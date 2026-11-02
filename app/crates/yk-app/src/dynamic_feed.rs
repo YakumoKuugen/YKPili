@@ -611,6 +611,7 @@ fn card(
         scale_factor,
         load_images,
         active_images.clone(),
+        Some(cx),
     ));
 
     let card_title = card_text(&item.title);
@@ -807,7 +808,7 @@ pub(crate) fn card_ghost(
         .flex()
         .flex_col()
         .w_full()
-        .child(header(t, item, scale_factor, true, active.clone()));
+        .child(header(t, item, scale_factor, true, active.clone(), None));
 
     let title = card_text(&item.title);
     if !title.is_empty() {
@@ -931,6 +932,8 @@ fn header(
     scale_factor: f32,
     load_image: bool,
     active_images: Rc<RefCell<ImageResidency>>,
+    // 只有真实卡片能点：ghost 卡片是测量用的，不挂交互。
+    on_avatar: Option<&mut Context<AppRoot>>,
 ) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
@@ -948,8 +951,9 @@ fn header(
         .gap(px(SPACE_2))
         .h(px(HEADER_HEIGHT))
         .w_full()
-        .child(
-            div()
+        .child({
+            // 「正在关注」的卡片也点头像进空间：和首页卡片署名的行为保持一致。
+            let avatar = div()
                 .relative()
                 .w(px(36.))
                 .h(px(36.))
@@ -970,8 +974,21 @@ fn header(
                             .h_full()
                             .object_fit(ObjectFit::Cover),
                     )
-                }),
-        )
+                })
+                .into_any_element();
+            match on_avatar {
+                Some(cx) => AppRoot::up_profile_avatar(
+                    SharedString::from(format!("following-up-{}", item.index)),
+                    item.author.mid,
+                    item.author.name.clone(),
+                    item.author.face.clone(),
+                    36.0,
+                    avatar,
+                    cx,
+                ),
+                None => avatar,
+            }
+        })
         .child(
             div()
                 .flex_1()

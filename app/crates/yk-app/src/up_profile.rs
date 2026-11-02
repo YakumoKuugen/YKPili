@@ -7,6 +7,7 @@
 //!
 //! 数据：`yk_core::space` 一次拿资料 + 标签 + 播放/获赞 + 关注数，投稿单独一次。
 
+use gpui::component::menu::ContextMenuExt as _;
 use gpui::prelude::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement, *};
 use yk_core::dynamic::{asset_url, fitted_width};
@@ -26,8 +27,15 @@ const HEADER_H: f32 = 230.0;
 const TABS_H: f32 = 44.0;
 const AVATAR: f32 = 72.0;
 const PAD_X: f32 = 20.0;
+/// 数据行 / 资料行距 header 底边多少：负值表示压到头图下沿以外，
+/// 与 Tab 条（HEADER_H + 10 起）之间仍留 2px。
+const STATS_BOTTOM: f32 = 2.0;
 const IDENT_LEFT: f32 = 104.0; // 20 + 72 + 12
 const GRID_COLS: usize = 4;
+/// 视频投稿 / 专栏投稿每页取多少：12 条正好铺满三行 4 列网格，
+/// 再多就是在为一个屏幕外的内容付请求与渲染的钱。
+const VIDEOS_PAGE_SIZE: u32 = 12;
+const ARTICLES_PAGE_SIZE: u32 = 12;
 const GRID_GAP: f32 = 12.0;
 const CARD_W: f32 =
     (PANEL_W - PAD_X * 2.0 - GRID_GAP * (GRID_COLS as f32 - 1.0)) / GRID_COLS as f32;
@@ -53,6 +61,8 @@ pub struct UpProfileView {
     total: u64,
     /// 投稿是否已经请求过（点了「投稿」Tab 才拉，见 12.9 的懒加载约定）。
     videos_requested: bool,
+    videos_page: u32,
+    videos_has_more: bool,
     videos_loading: bool,
     videos_error: Option<String>,
     /// 动态：5 条一页，滚到底再拉。
@@ -86,7 +96,20 @@ pub struct UpProfileView {
     follow_busy: bool,
     close_handler: Option<Box<dyn Fn(&mut App)>>,
     /// 点封面开播：把封面几何交给 AppRoot，让它走统一的「封面长成播放器」入口。
+    /// 焦点句柄：面板要参与焦点系统，和播放器面板一致。
+    ///
+    /// 没有 `track_focus` 的元素树里，`SelectableText` 的鼠标按下会被
+    /// 「抢焦点」那一拍吃掉（或者选区根本起不来），而右键菜单开关一次
+    /// 又会把选区的按下/松开计数搞乱——表现就是「刚进来选不中，右键一次
+    /// 之后松手还在选」。
+    focus_handle: FocusHandle,
+    /// 首帧渲染后再交焦点（和播放器同一处理）：元素树还没挂 `track_focus`
+    /// 时直接 focus 会丢，表现为「第一次拖选无效，得先点一下」。
+    needs_focus: bool,
     play_handler: Option<Box<dyn Fn(&mut App, &mut Window, String, crate::player::CoverSource)>>,
+    /// 点开图片预览：交给 AppRoot 的 `open_image_viewer`——
+    /// 全站只有这一个预览实现，动态、评论、播放器面板都走它。
+    image_handler: Option<Box<dyn Fn(&mut App, &mut Window, Vec<String>, usize)>>,
 }
 
 impl UpProfileView {
@@ -109,6 +132,8 @@ impl UpProfileView {
             videos: Vec::new(),
             total: 0,
             videos_requested: false,
+            videos_page: 0,
+            videos_has_more: true,
             videos_loading: false,
             videos_error: None,
             dynamics: Vec::new(),
@@ -137,7 +162,10 @@ impl UpProfileView {
             followed: false,
             follow_busy: false,
             close_handler: None,
+            focus_handle: cx.focus_handle(),
+            needs_focus: true,
             play_handler: None,
+            image_handler: None,
         }
     }
 
@@ -150,6 +178,44 @@ impl UpProfileView {
         handler: impl Fn(&mut App, &mut Window, String, crate::player::CoverSource) + 'static,
     ) {
         self.play_handler = Some(Box::new(handler));
+    }
+
+    /// 测试 / 截图入口：直接灌一批动态（不走网络），走真实渲染路径。
+    #[doc(hidden)]
+    pub fn with_dynamics(mut self, items: Vec<yk_core::space::SpaceDynamic>) -> Self {
+        self.dynamics = items;
+        self.dynamics_buffer.clear();
+        self.dynamics_loading = false;
+        self.dynamics_has_more = false;
+        self.tab = Tab::Feed;
+        self
+    }
+
+    /// 测试用：替换动态列表（不走网络）。
+    #[doc(hidden)]
+    pub fn set_dynamics(&mut self, items: Vec<yk_core::space::SpaceDynamic>) {
+        self.dynamics = items;
+        self.dynamics_buffer.clear();
+        self.dynamics_loading = false;
+        self.dynamics_has_more = false;
+        self.tab = Tab::Feed;
+    }
+
+    /// 测试用：当前动态条数（确认注入生效）。
+    #[doc(hidden)]
+    pub fn test_dynamics_len(&self) -> usize {
+        self.dynamics.len()
+    }
+
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+
+    pub fn set_image_handler(
+        &mut self,
+        handler: impl Fn(&mut App, &mut Window, Vec<String>, usize) + 'static,
+    ) {
+        self.image_handler = Some(Box::new(handler));
     }
 
     pub fn mid(&self) -> i64 {
@@ -222,7 +288,30 @@ impl UpProfileView {
         })
         .detach();
 
-        // 阶段 3：动态首页。
+        // 阶段 3：总播放。`card` 只带获赞，`acc/info` 只带注册时间/头图，
+        // 播放只有 `x/space/upstat` 有；未登录时它不返回，界面就不显示这一项。
+        let upstat_cookie = cookie.clone();
+        cx.spawn(async move |this, cx| {
+            let plays = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    Ok::<_, String>(yk_core::space::fetch_space_upstat(&client, &upstat_cookie, mid))
+                })
+                .await;
+            if let Ok((plays, _likes)) = plays {
+                let _ = this.update(cx, |view, cx| {
+                    if let Some(profile) = view.profile.as_mut() {
+                        profile.plays = plays;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+
+        // 阶段 4：动态首页。
         self.start_dynamics_fetch(cx);
     }
 
@@ -279,15 +368,16 @@ impl UpProfileView {
         !self.dynamics_buffer.is_empty() || self.dynamics_has_more
     }
 
-    /// 视频投稿：点了「视频投稿」标签才拉，一次 30 条。
+    /// 视频投稿：点标签拉第一页（30 条），滚到底续下一页。
     fn start_videos_fetch(&mut self, cx: &mut Context<Self>) {
-        if self.videos_requested {
+        if self.videos_loading || !self.videos_has_more {
             return;
         }
         self.videos_requested = true;
         self.videos_loading = true;
         self.videos_error = None;
         let mid = self.mid;
+        let pn = self.videos_page + 1;
         let cookie = crate::comment_section::current_session()
             .map(|session| session.cookie_header())
             .unwrap_or_default();
@@ -302,8 +392,8 @@ impl UpProfileView {
                         &client,
                         &cookie,
                         mid,
-                        1,
-                        30,
+                        pn,
+                        VIDEOS_PAGE_SIZE,
                         SpaceOrder::Newest,
                     )
                 })
@@ -312,13 +402,24 @@ impl UpProfileView {
                 view.videos_loading = false;
                 match page {
                     Ok(page) => {
-                        view.videos = page.items;
-                        view.total = page.total;
+                        let got = page.items.len() as u64;
+                        view.videos_page = pn;
+                        if pn <= 1 {
+                            view.videos = page.items;
+                        } else {
+                            view.videos.extend(page.items);
+                        }
+                        view.total = page.total.max(view.videos.len() as u64);
+                        // 拿满一页就认为还有下一页；总数已知时以总数为准。
+                        // 只认「这一页有没有内容」：`page.count` 有时是 0 或者
+                        // 不准确的旧值，用它算 has_more 会让列表在几页后突然停住。
+                        view.videos_has_more = got > 0;
                         view.videos_error = None;
                     }
                     Err(error) => view.videos_error = Some(error),
                 }
                 cx.notify();
+
             });
         })
         .detach();
@@ -344,7 +445,13 @@ impl UpProfileView {
                 .spawn(async move {
                     let client = yk_core::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
-                    yk_core::space::fetch_space_articles(&client, &cookie, mid, pn, 20)
+                    yk_core::space::fetch_space_articles(
+                        &client,
+                        &cookie,
+                        mid,
+                        pn,
+                        ARTICLES_PAGE_SIZE,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
@@ -355,11 +462,7 @@ impl UpProfileView {
                         let got = items.len();
                         view.articles.extend(items);
                         // 拿满一页就认为还有下一页；总数已知时以总数为准。
-                        view.articles_has_more = if total > 0 {
-                            (view.articles.len() as u64) < total
-                        } else {
-                            got >= 20
-                        };
+                        view.articles_has_more = got > 0;
                     }
                     Err(error) => view.articles_error = Some(error),
                 }
@@ -399,6 +502,9 @@ impl UpProfileView {
 
     /// 第二帧补头图与加入时间——这两项只有 `acc/info` 有。
     fn apply_top_photo(&mut self, basic: yk_core::space::SpaceBasic, cx: &mut Context<Self>) {
+        if basic.joined_at == 0 {
+            eprintln!("[space] acc/info 没有返回 jointime（注册时间未知），这一项不显示");
+        }
         if let Some(profile) = self.profile.as_mut() {
             if !basic.top_photo.is_empty() {
                 profile.top_photo = basic.top_photo;
@@ -508,6 +614,15 @@ impl UpProfileView {
             self.started = true;
             cx.defer_in(window, |view, _window, cx| view.start_fetch(cx));
         }
+        if self.needs_focus {
+            self.needs_focus = false;
+            let handle = self.focus_handle.clone();
+            // 等这一帧的元素树挂上 `track_focus` 之后再交焦点，
+            // 否则首帧的 focus 会被丢掉，用户得先点一下才能拖选。
+            cx.defer_in(window, move |_view, window, cx| {
+                window.focus(&handle, cx);
+            });
+        }
         let t = self.theme.clone();
         let scale = window.scale_factor();
         let content = self.panel(&t, scale, cx);
@@ -520,7 +635,13 @@ impl UpProfileView {
             target,
             progress: 0.0,
         };
-        let animated = if self.closing {
+        // 对照实验开关：跳过入场/退场动画包装，直接出终态。
+        // 用来验证「动画包装（RenderOnce + lerp_bounds）是否打断了文本选区」。
+        const SKIP_SHELL_ANIMATION: bool = false;
+        let animated = if SKIP_SHELL_ANIMATION {
+            // 完全不包动画元素：直接出终态（progress=1 → 目标 bounds）。
+            UpProfileShell { progress: 1.0, ..shell }.into_any_element()
+        } else if self.closing {
             shell
                 .with_animation(
                     format!("up-profile-close-{}", self.closing_generation),
@@ -605,9 +726,12 @@ impl UpProfileView {
         let plays = profile
             .map(|i| format::count(i.plays))
             .unwrap_or_else(|| "—".into());
+        // `jointime` 为 0 = 这个账号该字段没返回（风控 / 老号 / 接口降级），
+        // 与其显示一个空值，不如整项不出现。
         let joined = profile
-            .map(|i| format::date_time(i.joined_at))
-            .unwrap_or_else(|| "—".into());
+            .map(|i| i.joined_at)
+            .filter(|ts| *ts > 0)
+            .map(format::date_time);
         // 「最近更新」只能从最新一条投稿推；投稿没拉过就先不显示这一项，
         // 宁缺勿假（12.9 的约定：没有数据就整项不出现，不写「—」）。
         let updated = profile
@@ -616,7 +740,10 @@ impl UpProfileView {
             .map(format::relative_time);
 
         // ---- 头图：铺满宽度，底部遮罩给白字兜底 ----
-        let banner = div()
+        // 头图用 UP 主自己设的那张（`acc/info` 的 top_photo），
+        // 取不到 / 加载失败时底下这层品牌渐变就是兜底。
+        let top_photo = profile.map(|i| i.top_photo.clone()).unwrap_or_default();
+        let mut banner = div()
             .absolute()
             .left(px(0.0))
             .top(px(0.0))
@@ -626,36 +753,29 @@ impl UpProfileView {
                 118.0,
                 linear_color_stop(rgb(0x0E3A4A), 0.0),
                 linear_color_stop(rgb(0x3D2E5C), 1.0),
-            ))
-            .child(
-                // 占位渐变 + 遮罩：接上 `profile.top_photo` 后换成 img，这一层改成压暗
-                div()
+            ));
+        if !top_photo.is_empty() {
+            let url = asset_url(&top_photo, fitted_width(PANEL_W, scale, 0));
+            banner = banner.child(
+                img(ImageSource::from(url))
                     .absolute()
                     .inset_0()
-                    .bg(linear_gradient(
-                        0.0,
-                        linear_color_stop(rgba(0x000000C2), 0.0),
-                        linear_color_stop(rgba(0x00000000), 1.0),
-                    )),
-            )
-            .child(
-                // 文档标注：头图来自 UP 主空间设置，占位渐变只是兜底
-                div()
-                    .absolute()
-                    .left(px(PAD_X))
-                    .top(px(12.0))
-                    .h(px(22.0))
-                    .px(px(8.0))
-                    .flex()
-                    .items_center()
-                    .rounded(px(BADGE_RADIUS))
-                    .border_1()
-                    .border_color(rgba(0xFFFFFF6B))
-                    .bg(rgba(0x0000006B))
-                    .text_size(px(FONT_SIZE_MICRO))
-                    .text_color(rgba(0xFFFFFFEB))
-                    .child("空间头图 top_photo · 未接入时回落品牌渐变"),
+                    .w_full()
+                    .h_full()
+                    .object_fit(ObjectFit::Cover),
             );
+        }
+        // 压暗层永远压在最上面：白字要靠它拿对比度。
+        let banner = banner.child(
+            div()
+                .absolute()
+                .inset_0()
+                .bg(linear_gradient(
+                    0.0,
+                    linear_color_stop(rgba(0x000000C2), 0.0),
+                    linear_color_stop(rgba(0x00000000), 1.0),
+                )),
+        );
 
         // ---- 头像：圆心压在头图下沿 ----
         let face_url = if self.face.is_empty() {
@@ -786,7 +906,9 @@ impl UpProfileView {
         let ident = div()
             .absolute()
             .left(px(IDENT_LEFT))
-            .top(px(94.0))
+            // 从「底边距」锚定而不是固定 top：没有标签时这一块会自己往下坐，
+            // 不会在下面留一大块空白（有标签时向上长，仍然贴着头图）。
+            .bottom(px(HEADER_H - BANNER_H + 12.0))
             .right(px(PAD_X))
             .flex()
             .flex_col()
@@ -806,28 +928,35 @@ impl UpProfileView {
             .child(message);
 
         // ---- 数据 | 资料：落在头图下方的底色上 ----
-        let stats = div()
+        let plays_value = profile.map(|i| i.plays).unwrap_or(0);
+        let mut stats = div()
             .absolute()
             .left(px(IDENT_LEFT))
-            .bottom(px(12.0))
+            .bottom(px(STATS_BOTTOM))
             .flex()
             .items_end()
             .gap(px(SPACE_5))
             .child(stat_col(&follows, "关注", s))
             .child(stat_col(&fans, "粉丝", s))
-            .child(stat_col(&likes, "获赞", s))
-            .child(stat_col(&plays, "播放", s));
+            .child(stat_col(&likes, "获赞", s));
+        // `upstat` 需要登录态，未登录 / 失败时恒为 0——显示 0 会被当成
+        // 「这个 UP 主一部都没人看」，比缺一项更有害。
+        if plays_value > 0 {
+            stats = stats.child(stat_col(&plays, "播放", s));
+        }
 
         let mid_text = self.mid.to_string();
         let mut facts = div()
             .absolute()
             .right(px(PAD_X))
-            .bottom(px(12.0))
+            .bottom(px(STATS_BOTTOM))
             .flex()
             .items_end()
             .gap(px(SPACE_5))
-            .child(fact_col(&joined, "加入时间", s))
             .child(fact_col(&mid_text, "UID", s));
+        if let Some(joined) = joined.as_ref() {
+            facts = facts.child(fact_col(joined, "加入时间", s));
+        }
         if let Some(updated) = updated.as_ref() {
             facts = facts.child(fact_col(updated, "最近更新", s));
         }
@@ -836,6 +965,8 @@ impl UpProfileView {
             .relative()
             .h(px(HEADER_H))
             .flex_shrink_0()
+            // 头部实色：面板底下是任意页面，半透明会让文字底噪不可控。
+            .bg(s.surface_elevated_solid)
             .child(banner)
             .child(ident)
             .child(actions)
@@ -847,6 +978,10 @@ impl UpProfileView {
         let tabs = div()
             .h(px(TABS_H))
             .flex_shrink_0()
+            // 与上面的数据行再拉开 10px：贴着数据行时整块显得挤。
+            .mt(px(10.0))
+            // Tab 条比头部提亮一档：设计稿里「数据区 / 分页区」是两个色块。
+            .bg(s.surface_elevated_solid_hover)
             .px(px(PAD_X))
             .flex()
             .items_center()
@@ -870,7 +1005,14 @@ impl UpProfileView {
             .h(px(PANEL_H))
             .flex()
             .flex_col()
-            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.stop_propagation()))
+            .track_focus(&self.focus_handle)
+            // **别用 on_click + stop_propagation**：`ClickEvent` 是在 mouse-up 阶段
+            // 派发的，这里一 stop，窗口级的选区监听就收不到松开事件，
+            // `WindowSelectionState::is_selecting` 会永远停在 true ——
+            // 于是之后每次按下都被当成「已经在选」，正文再也选不中。
+            // 想让点击不漏到底下的遮罩，用 `occlude()`（挡住更下层的命中框，
+            // 但不吞事件）才是对的。
+            .occlude()
             .child(header)
             .child(tabs)
             .child(
@@ -879,6 +1021,7 @@ impl UpProfileView {
                     .flex_1()
                     .min_h(px(0.0))
                     .overflow_y_scroll()
+                    .bg(s.bg_base)
                     .track_scroll(&self.scroll)
                     .on_scroll_wheel(cx.listener(
                         |view, _: &ScrollWheelEvent, _window, cx| {
@@ -920,7 +1063,11 @@ impl UpProfileView {
                 view.tab = tab;
                 match tab {
                     Tab::Feed => view.start_dynamics_fetch(cx),
-                    Tab::Videos => view.start_videos_fetch(cx),
+                    Tab::Videos => {
+                        if view.videos_page == 0 {
+                            view.start_videos_fetch(cx);
+                        }
+                    }
                     Tab::Articles => view.start_articles_fetch(cx),
                 }
                 cx.notify();
@@ -1035,16 +1182,67 @@ impl UpProfileView {
                     }),
             );
         if !item.text.is_empty() {
-            body = body.child(
-                div()
-                    .line_clamp(4)
-                    .text_size(px(FONT_SIZE_CONTROL))
-                    .line_height(px(21.0))
-                    .text_color(s.text_primary)
-                    .child(item.text.clone()),
-            );
+            // 与评论区同一份实现：拖选 + 右键「复制文本」。
+            let text = item.text.clone();
+            let notice: std::rc::Rc<dyn Fn(&mut App)> = std::rc::Rc::new(|_: &mut App| {});
+            body = body.child(crate::comment_view::selectable_text(
+                SharedString::from(format!("up-profile-dynamic-text-{index}")),
+                ("up-dynamic-select", index),
+                // 与评论区一样给确定宽度：面板宽 − 内容内边距 − 行内边距。
+                PANEL_W - PAD_X * 2.0 - SPACE_3 * 2.0,
+                // 和评论区完全同一条路径：右键弹「复制文本」菜单。
+                true,
+                text.clone(),
+                gpui::TextStyleRefinement {
+                    font_size: Some(px(FONT_SIZE_CONTROL).into()),
+                    line_height: Some(px(21.0).into()),
+                    color: Some(s.text_primary),
+                    ..Default::default()
+                },
+                text,
+                notice,
+            ));
         }
-        if !item.cover.is_empty() {
+        if !item.images.is_empty() {
+            // 图文动态：最多 9 张，按 3 列铺；单张时按 16:9 大图。
+            let cols: usize = if item.images.len() == 1 { 1 } else { 3 };
+            let width: f32 = if cols == 1 { 240.0 } else { 96.0 };
+            // 高度按「行数 × 单元高 + 间距」显式算出来：
+            // item 的高度必须把媒体算进去，否则图片会把下面的统计行挤出去。
+            let cell_h = (width * 9.0 / 16.0).round();
+            let rows = item.images.len().div_ceil(cols);
+            let grid_h = rows as f32 * cell_h + (rows.saturating_sub(1) as f32) * 6.0;
+            let all_images = item.images.clone();
+            let mut grid = div()
+                .flex()
+                .flex_wrap()
+                .gap(px(6.0))
+                .max_w(px(if cols == 1 { 240.0 } else { 300.0 }))
+                .h(px(grid_h));
+            for (i, src) in item.images.iter().take(9).enumerate() {
+                let thumb = asset_url(src, fitted_width(width, 2.0, 0));
+                let urls = all_images.clone();
+                // 与评论区图片条同一份实现（`comment_view::media_tile`）。
+                let weak = cx.entity().downgrade();
+                let on_click = std::rc::Rc::new(move |window: &mut Window, cx: &mut App| {
+                    let _ = weak.update(cx, |view, cx| {
+                        if let Some(handler) = view.image_handler.as_ref() {
+                            handler(cx, window, urls.clone(), i);
+                        }
+                    });
+                }) as std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
+                grid = grid.child(crate::comment_view::media_tile(
+                    SharedString::from(format!("up-profile-dynamic-img-{index}-{i}")),
+                    s.surface_content,
+                    thumb,
+                    width,
+                    cell_h,
+                    MEDIA_RADIUS,
+                    Some(on_click),
+                ));
+            }
+            body = body.child(grid);
+        } else if !item.cover.is_empty() {
             let cover = asset_url(&item.cover, fitted_width(240.0, 2.0, 0));
             if item.kind == "video" {
                 // 视频动态：直接复用首页推荐卡片的封面（播放/弹幕/时长都在），
@@ -1123,26 +1321,14 @@ impl UpProfileView {
                 .child(format!("{} 转发", format::count(item.forwards))),
         );
 
+        // 不画作者头像：这一页所有动态都是同一个 UP 主，
+        // 每条重复一枚头像等于把「署名」变成噪音（同 12.9「卡片去掉署名行」）。
         div()
             .id(SharedString::from(format!("up-profile-dynamic-{index}")))
-            .flex()
-            .gap(px(SPACE_3))
             .p(px(SPACE_3))
             .rounded(px(RADIUS_LG))
             .border_b_1()
             .border_color(s.border_subtle)
-            .child(
-                div()
-                    .w(px(36.0))
-                    .h(px(36.0))
-                    .flex_shrink_0()
-                    .rounded_full()
-                    .bg(linear_gradient(
-                        135.0,
-                        linear_color_stop(p.bili_blue, 0.0),
-                        linear_color_stop(p.bili_pink, 1.0),
-                    )),
-            )
             .child(body)
             .into_any_element()
     }
@@ -1254,7 +1440,18 @@ impl UpProfileView {
         let offset = self.scroll.offset().y.as_f32();
         let max = self.scroll.max_offset().y.as_f32();
         let viewport = self.scroll.bounds().size.height.as_f32();
-        if max - offset > viewport + 240.0 {
+        // GPUI 的两个值都是**负数**：`offset` 向下滚越来越负，
+        // `max_offset` 是它能到的最负值（顶部为 0）。
+        // 因此「离底部的距离」= offset - max（到底时正好是 0），
+        // 之前写成 max - offset 等于恒为正、永远判不到底——这就是「怎么滚都不加载」。
+        // 判据与评论区 `needs_more` 完全一致。
+        // 只认「滚到边界」：距底 60px 以内才算。之前用一整屏的提前量，
+        // 加上加载后的自检，表现就是「一进页面就一路拉到底」。
+        let near_bottom = max <= -1.0 && offset - max <= 60.0;
+        // 内容撑不满一屏时没有滚动事件，滚轮也到不了边界——这种极端情况
+        // 允许直接补一页，避免停在半屏。
+        let short_content = max > -1.0;
+        if !(near_bottom || short_content) {
             return;
         }
         match self.tab {
@@ -1267,13 +1464,15 @@ impl UpProfileView {
                 }
             }
             Tab::Articles => self.start_articles_fetch(cx),
-            Tab::Videos => {}
+            Tab::Videos => self.start_videos_fetch(cx),
         }
     }
 
     fn videos_body(&self, t: &YkTheme, scale: f32, cx: &mut Context<Self>) -> AnyElement {
         let s = &t.surfaces;
-        if let Some(error) = self.videos_error.as_ref() {
+        // 只有「一条都没加载出来」时才整块报错；翻页失败要保住已有内容，
+        // 否则用户滚了三页碰到一次超时，列表就被整段清空了。
+        if let Some(error) = self.videos_error.as_ref().filter(|_| self.videos.is_empty()) {
             return div()
                 .flex_1()
                 .flex()
@@ -1321,7 +1520,9 @@ impl UpProfileView {
                 )
                 .into_any_element();
         }
-        if self.videos_loading {
+        // **只有一条都没有**时才让位给加载态：翻页加载时如果也走这条分支，
+        // 已上屏的网格会被整块换掉，用户看到的就是「清空重填」。
+        if self.videos_loading && self.videos.is_empty() {
             return self.state_block(t, "正在拉取投稿…", "只在这一页付请求的时间", false, cx);
         }
         if self.videos.is_empty() {
@@ -1333,18 +1534,61 @@ impl UpProfileView {
                 cx,
             );
         }
-        div()
+        let mut col = div()
             .flex()
             .flex_col()
             .gap(px(SPACE_3))
             .p(px(PAD_X))
-            .child(self.grid(t, scale, cx))
-            .into_any_element()
+            .pb(px(SPACE_6))
+            .child(self.grid(t, scale, cx));
+        if self.videos_loading {
+            col = col.child(
+                div()
+                    .py(px(SPACE_3))
+                    .text_center()
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .text_color(t.surfaces.text_quaternary)
+                    .child("正在加载更多…"),
+            );
+        } else if let Some(error) = self.videos_error.as_ref() {
+            col = col.child(
+                div()
+                    .id("up-profile-videos-retry")
+                    .mx_auto()
+                    .my(px(SPACE_2))
+                    .h(px(CONTROL_HEIGHT))
+                    .px(px(SPACE_4))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .bg(t.surfaces.surface_content)
+                    .border_1()
+                    .border_color(t.palette.status_error_30)
+                    .cursor_pointer()
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .text_color(t.surfaces.text_primary)
+                    .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                        view.videos_error = None;
+                        view.start_videos_fetch(cx);
+                    }))
+                    .child(format!("加载失败，点此重试（{error}）")),
+            );
+        } else if !self.videos_has_more {
+            col = col.child(
+                div()
+                    .py(px(SPACE_3))
+                    .text_center()
+                    .text_size(px(FONT_SIZE_CAPTION))
+                    .text_color(t.surfaces.text_quaternary)
+                    .child("没有更多投稿了"),
+            );
+        }
+        col.into_any_element()
     }
 
     fn grid(&self, t: &YkTheme, scale: f32, cx: &mut Context<Self>) -> AnyElement {
         let mut grid = div().flex().flex_wrap().gap(px(GRID_GAP));
-        for (index, video) in self.videos.iter().take(8).enumerate() {
+        for (index, video) in self.videos.iter().enumerate() {
             grid = grid.child(self.video_card(video, index, t, scale, cx));
         }
         grid.into_any_element()
@@ -1396,10 +1640,14 @@ impl UpProfileView {
             .hover(|style| style.bg(s.surface_content_hover))
             .child(thumbnail)
             .child(
+                // 两行标题的高度必须用「行高 × 2」，不能用「字号 × 2 + 4」：
+                // 13 号字的行高是 18，30px 的盒子装不下两行，第二行会被裁掉。
                 div()
-                    .h(px(FONT_SIZE_CONTROL * 2.0 + 4.0))
+                    .mt(px(SPACE_1))
+                    .h(px(LINE_HEIGHT_CONTROL * 2.0))
                     .line_clamp(2)
                     .text_size(px(FONT_SIZE_CONTROL))
+                    .line_height(px(LINE_HEIGHT_CONTROL))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(s.text_primary)
                     .child(video.title.clone()),
@@ -1603,6 +1851,8 @@ impl RenderOnce for UpProfileShell {
             .h(px(bounds.size.height.as_f32().max(1.0)))
             .rounded(px(POPOVER_RADIUS))
             .overflow_hidden()
+            // 不透明材质：这是压在任意页面之上的浮窗，半透明会把底下的
+            // 封面、文字透进来，正文对比度不可控。
             .bg(if face.is_empty() {
                 linear_gradient(
                     135.0,
@@ -1612,14 +1862,18 @@ impl RenderOnce for UpProfileShell {
             } else {
                 linear_gradient(
                     0.0,
-                    linear_color_stop(s.surface_elevated_strong, 0.0),
-                    linear_color_stop(s.surface_elevated_strong, 1.0),
+                    linear_color_stop(s.surface_elevated_solid, 0.0),
+                    linear_color_stop(s.surface_elevated_solid, 1.0),
                 )
             })
             .border_1()
             .border_color(s.border_popover)
-            .shadow(theme.shadows.shadow_4.clone())
-            .occlude();
+            .shadow(theme.shadows.shadow_4.clone());
+        // **不要在这层 occlude**：`occlude()` 是 `HitboxBehavior::BlockMouse`，
+        // 它会盖在整块内容之上参与鼠标命中——评论区的面板没有这一层，
+        // 所以那边的 `SelectableText` 能正常按/拖/松手；
+        // 浮窗里这层挡在中间，`SelectableText` 的松手判定就收不到。
+        // 点击不外泄由内层 `up-profile-panel` 的 `on_click(stop_propagation)` 保证。
         if !face.is_empty() {
             shell = shell.child(
                 img(ImageSource::from(face))
@@ -1659,6 +1913,7 @@ fn playable_cover(
     div()
         .id(id)
         .relative()
+        .w_full()
         .when(playable, |el| el.cursor_pointer())
         .child(child)
         .child(

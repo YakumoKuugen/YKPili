@@ -136,6 +136,12 @@ pub struct AppRoot {
     account: Option<Entity<account_view::AccountView>>,
     /// UP 主浮窗（他人空间）；None = 未打开。点 UP 主头像打开，Esc 或点遮罩回收。
     up_profile: Option<Entity<up_profile::UpProfileView>>,
+    /// 播放器是否压在 UP 主浮窗之上。
+    ///
+    /// 两种情况天然矛盾，只能按来源决定谁在上：
+    /// - 从播放器面板点 UP 主头像进来 → 浮窗要在播放器之上（否则被盖住）；
+    /// - 在浮窗里点封面起播 → 播放器要在浮窗之上（否则「在动态层上面开播放器」就是空话）。
+    player_on_top: bool,
     /// 设置浮层（缓存管理）；None = 未打开。
     settings: Option<Entity<settings_view::SettingsView>>,
     /// 页面级图片缓存：只绑定在内容区，顶栏/浮层不受影响。
@@ -307,6 +313,40 @@ impl AppRoot {
     }
 
     /// 测试 / 截图入口：不自动弹登录卡片。
+    /// 测试入口：直接打开某个 UP 主的浮窗（不走网络，动态由
+    /// [`up_profile::UpProfileView::with_dynamics`] 注入）。
+    #[doc(hidden)]
+    pub fn open_up_profile_for_test(
+        &mut self,
+        mid: i64,
+        name: String,
+        face: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let opener = gpui::Bounds {
+            origin: gpui::point(gpui::px(0.0), gpui::px(0.0)),
+            size: gpui::size(gpui::px(200.0), gpui::px(120.0)),
+        };
+        self.ensure_up_profile(mid, name, face, opener, window, cx);
+    }
+
+    /// 测试入口：往已打开的浮窗里灌动态。
+    #[doc(hidden)]
+    pub fn inject_up_profile_dynamics_for_test(
+        &mut self,
+        items: Vec<yk_core::space::SpaceDynamic>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.up_profile.clone() else {
+            return;
+        };
+        view.update(cx, |view, cx| {
+            view.set_dynamics(items);
+            cx.notify();
+        });
+    }
+
     pub fn without_login_prompt(mut self) -> Self {
         self.login_prompted = true;
         self
@@ -733,6 +773,7 @@ impl AppRoot {
         self.playing = Some(cx.new(|cx| player::PlayerView::new(theme, cx)));
         self.install_player_close_handler(cx);
         self.install_player_up_profile_handler(cx);
+        self.install_player_image_handler(cx);
         // 入场动画（280ms）结束、播放器完全盖住内容区后，把背后的页面停绘。
         // 入场期间仍要真实网格做展开背景，所以延迟到动画结束后再置位。
         self.player_page_hidden = false;
@@ -885,19 +926,37 @@ impl AppRoot {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if bvid.is_empty() || self.playing.is_some() || self.close_player_requested {
+        if bvid.is_empty() {
+            eprintln!("[play] 跳过：封面没有 bvid");
             return;
         }
-        // 浮窗层级是「UP 主浮窗 65 > 播放浮窗 60」：从浮窗里点封面起播时，
-        // 先让浮窗走回收（260ms 淡出），播放器的入场（280ms）在它下面同时开始——
-        // 两个动作重叠，观感是「浮窗退开、视频从封面长出来」。
-        if let Some(up) = self.up_profile.clone() {
-            let _ = up.update(cx, |view, cx| view.begin_close(cx));
-        }
+        eprintln!(
+            "[play] 从封面起播：{bvid}（{}）",
+            if self.up_profile.is_some() {
+                "压在浮窗之上"
+            } else {
+                "独立打开"
+            }
+        );
+        // 从浮窗里起播：播放器要压在 UP 主浮窗之上（「在动态层上面再开一个播放器」），
+        // 浮窗保持打开，关掉播放器还能回到 TA 的主页。
+        self.player_on_top = self.up_profile.is_some();
         if let Some(root) = self.layout_bounds.get() {
             source.root_size = root.size;
         }
-        self.ensure_player(cx);
+
+        // **不能重建 PlayerView**：它带单实例断言（构造 +1 / Drop −1），
+        // 而旧实例在这一帧的元素树里还挂着引用，`self.playing = None` 只是减一次
+        // 引用计数、并不会立刻 Drop —— 直接 `PlayerView::new` 会撞断言，
+        // panic 穿过 ObjC 事件回调就是 SIGABRT（2026-11-02 那次崩溃）。
+        // 正确做法是复用同一个实例：`set_entrance` 会递增 entrance_generation，
+        // 入场动画因此重播；`open_bvid` 负责换源（内部会先补上一条的观看上报）。
+        if self.playing.is_none() {
+            self.ensure_player(cx);
+        } else {
+            self.close_player_requested = false;
+            self.player_page_hidden = false;
+        }
         if let Some(player) = self.playing.clone() {
             let _ = player.update(cx, |view, cx| view.set_entrance(source, cx));
             let _ = player.update(cx, |view, cx| view.open_bvid(bvid, cx));
@@ -930,6 +989,8 @@ impl AppRoot {
             self.up_profile = None;
         }
         self.search.open = false;
+        // 从播放器面板 / 卡片署名进来：浮窗压在播放器之上（否则会被视频窗口盖住）。
+        self.player_on_top = false;
         let theme = self.theme.clone();
         let viewport = window.viewport_size();
         let view = cx.new(|cx| {
@@ -937,6 +998,7 @@ impl AppRoot {
         });
         let root = cx.entity().downgrade();
         let root_for_play = cx.entity().downgrade();
+        let root_for_image = cx.entity().downgrade();
         let _ = view.update(cx, |view, _| {
             view.set_close_handler(move |cx| {
                 let _ = root.update(cx, |root, cx| {
@@ -949,7 +1011,20 @@ impl AppRoot {
                     root.play_from_cover(source, bvid, window, cx);
                 });
             });
+            view.set_image_handler(move |cx, window, urls, index| {
+                let _ = root_for_image.update(cx, |root, cx| {
+                    root.open_image_viewer(urls, index, window, cx);
+                });
+            });
         });
+        // 打开浮窗前清一次全局选区状态。
+        //
+        // 窗口级选区有个坑：只要某次按下之后「松开」被别处吞掉（遮挡层、
+        // 关闭按钮、`on_click` 里的 stop_propagation 都可能），
+        // `WindowSelectionState::is_selecting` 就会永久停在 true，
+        // 之后所有按下都被当成「已经在选」而跳过，正文一次也选不中。
+        // 打开浮窗属于全新一轮交互，这里直接清干净。
+        gpui::base::TextSelection::clear(window, cx);
         self.up_profile = Some(view);
         cx.notify();
     }
@@ -999,6 +1074,24 @@ impl AppRoot {
                 root.ensure_up_profile(mid, name.clone(), face.clone(), opener, window, cx);
             }))
             .into_any_element()
+    }
+
+    /// 把「打开图片预览」的回调注入 PlayerView。
+    ///
+    /// 全站只有 `AppRoot::open_image_viewer` 一份预览实现；播放器以前自己
+    /// `cx.new` 了一个 ImageViewer，同一张图在两处打开是两套缩放/切图状态。
+    pub fn install_player_image_handler(&mut self, cx: &mut Context<Self>) {
+        let Some(player) = self.playing.clone() else {
+            return;
+        };
+        let app = cx.entity().downgrade();
+        let _ = player.update(cx, |view, _| {
+            view.set_image_handler(move |cx, window, urls, index| {
+                let _ = app.update(cx, |root, cx| {
+                    root.open_image_viewer(urls, index, window, cx);
+                });
+            });
+        });
     }
 
     /// 把「打开 UP 主浮窗」的回调注入 PlayerView。
@@ -1467,6 +1560,19 @@ impl AppRoot {
         self.reset_feed_paging();
         let cookie = self.cookie();
         self.feed_generation = self.feed_generation.wrapping_add(1);
+        // 顺手预热 WBI keys：所有 wbi 接口（推荐 / 详情 / 取流 / 空间）都要它，
+        // 而它是一次 `nav`。以前第一打开播要先付这一趟（Nav 桶 1s 间隔），
+        // 表现就是「第一次播放特别慢」。这里在启动时先把缓存填上。
+        {
+            let cookie = cookie.clone();
+            std::thread::spawn(move || {
+                if let Ok(client) = yk_core::api::client::ReqwestClient::new() {
+                    if let Err(error) = yk_core::api::client::fetch_wbi_keys(&client, &cookie) {
+                        eprintln!("[wbi] 预热失败：{error}");
+                    }
+                }
+            });
+        }
         let generation = self.feed_generation;
 
         cx.spawn(async move |this, cx| {
@@ -1881,6 +1987,17 @@ impl AppRoot {
         // 滚轮 → 卡片在指针下滑动 → GPUI 连发 hover 事件。
         // 先记下滚动时间，`on_hover` 在活跃期内直接忽略，避免动画反复重置。
         self.mark_scrolling();
+        // **浮层自己滚**：指针在 UP 主浮窗 / 动态详情 / 图片查看器 / 播放器里时，
+        // 这一层不能把滚轮截走（下面会 stop_propagation 并驱动页面网格）——
+        // 否则表现为「在浮窗里滚，背后首页在滚，浮窗纹丝不动」。
+        if self.up_profile.is_some()
+            || self.dynamic_detail.is_some()
+            || self.image_viewer.is_some()
+            || self.playing.is_some()
+        {
+            self.cancel_smooth_scroll();
+            return;
+        }
         if event.delta.precise() {
             // 触控板 / 高精度滚轮是像素级增量，交给原生滚动更跟手；
             // 若平滑动画正在跑，先停掉，避免两边抢 offset。
@@ -2031,6 +2148,7 @@ impl AppRoot {
             login: None,
             account: None,
             up_profile: None,
+            player_on_top: false,
             settings: None,
             page_image_cache: None,
             active_images: Rc::new(RefCell::new(ImageResidency::default())),
@@ -2346,7 +2464,10 @@ impl Render for AppRoot {
                 |view, event: &KeyDownEvent, _window, cx| {
                     let keystroke = &event.keystroke;
                     // Esc 只关最上面一层：UP 主浮窗优先于播放器的两次 Esc 退出。
-                    if keystroke.key.eq_ignore_ascii_case("escape") && view.up_profile.is_some() {
+                    if keystroke.key.eq_ignore_ascii_case("escape")
+                        && view.up_profile.is_some()
+                        && !view.player_on_top
+                    {
                         if let Some(up) = view.up_profile.clone() {
                             let _ = up.update(cx, |view, cx| view.begin_close(cx));
                         }
@@ -2538,12 +2659,20 @@ impl Render for AppRoot {
             // ④ 播放浮窗：独立场景，整块压在页面之上。
             //    它必须挂在页面内容**之后**，且不与页面内容平铺成兄弟层。
             .children(self.gallery.clone())
-            .children(self.playing.clone())
+            // 播放器与 UP 主浮窗的上下关系按来源决定（见 `player_on_top`）：
+            // 从播放器开浮窗 → 浮窗在上；在浮窗里点封面 → 播放器在上。
+            .children(if self.player_on_top {
+                self.up_profile.clone().map(IntoElement::into_any_element)
+            } else {
+                self.playing.clone().map(IntoElement::into_any_element)
+            })
             // 动态详情浮层压在页面与播放器之上；点外部缩回原卡片。
             .children(self.dynamic_detail.clone())
-            // UP 主浮窗（层 65）：从卡片署名 / 播放器面板的 UP 主头像打开，
-            // 压在播放浮窗（60）之上，播放器继续出声。
-            .children(self.up_profile.clone())
+            .children(if self.player_on_top {
+                self.playing.clone().map(IntoElement::into_any_element)
+            } else {
+                self.up_profile.clone().map(IntoElement::into_any_element)
+            })
             // 登录卡片在播放器之上，保证登录时不会被视频窗口盖住。
             .children(self.login.clone())
             // 已登录账号面板压在页面之上；点顶栏头像打开。
