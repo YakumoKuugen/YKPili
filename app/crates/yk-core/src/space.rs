@@ -122,6 +122,8 @@ pub struct SpaceDynamic {
     pub forwards: u64,
     /// 附带视频的 bvid（非视频动态为空串）；点封面起播要用它。
     pub bvid: String,
+    /// 图文动态的图片列表（最多 9 张，非图文动态为空）。
+    pub images: Vec<String>,
     /// 附带视频的播放量（非视频动态为 0）。
     pub views: u64,
     /// 附带视频的弹幕数（非视频动态为 0）。
@@ -205,7 +207,19 @@ where
     let body = client.get(&req)?;
     let root: Value =
         serde_json::from_str(&body).map_err(|e| format!("空间资料响应解析失败：{e}"))?;
-    ensure_ok(&root, "空间资料")?;
+    // wbi 端点少一个反爬参数就整体 -352（连 jointime / top_photo 一起没有），
+    // 失败时回落到不带 wbi 的老端点——实测多数账号仍可用。
+    let root = match ensure_ok(&root, "空间资料") {
+        Ok(()) => root,
+        Err(error) => {
+            eprintln!("[space] {error}；回落 /x/space/acc/info");
+            let legacy = client.get(&bilibili::space_acc_info_legacy(mid, cookie))?;
+            let fallback: Value = serde_json::from_str(&legacy)
+                .map_err(|e| format!("空间资料(旧接口)响应解析失败：{e}"))?;
+            ensure_ok(&fallback, "空间资料(旧接口)")?;
+            fallback
+        }
+    };
     let data = data_of(&root).ok_or_else(|| "空间资料响应缺少 data".to_string())?;
     let actual_mid = {
         let parsed = num(data, "mid");
@@ -244,6 +258,17 @@ where
     let (fans, follows) = fetch_relation(client, cookie, mid);
     let (plays, likes) = fetch_upstat(client, cookie, mid);
     (fans, follows, likes, plays)
+}
+
+/// 总播放 / 获赞（`x/space/upstat`）。
+///
+/// **这是唯一能给「播放」的接口**：`card` 只带获赞，`acc/info` 只带注册时间/头图。
+/// 未登录时服务端不返回 `archive`，这里给 (0, 0)，由界面决定不显示。
+pub fn fetch_space_upstat<C>(client: &C, cookie: &str, mid: i64) -> (u64, u64)
+where
+    C: HttpClient<Error = String>,
+{
+    fetch_upstat(client, cookie, mid)
 }
 
 /// 标签与置顶；都失败时返回空。
@@ -493,16 +518,34 @@ where
     let Ok(root) = serde_json::from_str::<Value>(&body) else {
         return (0, 0);
     };
-    if code_of(&root) != 0 {
+    let code = code_of(&root);
+    if code != 0 {
+        // 别静默降级：-101 是没登录、-352 是风控，两者处理方式完全不同。
+        eprintln!(
+            "[space] upstat 失败 code={code} message={}，cookie {} 字节",
+            str_of(&root, "message"),
+            cookie.len()
+        );
         return (0, 0);
     }
     let Some(data) = data_of(&root) else {
+        eprintln!("[space] upstat 没有 data，cookie {} 字节", cookie.len());
         return (0, 0);
     };
     let plays = data
         .get("archive")
         .map(|archive| num(archive, "view"))
         .unwrap_or(0);
+    if plays == 0 {
+        let keys: Vec<&str> = data
+            .as_object()
+            .map(|object| object.keys().map(String::as_str).collect())
+            .unwrap_or_default();
+        eprintln!(
+            "[space] upstat 播放为 0（cookie {} 字节，data 字段 {keys:?}）",
+            cookie.len()
+        );
+    }
     (plays, num(data, "likes"))
 }
 
@@ -642,6 +685,40 @@ fn parse_dynamic(item: &Value) -> SpaceDynamic {
             )
         })
         .unwrap_or_default();
+    // 图片有两种来源：老图文的 `draw.items[].src`，新图文（OPUS）的
+    // `opus.pics[].url`。两个都收——只认 draw 的话，新版图文会一条图都显示不出来。
+    let mut images: Vec<String> = Vec::new();
+    if let Some(items) = major
+        .and_then(|major| major.get("draw"))
+        .and_then(|draw| draw.get("items"))
+        .and_then(Value::as_array)
+    {
+        images.extend(
+            items
+                .iter()
+                .filter_map(|item| item.get("src").and_then(Value::as_str))
+                .map(image_url),
+        );
+    }
+    if let Some(pics) = major
+        .and_then(|major| major.get("opus"))
+        .and_then(|opus| opus.get("pics"))
+        .and_then(Value::as_array)
+    {
+        images.extend(pics.iter().filter_map(|pic| {
+            pic.get("url")
+                .or_else(|| pic.get("src"))
+                .and_then(Value::as_str)
+                .map(image_url)
+        }));
+    }
+    images.retain(|url| !url.is_empty());
+    images.truncate(9);
+    // 图文动态的封面就是第一张图；老逻辑只从 draw 取，OPUS 会漏。
+    let mut cover = cover;
+    if cover.is_empty() {
+        cover = images.first().cloned().unwrap_or_default();
+    }
     SpaceDynamic {
         id: str_of(item, "id_str")
             .parse::<i64>()
@@ -658,6 +735,7 @@ fn parse_dynamic(item: &Value) -> SpaceDynamic {
         comments: dynamic_stat(modules, "comment"),
         forwards: dynamic_stat(modules, "forward"),
         bvid,
+        images,
         views,
         danmaku,
         duration_secs,
@@ -679,6 +757,8 @@ fn dynamic_kind(item: &Value) -> &'static str {
         "DYNAMIC_TYPE_AV" => "video",
         "DYNAMIC_TYPE_ARTICLE" => "article",
         "DYNAMIC_TYPE_DRAW" => "image",
+        // 新版图文：媒体在 `major.opus.pics[]`，不是 `major.draw.items[]`。
+        "DYNAMIC_TYPE_OPUS" => "image",
         "DYNAMIC_TYPE_FORWARD" => "forward",
         "DYNAMIC_TYPE_LIVE_RCMD" => "live",
         "DYNAMIC_TYPE_WORD" => "text",
@@ -913,6 +993,9 @@ mod tests {
             match req.name {
                 "user_info" => Ok(NAV.to_string()),
                 "space_acc_info" => self.profile.clone(),
+                // 老接口回落：测试里直接复用同一份 mock，
+                // 这样「wbi 失败 → 回落成功」与「两边都失败」都能覆盖。
+                "space_acc_info_legacy" => self.profile.clone(),
                 "space_arc_search" => self.videos.clone(),
                 "space_tags" => self.tags.clone(),
                 "space_upstat" => self.upstat.clone(),
@@ -1226,6 +1309,37 @@ mod tests {
         .expect("text dynamic json");
         let text = parse_dynamic(&text);
         assert_eq!((text.views, text.danmaku, text.duration_secs), (0, 0, 0));
+    }
+
+    #[test]
+    fn opus_and_draw_dynamics_carry_images() {
+        // 新版图文：媒体在 major.opus.pics[].url，且 type 是 OPUS。
+        let opus: Value = serde_json::from_str(
+            r#"{"id_str":"3001","type":"DYNAMIC_TYPE_OPUS","modules":{
+                 "module_author":{"pub_ts":1793000000},
+                 "module_dynamic":{"major":{"opus":{
+                   "summary":{"text":"两张图"},
+                   "pics":[{"url":"//i0.hdslb.com/bfs/new_dyn/a.jpg"},
+                           {"url":"//i0.hdslb.com/bfs/new_dyn/b.jpg"}]}}}}}"#,
+        )
+        .expect("opus dynamic json");
+        let opus = parse_dynamic(&opus);
+        assert_eq!(opus.kind, "image");
+        assert_eq!(opus.images.len(), 2);
+        assert!(opus.images[0].starts_with("https:"));
+        // 没有 draw 时，封面回落到第一张图。
+        assert_eq!(opus.cover, opus.images[0]);
+
+        // 老图文：draw.items[].src。
+        let draw: Value = serde_json::from_str(
+            r#"{"id_str":"3002","type":"DYNAMIC_TYPE_DRAW","modules":{
+                 "module_author":{"pub_ts":1793000000},
+                 "module_dynamic":{"major":{"draw":{"items":[{"src":"//i0.hdslb.com/x.jpg"}]}}}}}"#,
+        )
+        .expect("draw dynamic json");
+        let draw = parse_dynamic(&draw);
+        assert_eq!(draw.kind, "image");
+        assert_eq!(draw.images.len(), 1);
     }
 
     #[test]

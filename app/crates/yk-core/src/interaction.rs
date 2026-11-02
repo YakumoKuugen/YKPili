@@ -1,9 +1,9 @@
-//! 视频互动：点赞 / 投币 / 收藏 / 转发到动态。
+//! 视频互动：点赞 / 投币 / 收藏 / 转发到动态 / 发弹幕。
 //!
 //! 这一层把「互动」拆成两半：
 //! - **读**（是否已点赞 / 已投币 / 已收藏、收藏夹列表）走 GET，
 //!   用 [`crate::api::bilibili::HttpClient`] 抽象，测试里可以塞假客户端；
-//! - **写**（点赞 / 投币 / 收藏 / 转发）走 POST + `bili_jct`，
+//! - **写**（点赞 / 投币 / 收藏 / 转发 / 发弹幕）走 POST + `bili_jct`，
 //!   需要真实 HTTP 客户端，所以单独放在 [`api::client::ReqwestClient`] 上。
 //!
 //! 写操作都返回 `Result`：B 站的写接口成功时 `code == 0`，
@@ -11,7 +11,8 @@
 //! 这里把那句话原样透给界面。
 
 use crate::api::bilibili::{HttpClient, Request};
-use crate::api::client::{check_write_code, ReqwestClient};
+use crate::api::client::{check_write_code, fetch_wbi_keys, ReqwestClient};
+use crate::api::wbi;
 use serde::Deserialize;
 
 // ================= 数据模型 =================
@@ -152,6 +153,61 @@ where
         return Err(format!("读取点赞状态失败：code={code} {message}"));
     }
     Ok(parsed.get("data").and_then(|v| v.as_i64()).unwrap_or(0) == 1)
+}
+
+/// 一次拿全部互动状态：`x/web-interface/archive/relation`。
+///
+/// 以前是三个接口串行（`has/like` → `archive/coins` → `favoured`），
+/// 三个都在同一个限速桶里，等于每次开播先排三格队。
+/// 这个接口把「赞 / 币 / 藏 / 关注」一起返回，一个请求搞定。
+///
+/// 返回 `(liked, coined, favoured, followed)`；`followed` 拿不到时为 `None`
+/// （部分场景不返回 `attention`）。
+pub fn fetch_archive_relation<C>(
+    client: &C,
+    cookie: &str,
+    aid: i64,
+    bvid: &str,
+) -> Result<(bool, bool, bool, Option<bool>), String>
+where
+    C: HttpClient<Error = String>,
+{
+    let request = Request {
+        url: format!(
+            "{}/x/web-interface/archive/relation?{}",
+            crate::api::bilibili::API_BASE,
+            video_id_query(aid, bvid)
+        ),
+        cookie: cookie.to_string(),
+        name: "archive_relation",
+    };
+    let body = client.get(&request)?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("互动状态解析失败：{e}"))?;
+    let code = parsed.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    if code != 0 {
+        let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        return Err(format!("读取互动状态失败：code={code} {message}"));
+    }
+    let data = parsed.get("data");
+    // B 站这几个字段有时是 bool、有时是 0/1，统一按「真值」判断。
+    let truthy = |key: &str| -> bool {
+        data.and_then(|data| data.get(key))
+            .map(|value| match value {
+                serde_json::Value::Bool(flag) => *flag,
+                serde_json::Value::Number(number) => number.as_i64().unwrap_or(0) != 0,
+                _ => false,
+            })
+            .unwrap_or(false)
+    };
+    let followed = data
+        .and_then(|data| data.get("attention"))
+        .map(|value| match value {
+            serde_json::Value::Bool(flag) => *flag,
+            serde_json::Value::Number(number) => number.as_i64().unwrap_or(0) != 0,
+            _ => false,
+        });
+    Ok((truthy("like"), truthy("coin"), truthy("favorite"), followed))
 }
 
 /// 是否已投币。
@@ -528,6 +584,134 @@ pub fn remove_dynamic(
     check_write_code(&body, "删除动态")
 }
 
+// ================= 发弹幕 =================
+
+/// 弹幕内容的字符上限。B 站按**字符**（不是字节）计，超出回 `36702`。
+pub const MAX_DANMAKU_CHARS: usize = 100;
+
+/// 网页播放器发弹幕时带的 `web_location`（WBI 签名要把它算进去）。
+const DANMAKU_WEB_LOCATION: &str = "1315873";
+
+/// 发弹幕的表单字段（拆出来方便单测，不需要联网）。
+///
+/// 与网页播放器的请求对齐：
+/// - `type=1` 视频弹幕；`oid` 是 **cid**，不是 aid；
+/// - `progress` 是**毫秒**（`Danmaku::time` 是秒，调用方负责换算）；
+/// - `mode=1` 滚动；`pool=0` 普通池；`fontsize=25` / `color=16777215` 是默认白字；
+/// - `rnd` 是微秒时间戳：带上它发送冷却从 90s 降到 5s（文档口径）；
+/// - `bvid` 与 `oid` 一起带，服务端爱用哪个用哪个（只带 cid 会被当无效稿件）。
+pub(crate) fn danmaku_form(
+    cid: i64,
+    bvid: &str,
+    text: &str,
+    progress_ms: u64,
+    csrf: &str,
+    rnd: u64,
+) -> Vec<(&'static str, String)> {
+    let mut form: Vec<(&'static str, String)> = vec![
+        ("type", "1".to_string()),
+        ("oid", cid.to_string()),
+        ("msg", text.to_string()),
+        ("progress", progress_ms.to_string()),
+        ("color", "16777215".to_string()),
+        ("fontsize", "25".to_string()),
+        ("pool", "0".to_string()),
+        ("mode", "1".to_string()),
+        ("rnd", rnd.to_string()),
+        ("csrf", csrf.to_string()),
+    ];
+    let bvid = bvid.trim();
+    if !bvid.is_empty() {
+        form.push(("bvid", bvid.to_string()));
+    }
+    form
+}
+
+/// 发送一条视频弹幕（`/x/v2/dm/post`）。
+///
+/// 这是真正的写接口：**没有 `bili_jct` 直接失败，绝不本地回显假装成功** ——
+/// 界面上出现一条弹幕，服务端就必须真的存了一条。
+///
+/// `progress_ms` 是弹幕出现位置（毫秒）。超出视频时长会被服务端判
+/// `36714 弹幕发送时间不合法`，夹到时长内是调用方的事。
+///
+/// **WBI 签名**：文档标 `w_rid` 必要。2026-11 实测未签名也能成功，但签名是
+/// 浏览器的真实行为，风控收紧时才有退路，所以默认签；`nav` 取不到 key 时
+/// 降级成未签名请求 —— 不能让「发弹幕」被一个辅助接口拖死。
+pub fn send_danmaku(
+    client: &ReqwestClient,
+    cookie: &str,
+    csrf: &str,
+    bvid: &str,
+    cid: i64,
+    text: &str,
+    progress_ms: u64,
+) -> Result<(), String> {
+    validate_danmaku(csrf, cid, text)?;
+    let text = text.trim();
+
+    let base = format!("{}/x/v2/dm/post", crate::api::bilibili::API_BASE);
+    let params = vec![(
+        "web_location".to_string(),
+        DANMAKU_WEB_LOCATION.to_string(),
+    )];
+    let url = match fetch_wbi_keys(client, cookie) {
+        Ok((img, sub)) => wbi::signed_url(&base, &params, &img, &sub, now_secs()),
+        Err(error) => {
+            eprintln!("[danmaku] WBI key 获取失败，本次发送降级为未签名：{error}");
+            format!("{base}?web_location={DANMAKU_WEB_LOCATION}")
+        }
+    };
+
+    // 浏览器是从视频页发的；固定成首页 Referer 会被风控当成脚本（与投币同理）。
+    let referer = if bvid.trim().is_empty() {
+        "https://www.bilibili.com/".to_string()
+    } else {
+        format!("https://www.bilibili.com/video/{}/", bvid.trim())
+    };
+    let body = client.post_form_with_referer(
+        &url,
+        &danmaku_form(cid, bvid, text, progress_ms, csrf, now_micros()),
+        cookie,
+        &referer,
+    )?;
+    check_write_code(&body, "发送弹幕")
+}
+
+/// 发弹幕前的本地校验（不发请求，单测直接测它）。
+fn validate_danmaku(csrf: &str, cid: i64, text: &str) -> Result<(), String> {
+    require_csrf(csrf, "发送弹幕")?;
+    if cid <= 0 {
+        return Err("缺少视频 cid，无法发送弹幕".into());
+    }
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("弹幕内容不能为空".into());
+    }
+    // 服务端按字符数（不是字节数）算长度：100 个汉字合法，300 字节不构成超长。
+    let chars = text.chars().count();
+    if chars > MAX_DANMAKU_CHARS {
+        return Err(format!("弹幕最长 {MAX_DANMAKU_CHARS} 字，当前 {chars} 字"));
+    }
+    Ok(())
+}
+
+/// 秒级 Unix 时间戳（WBI 的 `wts`）。
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 微秒级时间戳（弹幕的 `rnd`）。
+fn now_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
+}
+
 fn require_csrf(csrf: &str, action: &str) -> Result<(), String> {
     if csrf.trim().is_empty() {
         return Err(format!("登录会话缺少 bili_jct，无法{action}"));
@@ -687,6 +871,9 @@ mod tests {
         assert!(share_to_dynamic(&client, "", "", "hi")
             .unwrap_err()
             .contains("bili_jct"));
+        assert!(send_danmaku(&client, "", "", "BV1abc", 1, "hi", 0)
+            .unwrap_err()
+            .contains("bili_jct"));
     }
 
     #[test]
@@ -793,5 +980,50 @@ mod tests {
         assert!(follow_user(&client, "", "csrf", 0, true)
             .unwrap_err()
             .contains("uid"));
+    }
+
+    #[test]
+    fn danmaku_form_matches_web_player() {
+        // 对照网页播放器的真实请求：cid 进 `oid`、progress 是毫秒、默认白字 25 号。
+        let form = danmaku_form(934_721_738, "BV14P4y1i7mb", "测试", 1_500, "csrf-token", 42);
+        assert_eq!(form_value(&form, "type"), Some("1"));
+        assert_eq!(form_value(&form, "oid"), Some("934721738"));
+        assert_eq!(form_value(&form, "msg"), Some("测试"));
+        assert_eq!(form_value(&form, "progress"), Some("1500"));
+        assert_eq!(form_value(&form, "mode"), Some("1"));
+        assert_eq!(form_value(&form, "pool"), Some("0"));
+        assert_eq!(form_value(&form, "fontsize"), Some("25"));
+        assert_eq!(form_value(&form, "color"), Some("16777215"));
+        assert_eq!(form_value(&form, "rnd"), Some("42"));
+        assert_eq!(form_value(&form, "csrf"), Some("csrf-token"));
+        assert_eq!(form_value(&form, "bvid"), Some("BV14P4y1i7mb"));
+
+        // 没有 bvid（例如只拿得到 cid 的分 P）时不发空值。
+        let form = danmaku_form(1, "  ", "x", 0, "csrf", 1);
+        assert_eq!(form_value(&form, "bvid"), None);
+    }
+
+    #[test]
+    fn send_danmaku_rejects_bad_input_before_request() {
+        // 没有 bili_jct：必须先失败，绝不本地假装成功。
+        assert!(validate_danmaku("", 1, "hi").unwrap_err().contains("bili_jct"));
+        // 没有 cid：不知道发到哪个视频。
+        assert!(validate_danmaku("csrf", 0, "hi").unwrap_err().contains("cid"));
+        // 空白内容不发。
+        assert!(validate_danmaku("csrf", 1, "   ")
+            .unwrap_err()
+            .contains("不能为空"));
+        // 超过 100 字符：服务端会回 36702，提前拦掉。
+        let long = "弹".repeat(MAX_DANMAKU_CHARS + 1);
+        assert!(validate_danmaku("csrf", 1, &long).unwrap_err().contains("100"));
+    }
+
+    #[test]
+    fn danmaku_length_counts_chars_not_bytes() {
+        // 100 个汉字 = 300 字节，但服务端按字符算，不能误判超长。
+        let text = "弹".repeat(MAX_DANMAKU_CHARS);
+        assert!(validate_danmaku("csrf", 1, &text).is_ok());
+        // 少于 100 也合法（含两侧空白，先 trim）。
+        assert!(validate_danmaku("csrf", 1, " 你好 ").is_ok());
     }
 }

@@ -76,22 +76,159 @@ impl Danmaku {
             return None;
         }
         let time: f64 = parts[0].parse().ok()?;
-        let mode = DanmakuMode::from_code(parts[1].parse().unwrap_or(1));
+        let mode: i32 = parts[1].parse().unwrap_or(1);
         let font_size: f32 = parts[2].parse().unwrap_or(25.0);
         let color_num: u32 = parts[3].parse().unwrap_or(0xFFFFFF);
+        Some(Self::from_seg_parts(time, mode, font_size, color_num, text))
+    }
+
+    /// 由「时间 + 原始字段」构造一条弹幕。
+    ///
+    /// XML（`p` 属性）与分段 protobuf（`DanmakuElem`）只是字段来源不同，
+    /// 颜色拆解与宽度估算必须完全一致，所以两条路径都走这里。
+    /// `time` 单位是秒（调用方负责把毫秒除以 1000）。
+    pub fn from_seg_parts(
+        time: f64,
+        mode: i32,
+        font_size: f32,
+        color_num: u32,
+        text: &str,
+    ) -> Self {
         let color = (
             ((color_num >> 16) & 0xFF) as u8,
             ((color_num >> 8) & 0xFF) as u8,
             (color_num & 0xFF) as u8,
         );
         let width = Self::estimate_width(text, font_size);
-        Some(Self { time, mode, font_size, color, text: text.to_string(), width })
+        Self { time, mode: DanmakuMode::from_code(mode), font_size, color, text: text.to_string(), width }
     }
 
     /// 颜色转 `0xRRGGBB`（给视图层用）。
     pub fn rgb(&self) -> u32 {
         ((self.color.0 as u32) << 16) | ((self.color.1 as u32) << 8) | self.color.2 as u32
     }
+}
+
+// ================= 分段弹幕（protobuf） =================
+
+// protobuf wire type。只有这四种会出现在 seg.so 里；
+// 3 / 4（group）是废弃语法，按「坏数据」处理即可。
+const WIRE_VARINT: u8 = 0;
+const WIRE_64BIT: u8 = 1;
+const WIRE_LEN: u8 = 2;
+const WIRE_32BIT: u8 = 5;
+
+/// 解析 `x/v2/dm/web/seg.so` 的响应体。
+///
+/// 响应是 protobuf（不是 XML，也不需要 WBI 签名）：
+///
+/// ```text
+/// message DanmakuSeg { repeated DanmakuElem elems = 1; }
+/// ```
+///
+/// 顶层逐个读 tag，只有 `field 1 / wire type 2` 才是一条 `DanmakuElem`，
+/// 其余字段按 wire type 跳过。未知字段 / 坏数据逐条跳过，不 panic、也不报错 ——
+/// 线上分段接口在片段边界偶尔会给出半截数据。
+///
+/// `DanmakuElem.progress` 是**毫秒**，这里换算成秒放进 `Danmaku::time`；
+/// 单位搞错的表现是「所有弹幕挤在开头」。
+pub fn parse_danmaku_seg(bytes: &[u8]) -> Vec<Danmaku> {
+    let mut items = Vec::new();
+    let mut pos = 0usize;
+    while let Some(tag) = read_varint(bytes, &mut pos) {
+        let field = tag >> 3;
+        let wire = (tag & 0x07) as u8;
+        if field == 1 && wire == WIRE_LEN {
+            let Some(len) = read_varint(bytes, &mut pos) else {
+                break;
+            };
+            // 长度越界说明后面已经截断：保留已解析出的部分，直接收工。
+            let Some(end) = pos.checked_add(len as usize).filter(|end| *end <= bytes.len()) else {
+                break;
+            };
+            if let Some(danmaku) = parse_seg_elem(&bytes[pos..end]) {
+                items.push(danmaku);
+            }
+            pos = end;
+        } else if !skip_field(bytes, &mut pos, wire) {
+            break;
+        }
+    }
+    items
+}
+
+/// 解析一条 `DanmakuElem`。坏数据返回 `None`（由调用方跳过这一条）。
+fn parse_seg_elem(bytes: &[u8]) -> Option<Danmaku> {
+    // 字段缺失时的默认值：B 站没给就是「滚动、25 号、白色」。
+    let mut progress = 0i32;
+    let mut mode = 1i32;
+    let mut font_size = 25.0f32;
+    let mut color = 0x00FF_FFFFu32;
+    let mut content: &[u8] = b"";
+
+    let mut pos = 0usize;
+    while let Some(tag) = read_varint(bytes, &mut pos) {
+        let field = tag >> 3;
+        let wire = (tag & 0x07) as u8;
+        match (field, wire) {
+            (2, WIRE_VARINT) => progress = read_varint(bytes, &mut pos)? as u32 as i32,
+            (3, WIRE_VARINT) => mode = read_varint(bytes, &mut pos)? as u32 as i32,
+            (4, WIRE_VARINT) => font_size = read_varint(bytes, &mut pos)? as u32 as f32,
+            (5, WIRE_VARINT) => color = read_varint(bytes, &mut pos)? as u32,
+            (7, WIRE_LEN) => {
+                let len = read_varint(bytes, &mut pos)?;
+                let end = pos.checked_add(len as usize).filter(|end| *end <= bytes.len())?;
+                content = &bytes[pos..end];
+                pos = end;
+            }
+            // id(1) / midHash(6) 等字段用不到，按 wire type 跳过。
+            _ => {
+                if !skip_field(bytes, &mut pos, wire) {
+                    return None;
+                }
+            }
+        }
+    }
+
+    let text = String::from_utf8_lossy(content);
+    Some(Danmaku::from_seg_parts(progress as f64 / 1000.0, mode, font_size, color, &text))
+}
+
+/// 读一个 varint（最多 10 字节）。越界 / 非法时返回 `None`。
+fn read_varint(bytes: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    for i in 0..10 {
+        let byte = *bytes.get(*pos)?;
+        *pos += 1;
+        value |= u64::from(byte & 0x7F) << (i * 7);
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// 按 wire type 跳过一个字段。遇到不认识的 wire type 返回 `false`。
+fn skip_field(bytes: &[u8], pos: &mut usize, wire: u8) -> bool {
+    match wire {
+        WIRE_VARINT => read_varint(bytes, pos).is_some(),
+        WIRE_64BIT => advance(bytes, pos, 8).is_some(),
+        WIRE_LEN => read_varint(bytes, pos)
+            .and_then(|len| advance(bytes, pos, len as usize))
+            .is_some(),
+        WIRE_32BIT => advance(bytes, pos, 4).is_some(),
+        _ => false,
+    }
+}
+
+/// 指针前移 `len` 字节，越界返回 `None`。
+fn advance(bytes: &[u8], pos: &mut usize, len: usize) -> Option<()> {
+    let end = pos.checked_add(len)?;
+    if end > bytes.len() {
+        return None;
+    }
+    *pos = end;
+    Some(())
 }
 
 /// 弹幕池：按时间排序的一整轨弹幕。
@@ -533,6 +670,132 @@ mod tests {
         let xml = r#"<i><d p="1,1,25,16777215,0,0,a,1,10">&lt;-- 这里 &amp; 那里--&gt;</d></i>"#;
         let set = DanmakuSet::from_xml(xml);
         assert_eq!(set.items()[0].text, "<-- 这里 & 那里-->");
+    }
+
+    // ---- 分段弹幕（手写 protobuf） ----
+
+    fn push_varint(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let byte = (value & 0x7F) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                break;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    fn push_varint_field(out: &mut Vec<u8>, field: u64, value: u64) {
+        push_varint(out, (field << 3) | u64::from(WIRE_VARINT));
+        push_varint(out, value);
+    }
+
+    fn push_bytes_field(out: &mut Vec<u8>, field: u64, data: &[u8]) {
+        push_varint(out, (field << 3) | u64::from(WIRE_LEN));
+        push_varint(out, data.len() as u64);
+        out.extend_from_slice(data);
+    }
+
+    /// 构造一条 `DanmakuElem`（含 id / midHash 这些用不到的字段）。
+    fn seg_elem(progress: u64, mode: u64, font_size: u64, color: u64, content: &str) -> Vec<u8> {
+        let mut elem = Vec::new();
+        push_varint_field(&mut elem, 1, 123_456_789);
+        push_varint_field(&mut elem, 2, progress);
+        push_varint_field(&mut elem, 3, mode);
+        push_varint_field(&mut elem, 4, font_size);
+        push_varint_field(&mut elem, 5, color);
+        push_bytes_field(&mut elem, 6, b"deadbeef");
+        push_bytes_field(&mut elem, 7, content.as_bytes());
+        elem
+    }
+
+    #[test]
+    fn seg_parses_progress_millis_and_content() {
+        let mut seg = Vec::new();
+        push_bytes_field(&mut seg, 1, &seg_elem(12_500, 1, 25, 0xFF_FFFF, "hello"));
+        push_bytes_field(&mut seg, 9, b"unknown"); // 顶层未知字段：跳过
+        push_varint_field(&mut seg, 5, 7); // 顶层未知 varint：跳过
+        push_varint(&mut seg, (6 << 3) | u64::from(WIRE_32BIT));
+        seg.extend_from_slice(&[0, 0, 0, 0]); // 未知 32bit 字段：跳过
+
+        let out = parse_danmaku_seg(&seg);
+        assert_eq!(out.len(), 1);
+        assert!(
+            (out[0].time - 12.5).abs() < 1e-9,
+            "progress 是毫秒，应换算成 12.5 秒（实际 {}）",
+            out[0].time
+        );
+        assert_eq!(out[0].text, "hello");
+        assert_eq!(out[0].mode, DanmakuMode::Scroll);
+        assert_eq!(out[0].font_size, 25.0);
+        assert_eq!(out[0].color, (255, 255, 255));
+        assert!(out[0].width > 0.0);
+    }
+
+    #[test]
+    fn seg_maps_fixed_modes_and_colors() {
+        let mut seg = Vec::new();
+        push_bytes_field(&mut seg, 1, &seg_elem(0, 5, 20, 0x00FF_00, "顶部"));
+        push_bytes_field(&mut seg, 1, &seg_elem(360_000, 4, 18, 0xFF_0000, "底部"));
+        let out = parse_danmaku_seg(&seg);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].mode, DanmakuMode::Top);
+        assert_eq!(out[0].color, (0, 255, 0));
+        assert_eq!(out[1].mode, DanmakuMode::Bottom);
+        assert_eq!(out[1].color, (255, 0, 0));
+        assert!((out[1].time - 360.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn seg_empty_input_gives_no_danmaku() {
+        assert!(parse_danmaku_seg(&[]).is_empty());
+        // 只有包装 / 未知字段、没有 elems。
+        let mut seg = Vec::new();
+        push_varint_field(&mut seg, 2, 1);
+        assert!(parse_danmaku_seg(&seg).is_empty());
+    }
+
+    #[test]
+    fn seg_truncated_data_keeps_parsed_prefix() {
+        let good = seg_elem(1_000, 1, 25, 0xFF_FFFF, "ok");
+
+        // 第二条声明 100 字节，实际只跟了 3 字节：停在第一条，不 panic。
+        let mut seg = Vec::new();
+        push_bytes_field(&mut seg, 1, &good);
+        push_varint(&mut seg, (1 << 3) | u64::from(WIRE_LEN));
+        push_varint(&mut seg, 100);
+        seg.extend_from_slice(b"abc");
+        let out = parse_danmaku_seg(&seg);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "ok");
+
+        // 单条内部字段越界：丢掉那一条，不影响前面的。
+        let mut bad_elem = Vec::new();
+        push_varint_field(&mut bad_elem, 2, 500);
+        push_varint(&mut bad_elem, (7 << 3) | u64::from(WIRE_LEN));
+        push_varint(&mut bad_elem, 50);
+        bad_elem.extend_from_slice(b"hi");
+        let mut seg = Vec::new();
+        push_bytes_field(&mut seg, 1, &good);
+        push_bytes_field(&mut seg, 1, &bad_elem);
+        let out = parse_danmaku_seg(&seg);
+        assert_eq!(out.len(), 1, "截断的条目应被丢弃");
+        assert_eq!(out[0].text, "ok");
+    }
+
+    #[test]
+    fn parse_p_and_seg_share_color_and_width() {
+        // 同一条弹幕从两条路径进来，颜色 / 宽度必须一致。
+        let from_xml = Danmaku::parse_p("12.5,1,25,16777215,0,0,abc,1", "hello").unwrap();
+        let from_seg = &parse_danmaku_seg(&{
+            let mut seg = Vec::new();
+            push_bytes_field(&mut seg, 1, &seg_elem(12_500, 1, 25, 0xFF_FFFF, "hello"));
+            seg
+        })[0];
+        assert_eq!(from_xml.color, from_seg.color);
+        assert!((from_xml.width - from_seg.width).abs() < 1e-6);
+        assert!((from_xml.time - from_seg.time).abs() < 1e-9);
     }
 
     #[test]

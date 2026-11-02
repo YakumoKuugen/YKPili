@@ -257,6 +257,21 @@ pub fn danmaku_xml(cid: i64, cookie: &str) -> Request {
     }
 }
 
+/// 分段弹幕（`/x/v2/dm/web/seg.so`）。
+///
+/// 一段 6 分钟（360 秒）：第 `index` 段覆盖 `[(index-1)*360, index*360)`，
+/// `index` 从 1 开始。响应是 protobuf，不需要 WBI 签名。
+/// `pid` 是 aid（AV 号），`oid` 是当前分 P 的 cid。
+pub fn danmaku_segment(cid: i64, aid: i64, index: u64, cookie: &str) -> Request {
+    Request {
+        url: format!(
+            "{API_BASE}/x/v2/dm/web/seg.so?type=1&oid={cid}&pid={aid}&segment_index={index}"
+        ),
+        cookie: cookie.to_string(),
+        name: "danmaku_seg",
+    }
+}
+
 // ================= 消息中心 =================
 
 /// 私信 / 会话接口的域名。互动接口仍在 `api.bilibili.com` 下。
@@ -400,8 +415,42 @@ pub fn finger_spi(cookie: &str) -> Request {
 /// UP 主空间资料（`/x/space/wbi/acc/info`，**需要** WBI 签名）。
 ///
 /// 这是空间页唯一必需的接口：昵称、头像、签名、等级、认证、会员档位都在这里。
+/// 老接口 `/x/space/acc/info`：不带 wbi，也不带 dm_img_* 反爬参数。
+///
+/// `x/space/wbi/acc/info` 少一个反爬参数就整体回 `-352`，连
+/// `jointime` / `top_photo` 都拿不到；这个老端点在多数账号上仍然可用，
+/// 所以 wbi 失败时回落到它。
+pub fn space_acc_info_legacy(mid: i64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/space/acc/info?mid={mid}"),
+        cookie: cookie.to_string(),
+        name: "space_acc_info_legacy",
+    }
+}
+
 pub fn space_acc_info(mid: i64, img_key: &str, sub_key: &str, cookie: &str, wts: u64) -> Request {
-    let params = vec![("mid".to_string(), mid.to_string())];
+    // 这组 `dm_*` 是**反爬指纹**，不是业务参数：少任何一个，wbi 端点整体回 -352，
+    // 连 `jointime` / `top_photo` 都拿不到。取值照抄 PiliPlus
+    // （`lib/http/member.dart` 的 member view 请求）：前两个用固定串即可，
+    // 后两个是 WebGL 渲染器/显卡的 base64 指纹。
+    let params = vec![
+        ("mid".to_string(), mid.to_string()),
+        ("platform".to_string(), "web".to_string()),
+        ("web_location".to_string(), "1550101".to_string()),
+        ("dm_img_list".to_string(), "[]".to_string()),
+        (
+            "dm_img_str".to_string(),
+            "V2ViR0wgMS4wIChPcGVuR0wgRVMgMi4wIENocm9taXVtKQ".to_string(),
+        ),
+        (
+            "dm_cover_img_str".to_string(),
+            "QU5HTEUgKE5WSURJQSwgTlZJRElBIEdlRm9yY2UgR1RYIDEwNjAgNkdCIERpcmVjdDNEMTEgdnNfNV8wIHBzXzVfMCwgRDNEMTEpR29vZ2xlIEluYy4gKE5WSURJQS".to_string(),
+        ),
+        (
+            "dm_img_inter".to_string(),
+            r#"{"ds":[],"wh":[0,0,0],"of":[0,0,0]}"#.to_string(),
+        ),
+    ];
     Request {
         url: wbi::signed_url(
             &format!("{API_BASE}/x/space/wbi/acc/info"),
@@ -669,6 +718,20 @@ mod tests {
 
         let cards = user_cards(&[1, 2, 3], "");
         assert!(cards.url.contains("uids=1,2,3"));
+    }
+
+    #[test]
+    fn danmaku_segment_url_uses_cid_aid_and_index() {
+        let req = danmaku_segment(12345, 67890, 3, "SESSDATA=x");
+        assert_eq!(
+            req.url,
+            "https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid=12345&pid=67890&segment_index=3"
+        );
+        assert_eq!(req.name, "danmaku_seg");
+        assert!(!req.url.contains("w_rid"), "分段弹幕不需要 WBI 签名");
+
+        let first = danmaku_segment(1, 2, 1, "");
+        assert!(first.url.contains("segment_index=1"));
     }
 
 }

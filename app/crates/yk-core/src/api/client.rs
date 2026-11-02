@@ -21,7 +21,7 @@ use crate::api::models::{
     VideoInfoResponse, VideoPlayUrlResponse, VideoTagsResponse,
 };
 use crate::api::wbi;
-use crate::danmaku::DanmakuSet;
+use crate::danmaku::{parse_danmaku_seg, Danmaku, DanmakuSet};
 use crate::device::DeviceCookies;
 use crate::dynamic::{CommentTarget, DynamicComment, DynamicItem, DynamicPage};
 use std::collections::{HashMap, HashSet};
@@ -903,6 +903,35 @@ pub fn fetch_danmaku(client: &ReqwestClient, cid: i64, cookie: &str) -> Result<D
     let bytes = client.get_bytes(&bilibili::danmaku_xml(cid, cookie))?;
     let xml = decode_danmaku_body(&bytes)?;
     Ok(DanmakuSet::from_xml(&xml))
+}
+
+/// 拉一段弹幕（6 分钟，第 `index` 段覆盖 `[(index-1)*360, index*360)`）。
+///
+/// 走 `/x/v2/dm/web/seg.so`：响应体是 protobuf，**不走** `decode_danmaku_body`
+/// 的 XML / deflate 路径，也不需要 WBI 签名。
+///
+/// 空响应 = 这一段没弹幕；404 表示已经过了最后一段。两者都返回空 Vec，
+/// 让上层可以一直翻到空段为止。
+pub fn fetch_danmaku_segment(
+    client: &ReqwestClient,
+    cookie: &str,
+    cid: i64,
+    aid: i64,
+    index: u64,
+) -> Result<Vec<Danmaku>, String> {
+    if cid <= 0 {
+        return Err("缺少 cid，无法加载弹幕".into());
+    }
+    let bytes = match client.get_bytes(&bilibili::danmaku_segment(cid, aid, index, cookie)) {
+        Ok(bytes) => bytes,
+        // 越界段 B 站可能回 404；与 0 字节同义，不算失败。
+        Err(error) if error.contains("404") => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(parse_danmaku_seg(&bytes))
 }
 
 /// 弹幕响应解压。
