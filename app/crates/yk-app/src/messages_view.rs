@@ -2536,7 +2536,8 @@ impl AppRoot {
     pub(crate) fn ensure_messages(&mut self, cx: &mut Context<Self>) {
         self.messages.focus_requested = true;
         self.refresh_unread(cx);
-        self.refresh_mutual_whitelist(false, cx);
+        // 互关名单只服务私信准入：它是一份可能分页的长列表，
+        // 打开「回复我的」时去拉它纯属浪费。等真的切到私信通道再拉。
         if self.messages.chat.is_none() {
             self.load_current_message_channel(false, cx);
         }
@@ -2555,6 +2556,7 @@ impl AppRoot {
             .dm_scroll
             .scroll_to_item(0, ScrollStrategy::Top);
         if channel == MessageChannel::Dm {
+            self.refresh_mutual_whitelist(false, cx);
             self.load_dm_conversations(false, cx);
         } else {
             self.load_inbox(channel, false, cx);

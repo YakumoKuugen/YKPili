@@ -140,6 +140,11 @@ const COMMENT_COMPOSER_LIFT_MS: u64 = 200;
 const PANEL_SCROLL_HOLD_MS: u64 = 400;
 /// 互动 toast 从弹出到开始退场的时长（含入场动画，不含退场动画）。
 const TOAST_VISIBLE_MS: u64 = 2600;
+/// 一段弹幕覆盖的时长（B 站 `seg.so` 的分段粒度是 6 分钟，改不了）。
+const DANMAKU_SEGMENT_SECS: f64 = 360.0;
+/// 提前量：播到「已加载区间」末尾前 60 秒就去拉下一段，
+/// 用户感知就是「看多少拉多少」，不会等画面到了才补。
+const DANMAKU_PREFETCH_SECS: f64 = 60.0;
 /// 互动 toast 缩放动画的起始比例：入场 88% → 100%，退场反过来。
 const TOAST_SCALE_FROM: f32 = 0.88;
 
@@ -354,6 +359,16 @@ pub struct PlayerView {
     danmaku: Vec<PlacedDanmaku>,
     /// 当前视频的全部弹幕（按时间排序），信息面板「弹幕」Tab 用它。
     danmaku_all: Vec<Danmaku>,
+    /// 已拉到的原始弹幕（按段累积），重排轨道时以它为准。
+    danmaku_source: Vec<Danmaku>,
+    danmaku_cid: i64,
+    danmaku_aid: i64,
+    /// 下一段要拉的序号（1 起；第 n 段覆盖 [(n-1)*360, n*360)）。
+    danmaku_next_segment: u64,
+    danmaku_segment_loading: bool,
+    danmaku_segment_done: bool,
+    /// 拉取失败后的退避时间，避免每帧重试。
+    danmaku_retry_at: Option<std::time::Instant>,
     /// 弹幕加载状态（换源后重置）。
     danmaku_state: DanmakuState,
     /// 弹幕请求代次：换源后旧请求的结果直接丢弃。
@@ -365,6 +380,8 @@ pub struct PlayerView {
     play_time: f64,
     /// 弹幕输入框状态（首次 render 时创建，那时才有 window）
     danmaku_input: Option<Entity<InputState>>,
+    /// 弹幕发送中：`/x/v2/dm/post` 还没回来之前不接受第二次提交。
+    danmaku_sending: bool,
     /// 输入框按了 Enter（`InputEvent::PressEnter`），下一轮 render 里发送。
     /// 订阅回调拿不到 `Window`，而清空输入框需要，所以用 defer 转一手。
     submit_requested: bool,
@@ -531,7 +548,9 @@ pub struct PlayerView {
     /// 窗口可见性状态机（失焦与不可见要分开，见 [`VisibilityGate`]）。
     visibility: VisibilityGate,
     /// 评论图片查看器（独立实体，挂在播放器最上层）。
-    image_viewer: gpui::Entity<crate::image_viewer::ImageViewer>,
+    /// 图片预览统一走 AppRoot 的 `open_image_viewer`：播放器不再持有自己的实例，
+    /// 否则同一张图在播放器里和在页面里是两套状态（缩放/切图不共享）。
+    image_handler: Option<std::rc::Rc<dyn Fn(&mut App, &mut Window, Vec<String>, usize)>>,
 }
 
 /// 进程内 `PlayerView` 实例数。
@@ -601,12 +620,20 @@ impl PlayerView {
             tab: 0,
             danmaku: Vec::new(),
             danmaku_all: Vec::new(),
+            danmaku_source: Vec::new(),
+            danmaku_cid: 0,
+            danmaku_aid: 0,
+            danmaku_next_segment: 1,
+            danmaku_segment_loading: false,
+            danmaku_segment_done: false,
+            danmaku_retry_at: None,
             danmaku_state: DanmakuState::Idle,
             danmaku_generation: 0,
             lanes: LaneAllocator::new(1280.0, 220.0),
             scroll_lanes: MAX_SCROLL_LANES,
             play_time: 0.0,
             danmaku_input: None,
+            danmaku_sending: false,
             submit_requested: false,
             input_focused: false,
             focus_handle: cx.focus_handle().tab_stop(true),
@@ -678,7 +705,7 @@ impl PlayerView {
             visibility_observed: false,
             visibility_observer: None,
             visibility: VisibilityGate::default(),
-            image_viewer: cx.new(crate::image_viewer::ImageViewer::new),
+            image_handler: None,
             state: {
                 let mut st = PlayerState::new();
                 st.duration_secs = 754.0;
@@ -760,6 +787,7 @@ impl PlayerView {
         // 弹幕跟着换源清空：旧视频的弹幕不能落在新视频的画面上。
         self.danmaku.clear();
         self.danmaku_all.clear();
+        self.danmaku_sending = false;
         self.danmaku_state = DanmakuState::Idle;
         self.danmaku_generation = self.danmaku_generation.wrapping_add(1);
         self.lanes = LaneAllocator::new(1280.0, 220.0);
@@ -846,9 +874,11 @@ impl PlayerView {
                         });
                     }
                     let source = yk_core::api::client::fetch_playback(&client, &bvid, &cookie);
-                    // 等历史查询的结果，但最多等 2 秒。
+                    // 历史查询**不能拖住起播**：它只决定「从第几秒开始」，
+                    // 拿不到就从 0 / 本地续播记录开始。以前这里等 2 秒，
+                    // 相当于每次开播都先站 2 秒——这是我们比别家慢的主因。
                     let remote_progress = history_rx
-                        .recv_timeout(std::time::Duration::from_secs(2))
+                        .recv_timeout(std::time::Duration::from_millis(250))
                         .ok()
                         .flatten();
                     (source, remote_progress)
@@ -886,7 +916,7 @@ impl PlayerView {
                         view.begin_history_report(aid, bvid.clone(), cid, start);
                         // 标签 / 评论 / 弹幕不阻塞起播：源挂上之后再拉，回来一轮重绘。
                         view.spawn_video_meta(aid, bvid.clone(), cx);
-                        view.spawn_danmaku(cid, cx);
+                        view.spawn_danmaku(cid, aid, cx);
                         // 互动状态（已点赞 / 已投币 / 已收藏）也放后台：按钮高亮晚一拍无妨。
                         view.spawn_interaction_state(aid, bvid, cx);
                         // 关注状态与粉丝数：同样是「先出画面，按钮稍后点亮」。
@@ -982,26 +1012,29 @@ impl PlayerView {
                 .spawn(async move {
                     let client = yk_core::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
-                    let liked = yk_core::interaction::fetch_liked(&client, &cookie, aid, &bvid)
-                        .unwrap_or(false);
-                    let coined = yk_core::interaction::fetch_coined(&client, &cookie, aid, &bvid)
-                        .unwrap_or(false);
-                    let favoured = if aid > 0 {
-                        yk_core::interaction::fetch_favoured(&client, &cookie, aid).unwrap_or(false)
-                    } else {
-                        false
-                    };
-                    Ok::<_, String>((liked, coined, favoured))
+                    // 一个请求拿「赞 / 币 / 藏 / 关注」：
+                    // 以前这三个状态是三个接口串行，等于每次开播多排两格队。
+                    let (liked, coined, favoured, followed) =
+                        yk_core::interaction::fetch_archive_relation(
+                            &client, &cookie, aid, &bvid,
+                        )
+                        .unwrap_or((false, false, false, None));
+                    Ok::<_, String>((liked, coined, favoured, followed))
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 if view.interaction_generation != generation {
                     return;
                 }
-                if let Ok((liked, coined, favoured)) = result {
+                if let Ok((liked, coined, favoured, followed)) = result {
                     view.interaction.liked = liked;
                     view.interaction.coined = coined;
                     view.interaction.favoured = favoured;
+                    // 关注态就靠这一次请求定：`attention` 回来了就是权威值。
+                    if let Some(followed) = followed {
+                        view.followed = followed;
+                        view.follow_known = true;
+                    }
                     cx.notify();
                 }
             });
@@ -1020,7 +1053,6 @@ impl PlayerView {
             return;
         }
         let cookie = current_session_cookie();
-        let signed_in = !cookie.trim().is_empty();
         self.follow_generation = self.follow_generation.wrapping_add(1);
         let generation = self.follow_generation;
         cx.spawn(async move |this, cx| {
@@ -1029,23 +1061,10 @@ impl PlayerView {
                 .spawn(async move {
                     let client = yk_core::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
-                    let followed = if signed_in {
-                        match yk_core::api::client::fetch_followed(&client, &cookie, owner_mid) {
-                            Ok(followed) => {
-                                eprintln!(
-                                    "[follow] 关注状态：mid={owner_mid} followed={followed}"
-                                );
-                                Some(followed)
-                            }
-                            Err(error) => {
-                                // 失败不能静默：日志里要能看出是没登录、还是被风控。
-                                eprintln!("[follow] 关注状态读取失败：{error}");
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
+                    // 关注状态不再单独发 `x/relation?fid`：同一次开播的
+                    // `archive/relation` 已经把 `attention` 带回来了。
+                    // 这里只补粉丝数（那是另一个接口的字段）。
+                    let followed: Option<bool> = None;
                     let fans = match yk_core::api::client::fetch_relation_stat(
                         &client, &cookie, owner_mid,
                     ) {
@@ -1716,40 +1735,89 @@ impl PlayerView {
     ///
     /// 与标签 / 评论分开请求：弹幕和评论互不阻塞，谁先回来谁先渲染。
     /// 换源时 `danmaku_generation` 已经 +1，旧响应回来直接丢弃。
-    fn spawn_danmaku(&mut self, cid: i64, cx: &mut Context<Self>) {
+    /// 起播时先把弹幕状态复位，然后拉**第一段**（6 分钟）。
+    ///
+    /// 整包拉 `x/v1/dm/list.so` 是几 MB 的 deflate XML，等于每次开播都为
+    /// 「可能只看了三十秒」付全片成本；改成按段取，看多少拉多少。
+    fn spawn_danmaku(&mut self, cid: i64, aid: i64, cx: &mut Context<Self>) {
         self.danmaku_generation = self.danmaku_generation.wrapping_add(1);
-        let generation = self.danmaku_generation;
+        self.danmaku_source.clear();
+        self.danmaku_all.clear();
+        self.danmaku.clear();
+        self.danmaku_cid = cid;
+        self.danmaku_aid = aid;
+        self.danmaku_next_segment = 1;
+        self.danmaku_segment_loading = false;
+        self.danmaku_retry_at = None;
         if cid <= 0 {
+            self.danmaku_segment_done = true;
             self.danmaku_state = DanmakuState::Ready;
             cx.notify();
             return;
         }
+        self.danmaku_segment_done = false;
         self.danmaku_state = DanmakuState::Loading;
-        let cookie = current_session_cookie();
         cx.notify();
+        self.load_danmaku_segment(cx);
+    }
+
+    /// 拉下一段弹幕并追加。空段 = 到头了（第一段就空 = 这个视频没有弹幕）。
+    fn load_danmaku_segment(&mut self, cx: &mut Context<Self>) {
+        if self.danmaku_segment_loading || self.danmaku_segment_done || self.danmaku_cid <= 0 {
+            return;
+        }
+        if let Some(at) = self.danmaku_retry_at {
+            if at > std::time::Instant::now() {
+                return;
+            }
+        }
+        let index = self.danmaku_next_segment;
+        let (cid, aid) = (self.danmaku_cid, self.danmaku_aid);
+        let generation = self.danmaku_generation;
+        let cookie = current_session_cookie();
+        self.danmaku_segment_loading = true;
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
                     let client = yk_core::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
-                    yk_core::api::client::fetch_danmaku(&client, cid, &cookie)
+                    yk_core::api::client::fetch_danmaku_segment(
+                        &client, &cookie, cid, aid, index,
+                    )
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 if view.danmaku_generation != generation {
                     return;
                 }
+                view.danmaku_segment_loading = false;
                 match result {
-                    Ok(set) => {
-                        let count = set.len();
-                        view.install_danmaku(set);
-                        view.danmaku_state = DanmakuState::Ready;
-                        eprintln!("[danmaku] cid={cid} 已加载 {count} 条真实弹幕");
+                    Ok(items) => {
+                        view.danmaku_retry_at = None;
+                        if items.is_empty() {
+                            // 没有这一段 = 播到结尾了。
+                            view.danmaku_segment_done = true;
+                            view.danmaku_state = DanmakuState::Ready;
+                        } else {
+                            view.danmaku_source.extend(items);
+                            view.danmaku_source.sort_by(|a, b| {
+                                a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            view.danmaku_next_segment = index + 1;
+                            view.danmaku_state = DanmakuState::Ready;
+                            let all = view.danmaku_source.clone();
+                            view.layout_danmaku(all);
+                        }
                     }
                     Err(error) => {
-                        eprintln!("[danmaku] cid={cid} 弹幕加载失败：{error}");
-                        view.danmaku_state = DanmakuState::Error(error);
+                        // 失败不封顶：5 秒后再试，别在计数帧里死循环。
+                        eprintln!("[danmaku] 第 {index} 段加载失败：{error}");
+                        view.danmaku_retry_at =
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+                        if index == 1 {
+                            view.danmaku_state = DanmakuState::Ready;
+                        }
                     }
                 }
                 cx.notify();
@@ -1758,10 +1826,18 @@ impl PlayerView {
         .detach();
     }
 
-    /// 把拉回来的弹幕排到屏幕上：滚动分轨道，顶部 / 底部各分固定槽位。
-    ///
-    /// 轨道一次排完（播放时只按时间取位置），这样 seek 到任意位置都能直接算；
-    /// 同一时刻并发太多时只让前 `MAX_SCROLL_LANES` 条上屏，其余保留在列表里。
+    /// 播到「已加载区间」末尾前 60 秒就预取下一段。
+    fn ensure_danmaku_ahead(&mut self, cx: &mut Context<Self>) {
+        if self.danmaku_segment_done || self.danmaku_cid <= 0 {
+            return;
+        }
+        let loaded_until = self.danmaku_next_segment.saturating_sub(1) as f64
+            * DANMAKU_SEGMENT_SECS;
+        if self.play_time + DANMAKU_PREFETCH_SECS >= loaded_until {
+            self.load_danmaku_segment(cx);
+        }
+    }
+
     fn install_danmaku(&mut self, set: DanmakuSet) {
         self.layout_danmaku(set.items().to_vec());
     }
@@ -2469,6 +2545,13 @@ impl PlayerView {
                 .collect();
         }
         self
+    }
+
+    pub fn set_image_handler(
+        &mut self,
+        handler: impl Fn(&mut App, &mut Window, Vec<String>, usize) + 'static,
+    ) {
+        self.image_handler = Some(std::rc::Rc::new(handler));
     }
 
     pub fn set_close_handler(&mut self, handler: impl Fn(&mut App, bool) + 'static) {
@@ -3342,6 +3425,7 @@ impl Render for PlayerView {
                                     if !view.scrubbing && !settling {
                                         view.play_time = t;
                                         view.state.position_secs = t;
+                                        view.ensure_danmaku_ahead(cx);
                                         // 播放中定期把进度落盘：进程被杀 / 崩溃时
                                         // 也不至于丢掉续播位置。
                                         if t - view.last_resume_save >= 30.0 {
@@ -3357,6 +3441,7 @@ impl Render for PlayerView {
                                 Some(crate::video_worker::WorkerFrame::Position(t)) => {
                                     view.play_time = t;
                                     view.state.position_secs = t;
+                                    view.ensure_danmaku_ahead(cx);
                                     if t - view.last_resume_save >= 30.0 {
                                         view.last_resume_save = t;
                                         view.save_resume_position();
@@ -3475,6 +3560,7 @@ impl Render for PlayerView {
                     &t,
                     &self.state,
                     self.danmaku_input.as_ref(),
+                    self.danmaku_sending,
                     self.source
                         .as_ref()
                         .map(|source| source.quality.as_str())
@@ -3773,42 +3859,132 @@ impl Render for PlayerView {
             // 第一次 Esc 提示放在浮窗之外：顶栏右侧。
             .children(self.escape_hint_overlay(&t, cx))
             // 评论图片查看器：压在播放器全部内容之上（含侧栏）。
-            .child(self.image_viewer.clone())
+
     }
 }
 
 // ================= 弹幕层 =================
 
 impl PlayerView {
-    /// 当前时刻该显示的滚动弹幕。
+    /// 把输入框里的文本发到 B 站（`/x/v2/dm/post`），**成功之后才上屏**。
     ///
-    /// 每帧只为「可见窗口」内的弹幕生成元素，不是全量 —— 一场直播可能有上万条，
-    /// 全量遍历会直接掉帧。窗口前半段留 15 秒是因为一条弹幕最长要飞这么久。
-    /// 把输入框里的文本作为一条弹幕发出去（本地回显，不接服务端）。
-    fn send_danmaku(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(st) = self.danmaku_input.as_ref() else {
+    /// 以前这里是「本地回显，不接服务端」：字打出去、屏幕上飞过去，服务端一条都没有，
+    /// 重新进视频就消失。现在走真写接口：
+    /// - 未登录 / 没有 `bili_jct` → 直接提示，不发请求，也不假装成功；
+    /// - 失败（风控、等级不足、频率过快…）→ 文本留在输入框里，弹一句服务端的原话；
+    /// - 成功 → 才插进上屏列表与「弹幕」Tab，并清空输入框。
+    ///
+    /// 时间取当前播放位置（毫秒），末尾夹到时长内 —— 超出时长服务端会回
+    /// `36714 弹幕发送时间不合法`。
+    fn send_danmaku(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.danmaku_sending {
+            return;
+        }
+        let Some(st) = self.danmaku_input.clone() else {
             return;
         };
-        let text = st.read(cx).value().to_string();
-        let text = text.trim().to_string();
+        let text = st.read(cx).value().trim().to_string();
         if text.is_empty() {
             return;
         }
+        let Some(session) = current_session() else {
+            self.show_interaction_note("请先登录后再发弹幕".into(), true, cx);
+            return;
+        };
+        if session.bili_jct.trim().is_empty() {
+            self.show_interaction_note("登录会话已失效，请重新登录后再发弹幕".into(), true, cx);
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            self.show_interaction_note("视频还没加载完，稍后再发".into(), true, cx);
+            return;
+        };
+        if source.cid <= 0 {
+            self.show_interaction_note("当前视频没有弹幕区，无法发送".into(), true, cx);
+            return;
+        }
+        let chars = text.chars().count();
+        let max_chars = yk_core::interaction::MAX_DANMAKU_CHARS;
+        if chars > max_chars {
+            self.show_interaction_note(
+                format!("弹幕最长 {max_chars} 字，当前 {chars} 字"),
+                true,
+                cx,
+            );
+            return;
+        }
 
-        // 时间取当前播放位置（稍加提前量，让它马上进入视野而不是刚好在右边缘外）
-        let time = self.play_time + 0.05;
+        // 播放位置 → 毫秒；时长已知时夹到「时长 - 100ms」，避免末尾几帧被判时间不合法。
+        let raw_ms = (self.play_time.max(0.0) * 1000.0).round() as u64;
+        let progress_ms = if source.duration_secs > 0 {
+            raw_ms.min(source.duration_secs.saturating_mul(1000).saturating_sub(100))
+        } else {
+            raw_ms
+        };
+
+        let (bvid, cid) = (source.bvid.clone(), source.cid);
+        let cookie = session.cookie_header();
+        let csrf = session.bili_jct.clone();
+        self.danmaku_sending = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let text_for_send = text.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_core::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_core::interaction::send_danmaku(
+                        &client,
+                        &cookie,
+                        &csrf,
+                        &bvid,
+                        cid,
+                        &text_for_send,
+                        progress_ms,
+                    )
+                })
+                .await;
+            let _ = this.update_in(cx, move |view, window, cx| {
+                view.danmaku_sending = false;
+                match result {
+                    Ok(()) => {
+                        // 上屏时间用「此刻」而不是发送时：一次请求的往返里视频又走了几百毫秒，
+                        // 用旧时间会让刚发的弹幕直接从屏幕中间冒出来。
+                        let shown_at = view.play_time + 0.05;
+                        let width = playback_layer_width(window, view.panel_width());
+                        view.insert_sent_danmaku(shown_at, &text, width);
+                        if let Some(st) = view.danmaku_input.clone() {
+                            st.update(cx, |st, cx| st.set_value("", window, cx));
+                        }
+                        view.show_interaction_note("弹幕已发送".into(), false, cx);
+                    }
+                    Err(error) => {
+                        // 失败不清输入框：字还在，用户改一改就能重发；
+                        // 清掉反而会让人以为发出去了（这正是旧实现的毛病）。
+                        eprintln!("[danmaku] 发送失败：{error}");
+                        view.show_interaction_note(error, true, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 把刚发送成功的弹幕插进上屏列表与「弹幕」Tab 列表（都保持时间序）。
+    fn insert_sent_danmaku(&mut self, time: f64, text: &str, area_width: f32) {
         let d = Danmaku {
             time,
             mode: DanmakuMode::Scroll,
             font_size: 25.0,
             color: (0xFF, 0xFF, 0xFF),
-            width: Danmaku::estimate_width(&text, 25.0),
-            text,
+            width: Danmaku::estimate_width(text, 25.0),
+            text: text.to_string(),
         };
         // 预分配器状态停在「整段视频排完」，这里按当前时刻找空轨道；
         // 再按时间插回两个列表，保证时间序（面板列表也按时间展示）。
-        let lane =
-            self.pick_free_scroll_lane(time, playback_layer_width(window, self.panel_width()));
+        let lane = self.pick_free_scroll_lane(time, area_width);
         let placed = PlacedDanmaku {
             data: d.clone(),
             lane: DanmakuLane::Scroll(lane),
@@ -3823,14 +3999,14 @@ impl PlayerView {
             "[danmaku] 已发送，轨道 {lane}，共 {} 条",
             self.danmaku_all.len()
         );
-
-        // 清空输入框（set_value 在 gpui-base 的 InputState 上，三参）
-        if let Some(st) = self.danmaku_input.as_ref() {
-            st.update(cx, |st, cx| st.set_value("", window, cx));
-        }
-        cx.notify();
     }
+}
 
+impl PlayerView {
+    /// 当前时刻该显示的滚动弹幕。
+    ///
+    /// 每帧只为「可见窗口」内的弹幕生成元素，不是全量 —— 一场直播可能有上万条，
+    /// 全量遍历会直接掉帧。窗口前半段留 15 秒是因为一条弹幕最长要飞这么久。
     fn danmaku_layer(&self, area_width: f32) -> impl IntoElement {
         let now = self.play_time;
 
@@ -5671,15 +5847,15 @@ impl PlayerView {
                             view.show_interaction_note("已复制".into(), false, cx);
                         });
                     });
-                    let viewer = self.image_viewer.clone();
+                    let handler = self.image_handler.clone();
                     let on_image = Rc::new(
                         move |urls: Vec<String>,
                               index: usize,
                               window: &mut Window,
                               cx: &mut App| {
-                            let _ = viewer.update(cx, |viewer, cx| {
-                                viewer.open(urls, index, window, cx);
-                            });
+                            if let Some(handler) = handler.as_ref() {
+                                handler(cx, window, urls, index);
+                            }
                         },
                     ) as Rc<dyn Fn(Vec<String>, usize, &mut Window, &mut App)>;
                     list = list.child(self.comment_section.body(
@@ -6177,6 +6353,7 @@ fn control_bar(
     t: &YkTheme,
     state: &PlayerState,
     danmaku_input: Option<&Entity<InputState>>,
+    danmaku_sending: bool,
     quality: &str,
     video_left: f32,
     video_width: f32,
@@ -6299,6 +6476,8 @@ fn control_bar(
                         .items_center()
                         .rounded(px(RADIUS_SM))
                         .bg(p.theme_primary)
+                        // 发送中置灰：请求没回来前再点没有意义（send_danmaku 里也会挡）。
+                        .opacity(if danmaku_sending { 0.5 } else { 1.0 })
                         .cursor_pointer()
                         .hover(|style| style.opacity(0.9))
                         .text_size(px(FONT_SIZE_CAPTION))
@@ -6306,7 +6485,7 @@ fn control_bar(
                         .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
                             view.send_danmaku(window, cx);
                         }))
-                        .child("发送"),
+                        .child(if danmaku_sending { "发送中" } else { "发送" }),
                 ),
         )
         // ---- 下半：播放 / 时间 / 进度 / 画质 / 倍速 / 图标 50 ----

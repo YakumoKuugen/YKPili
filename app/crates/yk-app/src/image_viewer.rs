@@ -22,9 +22,14 @@ use gpui::{
     MouseButton, ObjectFit, Pixels, Point, Render, ScrollWheelEvent, Window,
 };
 
-/// 缩放上下限。1× = 适配窗口的初始尺寸。
-pub const ZOOM_MIN: f32 = 1.0;
+/// 缩放上下限。`ZOOM_FIT` = 适配窗口的初始尺寸（图片完整可见）。
+///
+/// 下限放到 0.25：以前夹在 1.0，等于**只能放大不能缩小**，
+/// 长图 / 竖图想「再小一点看全」就做不到。
+pub const ZOOM_MIN: f32 = 0.25;
 pub const ZOOM_MAX: f32 = 6.0;
+/// 适配窗口的那一档，也就是「图片完整显示」的默认倍数。
+pub const ZOOM_FIT: f32 = 1.0;
 /// 滚轮一格（约 40px）对应的缩放倍率变化。
 const ZOOM_STEP: f32 = 0.24;
 /// 复制结果在按钮上的停留时长。
@@ -44,14 +49,14 @@ pub struct ViewerTransform {
 impl ViewerTransform {
     /// 是否处于「已缩放 / 已拖动」状态（决定右下角还原按钮是否出现）。
     pub fn is_transformed(&self) -> bool {
-        self.zoom > ZOOM_MIN + 0.001
+        (self.zoom - ZOOM_FIT).abs() > 0.001
             || self.offset.x.as_f32().abs() > 0.5
             || self.offset.y.as_f32().abs() > 0.5
     }
 
     /// 回到初始大小与位置。
     pub fn reset(&mut self) {
-        self.zoom = ZOOM_MIN;
+        self.zoom = ZOOM_FIT;
         self.offset = Point::default();
     }
 
@@ -62,7 +67,7 @@ impl ViewerTransform {
         }
         self.urls = urls;
         self.index = index.min(self.urls.len() - 1);
-        self.zoom = ZOOM_MIN;
+        self.zoom = ZOOM_FIT;
         self.offset = Point::default();
     }
 
@@ -83,8 +88,8 @@ impl ViewerTransform {
             px(ay - (ay - self.offset.y.as_f32()) * ratio),
         );
         self.zoom = next;
-        if self.zoom <= ZOOM_MIN + 0.001 {
-            // 1× 没有可平移空间：直接回中，避免留下半像素偏移。
+        if self.zoom <= ZOOM_FIT + 0.001 {
+            // 不大于适配倍数时没有可平移空间：直接回中，避免留下半像素偏移。
             self.offset = Point::default();
         }
     }
@@ -99,7 +104,7 @@ impl ViewerTransform {
         } else {
             (self.index + self.urls.len() - 1) % self.urls.len()
         };
-        self.zoom = ZOOM_MIN;
+        self.zoom = ZOOM_FIT;
         self.offset = Point::default();
         true
     }
@@ -318,6 +323,15 @@ impl Render for ImageViewer {
                 if !this.dragging {
                     return;
                 }
+                // **松手判定不靠 MouseUp 事件**：拖动时图片在指针下移动，
+                // up 事件经常落到别的元素上（甚至整个窗口外），处理器收不到，
+                // `dragging` 就一直为 true —— 表现就是「松开还跟着鼠标走」。
+                // 每次移动都看「此刻左键还按着没」，没按就当场清状态。
+                if event.pressed_button != Some(MouseButton::Left) {
+                    this.dragging = false;
+                    this.drag_from = None;
+                    return;
+                }
                 if let Some(from) = this.drag_from {
                     let dx = event.position.x.as_f32() - from.x.as_f32();
                     let dy = event.position.y.as_f32() - from.y.as_f32();
@@ -370,6 +384,18 @@ impl Render for ImageViewer {
                 cx.stop_propagation();
                 cx.notify();
             }))
+            // 松手统一在遮罩上收：指针滑出图片框后，图片自己的 on_mouse_up
+            // 收不到事件，`dragging` 会一直是 true，表现为「松开还跟着鼠标走」。
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _: &gpui::MouseUpEvent, _window, cx| {
+                    if this.dragging {
+                        this.dragging = false;
+                        this.drag_from = None;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this, _: &gpui::MouseDownEvent, _window, cx| {
@@ -520,7 +546,7 @@ fn original_image_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{original_image_url, ViewerTransform, ZOOM_MAX, ZOOM_MIN};
+    use super::{original_image_url, ViewerTransform, ZOOM_FIT, ZOOM_MAX, ZOOM_MIN};
     use gpui::{point, px};
 
     #[test]
@@ -553,8 +579,15 @@ mod tests {
         for _ in 0..100 {
             state.zoom_at(-0.5, point(px(0.), px(0.)));
         }
-        assert!((state.zoom - ZOOM_MIN).abs() < 1e-4);
-        assert_eq!(state.offset, point(px(0.), px(0.)), "缩回 1× 应回中");
+        // 允许缩到适配倍数以下，夹在下限；缩到 ≤ 适配倍数时位移清空。
+        assert!((state.zoom - ZOOM_MIN).abs() < 1e-4, "zoom={}", state.zoom);
+        assert_eq!(state.offset, point(px(0.), px(0.)), "缩到适配倍数以下应回中");
+
+        // 再放大回适配档：位移仍然为 0。
+        for _ in 0..20 {
+            state.zoom_at(0.5, point(px(0.), px(0.)));
+        }
+        assert!(state.zoom > ZOOM_FIT);
 
         state.zoom_at(0.5, point(px(10.), px(10.)));
         state.reset();
@@ -592,7 +625,7 @@ mod tests {
         assert_eq!(state.index, 1, "越界 index 夹到合法范围");
 
         state.zoom_at(0.5, point(px(100.), px(0.)));
-        let ratio = state.zoom / ZOOM_MIN;
+        let ratio = state.zoom / ZOOM_FIT;
         let anchor_after = state.offset.x.as_f32() + 100.0 * ratio;
         assert!(
             (anchor_after - 100.0).abs() < 0.5,
