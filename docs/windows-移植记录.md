@@ -83,7 +83,13 @@ Windows：
   卸载表 `InstallLocation`、常见目录，最后扫描固定磁盘的
   `X:\Program Files\YKPili` / `X:\Program Files (x86)\YKPili` / `X:\YKPili`；
   找到含 `ykpili.exe` 的目录就设为默认安装目录。命令行 `/D=...` 优先级最高。
-- libmpv 固定 shinchiro `mpv-dev-x86_64-20261021`，随包附 GPL 文本与源码说明。
+- libmpv 按 `packaging/libmpv/features.toml` **裁剪编译**（`scripts/build-libmpv.sh`：
+  FFmpeg `--disable-everything` 起步，只启用播放链路用到的解码器/解复用器/滤镜/
+  wasapi + copy-back 硬解），不再塞 shinchiro 的 121 MB 全量包；随包附 GPL 文本、
+  裁剪清单与源码说明。打包脚本默认自动执行裁剪，校验不过直接终止。
+- **实测体积**：`libmpv-2.dll` 2.8 MB；FFmpeg 共享库 + libass/libplacebo 等运行时
+  DLL 合计约 41 MB（其中 libplacebo 的 shaderc 依赖占 ~10 MB）。没装 MSYS2 时
+  `scripts/install-msys2.ps1` 会自动下载解压并装依赖（`%LOCALAPPDATA%\ykpili\msys64`）。
 
 ## 6. 验收
 

@@ -26,7 +26,11 @@ cargo run --manifest-path app/Cargo.toml -p yk-app --bin ykpili
 ./scripts/package-macos.sh
 
 # 打 Windows 绿色包 + NSIS 安装包（需 Rust 1.99.1 / MSVC / Windows SDK）
+# 首次会自动准备 MSYS2 工具链并裁剪 libmpv，不需要额外参数
 powershell -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+
+# 按清单裁剪编译 libmpv（只编启用的功能；没装 MSYS2 会自动安装）
+./scripts/build-libmpv.sh --platform windows
 
 # 生成应用图标
 ./scripts/make-macos-icon.sh
