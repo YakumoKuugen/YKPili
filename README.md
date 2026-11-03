@@ -1,5 +1,7 @@
 # YKPili
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 哔哩哔哩第三方客户端，正式实现为 **Rust + GPUI**。
 
 ## 仓库结构
