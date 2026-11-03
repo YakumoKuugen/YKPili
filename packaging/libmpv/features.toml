@@ -1,0 +1,107 @@
+# libmpv 「只编译启用的功能」清单
+# =============================================================================
+# 这个文件是 libmpv 构建裁剪的唯一事实源：
+#   - scripts/libmpv_features.py 读它生成 FFmpeg configure 参数、mpv meson 参数；
+#   - scripts/build-libmpv.sh 按生成的参数编译；
+#   - scripts/package-*.ps1|sh 用它校验随包产物（指纹 + 体积预算）。
+#
+# 原则：**这里没列的能力一律不编译**（FFmpeg 侧 `--disable-everything` 起步）。
+# 加一项之前，先在应用里找到真实调用点，并把出处写进注释；否则不要加。
+#
+# 应用侧证据（2026-11 核对）：
+#   app/crates/yk-media/src/lib.rs
+#     vo=libmpv + MPV_RENDER_API_TYPE_SW（只要软件渲染，不要 GPU/GL/Vulkan）
+#     ao=wasapi（Windows）/ avfoundation（macOS）
+#     hwdec=auto-copy-safe（Windows）/ auto（macOS）
+#     http-header-fields 带 Referer，user-agent 伪装桌面浏览器
+#     loadfile + audio-add（B 站 DASH：视频 m4s + 独立音轨 m4s）
+#   app/crates/yk-app/src/video_worker/{windows,macos}.rs
+#     逐帧读回 BGRA/RGBA，不建窗口、不用 wid、不截图、不录屏
+#   docs/未完成任务清单.md（播放链路）
+#     只用 B 站 playurl 直出的 DASH/HLS 流，不接 yt-dlp、不播本地 DVD/蓝光
+# =============================================================================
+
+schema = 1
+
+[versions]
+# 固定版本，升级时同步改 packaging/windows/README.md 与本文件的指纹。
+mpv = "v0.41.0"
+ffmpeg = "8.1.1"
+
+[app]
+video_output = "libmpv"          # 只用 vo=libmpv，不编译 vo_gpu/gpu-next 的窗口后端
+render_api = "sw"                # 只用软件渲染；OpenGL/D3D11/Vulkan 渲染 API 全部关掉
+# 也不能更少：hwdec 的 copy-back 版本需要对应平台的 hwaccel 家族。
+hwdec_windows = "auto-copy-safe" # → d3d11va / dxva2 的 *-copy 变体
+hwdec_macos = "auto"             # → videotoolbox（软件回读，走 copy-back）
+# 不启用（加之前先改应用）：yt-dlp、截图、录屏、DVD/蓝光、CD、Lua/JS 脚本、C 插件、cplayer。
+disabled_by_app = [
+  "ytdl", "screenshot", "encoding", "dvd", "bluray", "cdda",
+  "lua", "javascript", "cplugins", "cplayer",
+]
+
+[common]
+# ---- 视频解码 ---------------------------------------------------------------
+# B 站 playurl 的 codecid：7=H.264、12=HEVC、13=AV1；VP9/VP8 是少数老片源的兜底。
+# 没有 MPEG-2/MPEG-4/Xvid —— B 站不产这两种，别为“可能”多带几百 KB。
+video_decoders = ["h264", "hevc", "av1", "vp9", "vp8"]
+# ---- 音频解码 ---------------------------------------------------------------
+# AAC=普通音轨，EC-3=杜比，FLAC=Hi-Res，MP3/Opus=老片与直播兜底；
+# PCM 只留 16/24/32 位小端，供少数 WAV/无损容器。
+audio_decoders = [
+  "aac", "ac3", "eac3", "flac", "mp3", "opus",
+  "pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_f32le",
+]
+# ---- 字幕 -------------------------------------------------------------------
+# 应用自己不画字幕（弹幕是自绘），但容器里可能内嵌字幕轨：
+# mpv 打开文件时会探测，缺解码器会在日志里刷错误。
+subtitle_decoders = ["ass", "srt", "subrip", "webvtt", "movtext"]
+# ---- 解析器 -----------------------------------------------------------------
+parsers = [
+  "h264", "hevc", "av1", "vp9",
+  "aac", "aac_latm", "flac", "opus", "ac3", "mpegaudio",
+]
+# ---- 解复用 -----------------------------------------------------------------
+# mov 覆盖 mp4/m4s（DASH），matroska 覆盖 mkv/webm，mpegts/live_flv/flv 覆盖直播，
+# hls 覆盖 m3u8；纯音频容器供 audio-add 的独立音轨。
+demuxers = [
+  "mov", "matroska", "mpegts", "flv", "live_flv", "hls",
+  "aac", "mp3", "flac", "ogg", "wav",
+]
+# ---- 协议 -------------------------------------------------------------------
+# 只用 HTTPS 直链 + file；crypto 是 HLS AES 解密，data 供内嵌封面/封面图。
+protocols = ["file", "http", "https", "tcp", "tls", "crypto", "data", "udp"]
+# ---- 码流过滤器 -------------------------------------------------------------
+# TS/HLS 里 H.264/HEVC 的 Annex-B 转换，以及 ADTS 音频；DASH 一般用不到，留着兜底。
+bitstream_filters = ["h264_mp4toannexb", "hevc_mp4toannexb", "aac_adtstoasc"]
+# ---- 滤镜 -------------------------------------------------------------------
+# 只留 mpv 内部会自己插的：缩放/像素格式/帧率/时间戳；音频重采样与格式转换。
+video_filters = ["scale", "format", "fps", "setpts", "null", "copy"]
+audio_filters = ["aformat", "aresample", "anull", "asetpts"]
+# 可选加速库：pkg-config 能找到才开，找不到自动退回 FFmpeg 原生解码器。
+optional_codec_libs = ["dav1d"]
+
+# =============================================================================
+# Windows（x86_64，MSYS2 UCRT64 / MinGW-w64）
+# =============================================================================
+[platform.windows]
+target_os = "mingw32"
+# 应用默认 ao=wasapi；不编 alsa/pulse/pipewire/sdl 等。
+audio_outputs = ["wasapi"]
+# hwdec=auto-copy-safe 会试 d3d11va-copy / dxva2-copy；
+# 需要 FFmpeg 侧对应的 hwaccel 家族，mpv 侧的 d3d-hwaccel 也要开。
+hwdec_families = ["d3d11va", "dxva2"]
+tls = "schannel"
+size_budget_mb = 40
+
+# =============================================================================
+# macOS（arm64/x86_64）
+# =============================================================================
+[platform.macos]
+target_os = "darwin"
+# 应用默认 ao=avfoundation（coreaudio 在部分机型初始化失败，留作 YK_AO 覆盖）。
+audio_outputs = ["avfoundation", "coreaudio"]
+# 渲染是 SW，视频帧要回读到 CPU：只用 videotoolbox 的 copy-back 路径。
+hwdec_families = ["videotoolbox"]
+tls = "securetransport"
+size_budget_mb = 30

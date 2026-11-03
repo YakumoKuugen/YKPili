@@ -479,3 +479,7 @@ __pycache__/
 /packaging/windows/vendor/
 /packaging/windows/tools/
 /packaging/windows/nsis.zip
+
+# libmpv 裁剪：本地产物与源码/构建缓存
+/packaging/macos/vendor/
+/packaging/libmpv/build/
