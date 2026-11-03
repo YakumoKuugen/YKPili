@@ -1,6 +1,8 @@
-//! 动态卡片的纯计算：文案清洗、行数估算、图文网格尺寸与卡片高度。
+//! 动态卡片：测量（文案清洗、行数估算、图文网格尺寸、卡片高度）与整卡渲染。
 //!
-//! 不接触 GPUI 元素，也不依赖宿主；渲染层与占位卡共用同一套测量。
+//! 渲染不反向依赖 app：打开播放器 / 详情 / 图片查看器都走
+//! [`DynamicCardHost`]，卡片只负责画与交出冻结的几何。
+//! 高度估算与渲染共用同一套测量，避免瀑布流「算得矮、画得高」。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -10,9 +12,21 @@ use gpui::component::Icon;
 use gpui::prelude::*;
 use gpui::*;
 use yk_domain::format;
-use yk_infra::dynamic::{DynamicImage, DynamicItem, DynamicKind, DynamicVideo};
+use yk_infra::dynamic::{DynamicImage, DynamicItem, DynamicKind};
 
 use crate::card::CardHost;
+use yk_player::CoverSource;
+
+/// 点击卡片时冻结的几何（页面坐标）。
+///
+/// `bounds` 是整张卡，`cover_bounds` 是视频缩略图；详情浮层与播放浮窗
+/// 的入场动画都从这里起飞。
+#[derive(Clone, Copy, Debug)]
+pub struct CardOrigin {
+    pub bounds: Bounds<Pixels>,
+    pub cover_bounds: Option<Bounds<Pixels>>,
+    pub root_size: Size<Pixels>,
+}
 
 /// 动态卡片需要的宿主能力（在视频卡片能力之上）。
 pub trait DynamicCardHost: CardHost {
@@ -21,6 +35,19 @@ pub trait DynamicCardHost: CardHost {
         &mut self,
         _urls: Vec<String>,
         _index: usize,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
+    /// 整卡点击：视频动态进播放器，其余进详情浮层。
+    ///
+    /// 「播放器 / 详情已经在开」这类互斥由宿主自己判定；卡片只负责把
+    /// 冻结的几何交出去。
+    fn dynamic_open_card(
+        &mut self,
+        _item: &DynamicItem,
+        _origin: CardOrigin,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
@@ -144,16 +171,14 @@ pub fn card_height(item: &DynamicItem, width: f32) -> f32 {
     h + 10.0 + FOOTER_HEIGHT + CARD_PADDING
 }
 
-pub fn header<V: crate::card::CardHost + 'static>(
+/// 头像圆片：加载中 / 失败都保留蓝→粉渐变兜底。
+fn author_avatar(
     t: &YkTheme,
     item: &DynamicItem,
     scale_factor: f32,
     load_image: bool,
     active_images: Rc<RefCell<ImageResidency>>,
-    // 只有真实卡片能点：ghost 卡片是测量用的，不挂交互。
-    on_avatar: Option<&mut Context<V>>,
-) -> impl IntoElement {
-    let s = &t.surfaces;
+) -> AnyElement {
     let p = &t.palette;
     let face_url = if load_image {
         item.author_face_url(36.0, scale_factor)
@@ -164,49 +189,40 @@ pub fn header<V: crate::card::CardHost + 'static>(
         active_images.borrow_mut().mark(&face_url);
     }
     div()
+        .relative()
+        .w(px(36.))
+        .h(px(36.))
+        .rounded_full()
+        .overflow_hidden()
+        .flex_shrink_0()
+        .bg(linear_gradient(
+            135.,
+            linear_color_stop(p.bili_blue, 0.),
+            linear_color_stop(p.bili_pink, 1.),
+        ))
+        .when(!face_url.is_empty(), |el| {
+            el.child(
+                img(ImageSource::from(face_url.clone()))
+                    .absolute()
+                    .inset_0()
+                    .w_full()
+                    .h_full()
+                    .object_fit(ObjectFit::Cover),
+            )
+        })
+        .into_any_element()
+}
+
+/// 头部一行：头像 + 昵称 / 时间 + 更多。真实卡与占位卡共用。
+fn header_row(t: &YkTheme, item: &DynamicItem, avatar: AnyElement) -> AnyElement {
+    let s = &t.surfaces;
+    div()
         .flex()
         .items_start()
         .gap(px(SPACE_2))
         .h(px(HEADER_HEIGHT))
         .w_full()
-        .child({
-            // 「正在关注」的卡片也点头像进空间：和首页卡片署名的行为保持一致。
-            let avatar = div()
-                .relative()
-                .w(px(36.))
-                .h(px(36.))
-                .rounded_full()
-                .overflow_hidden()
-                .flex_shrink_0()
-                .bg(linear_gradient(
-                    135.,
-                    linear_color_stop(p.bili_blue, 0.),
-                    linear_color_stop(p.bili_pink, 1.),
-                ))
-                .when(!face_url.is_empty(), |el| {
-                    el.child(
-                        img(ImageSource::from(face_url.clone()))
-                            .absolute()
-                            .inset_0()
-                            .w_full()
-                            .h_full()
-                            .object_fit(ObjectFit::Cover),
-                    )
-                })
-                .into_any_element();
-            match on_avatar {
-                Some(cx) => V::card_up_avatar(
-                    SharedString::from(format!("following-up-{}", item.index)),
-                    item.author.mid,
-                    item.author.name.clone(),
-                    item.author.face.clone(),
-                    36.0,
-                    avatar,
-                    cx,
-                ),
-                None => avatar,
-            }
-        })
+        .child(avatar)
         .child(
             div()
                 .flex_1()
@@ -242,6 +258,33 @@ pub fn header<V: crate::card::CardHost + 'static>(
                 .text_color(s.text_quaternary)
                 .child(Icon::new(IconName::Ellipsis).size(px(ICON_SIZE_SM))),
         )
+        .into_any_element()
+}
+
+/// 卡片头部：`on_avatar` 为 `None` 时不挂交互（占位卡）。
+pub fn header<V: crate::card::CardHost + 'static>(
+    t: &YkTheme,
+    item: &DynamicItem,
+    scale_factor: f32,
+    load_image: bool,
+    active_images: Rc<RefCell<ImageResidency>>,
+    on_avatar: Option<&mut Context<V>>,
+) -> impl IntoElement {
+    let avatar = author_avatar(t, item, scale_factor, load_image, active_images);
+    let avatar = match on_avatar {
+        // 「正在关注」的卡片也点头像进空间：和首页卡片署名的行为保持一致。
+        Some(cx) => V::card_up_avatar(
+            SharedString::from(format!("following-up-{}", item.index)),
+            item.author.mid,
+            item.author.name.clone(),
+            item.author.face.clone(),
+            36.0,
+            avatar,
+            cx,
+        ),
+        None => avatar,
+    };
+    header_row(t, item, avatar)
 }
 
 pub fn image_grid<V: crate::dynamic_card::DynamicCardHost + 'static>(
@@ -434,4 +477,568 @@ pub fn video_block(
                         .child(format!("播放 {}", format::count(video.play_count))),
                 ),
         )
+}
+
+// ================= 整卡 =================
+
+/// 引用原动态的引用块（转发动态）。
+fn quote_block(t: &YkTheme, origin: &DynamicItem) -> AnyElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    let text = {
+        let raw = if let Some(video) = origin.video.as_ref() {
+            format!("视频：{}", video.title)
+        } else if !origin.text.trim().is_empty() {
+            origin.text.clone()
+        } else if !origin.title.trim().is_empty() {
+            origin.title.clone()
+        } else if !origin.images.is_empty() {
+            format!("[图片动态 · {} 张图]", origin.images.len())
+        } else {
+            "原动态".to_string()
+        };
+        card_text(&raw)
+    };
+    div()
+        .mt(px(8.))
+        .p(px(10.))
+        .rounded(px(RADIUS_LG))
+        .bg(s.fill_1)
+        .border_1()
+        .border_color(s.border_subtle)
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .text_size(px(FONT_SIZE_MICRO))
+                .text_color(p.theme_primary)
+                .child("@")
+                .child(origin.author_name().to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(FONT_SIZE_CAPTION))
+                .line_height(px(18.))
+                .text_color(s.text_secondary)
+                .line_clamp(2)
+                .child(text),
+        )
+        .into_any_element()
+}
+
+/// 外链卡：封面 + 标题 + 「查看详情 ›」。
+fn link_block(
+    t: &YkTheme,
+    link: &yk_infra::dynamic::DynamicLink,
+    inner: f32,
+    scale_factor: f32,
+    load_image: bool,
+    active_images: Rc<RefCell<ImageResidency>>,
+) -> AnyElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    let cover_w = (inner * 0.44).max(110.0);
+    let cover_url = link.cover_url(cover_w, scale_factor);
+    let mut cover = div()
+        .relative()
+        .w(px(cover_w))
+        .h(px(96.))
+        .flex_shrink_0()
+        .rounded(px(RADIUS_LG))
+        .overflow_hidden()
+        .bg(s.fill_3);
+    if load_image && !cover_url.is_empty() {
+        active_images.borrow_mut().mark(&cover_url);
+        cover = cover.child(
+            img(ImageSource::from(cover_url.clone()))
+                .absolute()
+                .inset_0()
+                .w_full()
+                .h_full()
+                .object_fit(ObjectFit::Cover),
+        );
+    }
+    div()
+        .mt(px(8.))
+        .flex()
+        .items_start()
+        .gap(px(SPACE_3))
+        .w_full()
+        .child(cover)
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(SPACE_1))
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CONTROL))
+                        .line_height(px(LINE_HEIGHT_CONTROL))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(s.text_primary)
+                        .line_clamp(3)
+                        .child(card_text(&link.title)),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(p.theme_primary)
+                        .child("查看详情 ›"),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 底部操作行的一格：图标 + 计数。
+///
+/// 卡片只做浏览入口，动作属于详情页；这里拦住冒泡即可。
+fn card_action<V: DynamicCardHost + 'static>(
+    t: &YkTheme,
+    idx: usize,
+    kind: &'static str,
+    icon: IconName,
+    count: u64,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let s = &t.surfaces;
+    let color = s.text_quaternary;
+    div()
+        .id((kind, idx))
+        .flex_1()
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.))
+        .rounded(px(RADIUS_HALF))
+        .text_size(px(FONT_SIZE_MICRO))
+        .text_color(color)
+        .cursor_pointer()
+        .hover(|style| style.bg(s.fill_1).text_color(s.text_secondary))
+        .child(Icon::new(icon).size(px(14.)).text_color(color))
+        .child(format::count(count))
+        .on_click(cx.listener(move |_this, _: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+        }))
+        .into_any_element()
+}
+
+/// 动态整卡：头部 + 标题 / 正文 + 媒体 + 操作行。
+///
+/// 卡片是「进播放器 / 进详情」的唯一入口，具体去哪儿由宿主决定
+/// （`DynamicCardHost::dynamic_open_card`）；卡片只负责冻结几何。
+pub fn card<V: DynamicCardHost + 'static>(
+    t: &YkTheme,
+    item: &DynamicItem,
+    width: f32,
+    height: f32,
+    scale_factor: f32,
+    load_images: bool,
+    active_images: Rc<RefCell<ImageResidency>>,
+    root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    cx: &mut Context<V>,
+) -> impl IntoElement {
+    let s = &t.surfaces;
+    let inner = width - CARD_PADDING * 2.0;
+    let card_bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+    let cover_bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+
+    let idx = item.index;
+    let item_for_click = item.clone();
+    let card_bounds_for_click = card_bounds.clone();
+    let cover_bounds_for_click = cover_bounds.clone();
+    let root_for_click = root_bounds.clone();
+
+    // 「打开详情 / 视频」的唯一实现：整卡点击与文本区抬起兜底共用。
+    let open_card = {
+        let item = item_for_click.clone();
+        let card_bounds = card_bounds_for_click.clone();
+        let cover_bounds = cover_bounds_for_click.clone();
+        let root = root_for_click.clone();
+        move |this: &mut V, window: &mut Window, cx: &mut Context<V>| {
+            let origin = CardOrigin {
+                bounds: card_bounds.get().unwrap_or_else(|| Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(width), px(height)),
+                }),
+                cover_bounds: cover_bounds.get(),
+                root_size: root
+                    .get()
+                    .map(|b| b.size)
+                    .unwrap_or_else(|| size(px(1280.), px(820.))),
+            };
+            this.dynamic_open_card(&item, origin, window, cx);
+            window.refresh();
+        }
+    };
+
+    let mut body = div().flex().flex_col().w(px(inner)).child(header::<V>(
+        t,
+        item,
+        scale_factor,
+        load_images,
+        active_images.clone(),
+        Some(cx),
+    ));
+
+    let card_title = card_text(&item.title);
+    let card_body_text = card_text(&item.text);
+
+    // 卡片只做摘要浏览：**不接入选区**。卡片本身是点击进详情的入口，
+    // 如果文字能拖动选中，按下会被选区层吞掉，还会在瀑布流里出现
+    // 跨卡片的选区；复制统一放到详情浮层（`DynamicDetailView` 的右键菜单）。
+    if !card_title.is_empty() {
+        body = body.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(FONT_SIZE_BODY))
+                .line_height(px(TITLE_LINE_HEIGHT))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(s.text_primary)
+                .line_clamp(2)
+                .child(card_title),
+        );
+    }
+
+    if !card_body_text.is_empty() {
+        let max_lines = if item.images.is_empty() && item.video.is_none() {
+            6
+        } else {
+            4
+        };
+        body = body.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(FONT_SIZE_CONTROL))
+                .line_height(px(BODY_LINE_HEIGHT))
+                .text_color(s.text_secondary)
+                .line_clamp(max_lines)
+                .child(card_body_text),
+        );
+    }
+
+    match item.kind {
+        DynamicKind::Video => {
+            if let Some(video) = item.video.as_ref() {
+                body = body.child(video_block(
+                    t,
+                    video,
+                    inner,
+                    scale_factor,
+                    load_images,
+                    active_images.clone(),
+                    cover_bounds.clone(),
+                    root_bounds.clone(),
+                ));
+            }
+        }
+        DynamicKind::Images => {
+            if !item.images.is_empty() {
+                // 卡片上的图片不做「点击放大」：整卡是进详情的入口。
+                // 放大 / 复制图片都在详情浮层里（那里再给 `Some(cx)`）。
+                body = body.child(image_grid::<V>(
+                    t,
+                    &item.images,
+                    inner,
+                    scale_factor,
+                    load_images,
+                    active_images.clone(),
+                    idx,
+                    None,
+                ));
+            }
+        }
+        DynamicKind::Forward => {
+            if let Some(origin) = item.origin.as_ref() {
+                body = body.child(quote_block(t, origin));
+            }
+        }
+        DynamicKind::Link => {
+            if let Some(link) = item.link.as_ref() {
+                body = body.child(link_block(
+                    t,
+                    link,
+                    inner,
+                    scale_factor,
+                    load_images,
+                    active_images.clone(),
+                ));
+            }
+        }
+        DynamicKind::Text => {}
+    }
+
+    body = body.child(
+        div()
+            .mt_auto()
+            .pt(px(10.))
+            .border_t_1()
+            .border_color(s.border_subtle)
+            .flex()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .child(card_action(
+                t,
+                idx,
+                "forward",
+                IconName::Share2,
+                item.stats.forward,
+                cx,
+            ))
+            .child(card_action(
+                t,
+                idx,
+                "comment",
+                IconName::MessageCircle,
+                item.stats.comment,
+                cx,
+            ))
+            .child(card_action(
+                t,
+                idx,
+                "like",
+                IconName::ThumbsUp,
+                item.stats.like,
+                cx,
+            )),
+    );
+
+    let card_bounds_for_prepaint = card_bounds.clone();
+    let root_for_prepaint = root_bounds.clone();
+    div()
+        .id(("dynamic-card", idx))
+        .relative()
+        .w(px(width))
+        .h(px(height))
+        .flex()
+        .flex_col()
+        .p(px(CARD_PADDING))
+        .rounded(px(RADIUS_XL))
+        .overflow_hidden()
+        .bg(s.surface_content)
+        .border_1()
+        .border_color(s.border_subtle)
+        .cursor_pointer()
+        .hover(move |style| {
+            style
+                .bg(s.surface_content_hover)
+                .border_color(s.border_popover)
+                .shadow(t.shadows.shadow_card_hover.clone())
+        })
+        // 卡片几何探针：动画起点用窗口坐标，点击时换算回页面坐标。
+        .child(
+            canvas(
+                move |bounds, _window, _cx| {
+                    if let Some(root) = root_for_prepaint.get() {
+                        card_bounds_for_prepaint.set(Some(Bounds {
+                            origin: point(
+                                bounds.origin.x - root.origin.x,
+                                bounds.origin.y - root.origin.y,
+                            ),
+                            size: bounds.size,
+                        }));
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(body)
+        .on_click(cx.listener({
+            let open = open_card.clone();
+            move |this, _: &ClickEvent, window, cx| open(this, window, cx)
+        }))
+}
+
+/// 占位卡没有宿主：只为复用泛型积木提供一份空实现。
+///
+/// 占位卡是纯视觉快照，不会触发任何动作，因此这里的方法保持空转。
+struct GhostHost;
+
+impl CardHost for GhostHost {
+    fn card_is_playing(&self) -> bool {
+        false
+    }
+    fn card_close_requested(&self) -> bool {
+        false
+    }
+    fn card_scroll_settling(&self) -> bool {
+        false
+    }
+    fn card_update_hover(&mut self, _idx: usize, _hovered: bool, _animate: bool) -> bool {
+        false
+    }
+    fn card_open(
+        &mut self,
+        _bvid: String,
+        _title: String,
+        _entrance: Option<CoverSource>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+    fn card_up_avatar(
+        _id: SharedString,
+        _mid: i64,
+        _name: String,
+        _face: String,
+        _size_px: f32,
+        child: AnyElement,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        child
+    }
+}
+
+impl DynamicCardHost for GhostHost {}
+
+/// 可复用的「临时卡片」。
+///
+/// 动态详情展开动画里，它作为「上一界面」的快照放在最上层：
+/// 前 30% 与真实详情页同步缩放，自身 100% → 0 淡出，详情页 0 → 100 淡入；
+/// 动画结束后调用方直接不挂它即可。
+///
+/// 结构与 feed 的卡片一致（材质 / 内边距 / 头部 / 正文 / 媒体 / 底栏），
+/// 但不带 hover、点击和任何事件，避免在动画里抢交互。
+pub fn card_ghost(
+    t: &YkTheme,
+    item: &DynamicItem,
+    width: f32,
+    height: f32,
+    scale_factor: f32,
+) -> AnyElement {
+    let s = &t.surfaces;
+    let inner = (width - CARD_PADDING * 2.0).max(1.0);
+    let active = Rc::new(RefCell::new(ImageResidency::default()));
+
+    let avatar = author_avatar(t, item, scale_factor, true, active.clone());
+    let mut body = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .child(header_row(t, item, avatar));
+
+    let title = card_text(&item.title);
+    if !title.is_empty() {
+        body = body.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(FONT_SIZE_BODY))
+                .line_height(px(TITLE_LINE_HEIGHT))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(s.text_primary)
+                .line_clamp(2)
+                .child(title),
+        );
+    }
+
+    let text = card_text(&item.text);
+    if !text.is_empty() {
+        body = body.child(
+            div()
+                .mt(px(6.))
+                .text_size(px(FONT_SIZE_CONTROL))
+                .line_height(px(BODY_LINE_HEIGHT))
+                .text_color(s.text_secondary)
+                .line_clamp(4)
+                .child(text),
+        );
+    }
+
+    match item.kind {
+        DynamicKind::Video => {
+            if let Some(video) = item.video.as_ref() {
+                body = body.child(video_block(
+                    t,
+                    video,
+                    inner,
+                    scale_factor,
+                    true,
+                    active.clone(),
+                    Rc::new(Cell::new(None)),
+                    Rc::new(Cell::new(None)),
+                ));
+            }
+        }
+        DynamicKind::Images => {
+            if !item.images.is_empty() {
+                body = body.child(image_grid::<GhostHost>(
+                    t,
+                    &item.images,
+                    inner,
+                    scale_factor,
+                    true,
+                    active.clone(),
+                    item.index,
+                    None,
+                ));
+            }
+        }
+        DynamicKind::Forward => {
+            if let Some(origin) = item.origin.as_ref() {
+                body = body.child(quote_block(t, origin));
+            }
+        }
+        DynamicKind::Link => {
+            if let Some(link) = item.link.as_ref() {
+                body = body.child(link_block(
+                    t,
+                    link,
+                    inner,
+                    scale_factor,
+                    true,
+                    active.clone(),
+                ));
+            }
+        }
+        DynamicKind::Text => {}
+    }
+
+    let stat = |icon: IconName, count: u64| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .child(Icon::new(icon).size(px(13.)).text_color(s.text_tertiary))
+            .child(format::count(count))
+    };
+    body = body.child(
+        div()
+            .mt_auto()
+            .pt(px(10.))
+            .border_t_1()
+            .border_color(s.border_subtle)
+            .flex()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .text_size(px(FONT_SIZE_CAPTION))
+            .text_color(s.text_tertiary)
+            .child(stat(IconName::Share2, item.stats.forward))
+            .child(stat(IconName::MessageCircle, item.stats.comment))
+            .child(stat(IconName::ThumbsUp, item.stats.like)),
+    );
+
+    div()
+        .w(px(width))
+        .h(px(height))
+        .flex()
+        .flex_col()
+        .p(px(CARD_PADDING))
+        .rounded(px(RADIUS_XL))
+        .overflow_hidden()
+        .bg(s.surface_content)
+        .border_1()
+        .border_color(s.border_subtle)
+        .child(body)
+        .into_any_element()
 }

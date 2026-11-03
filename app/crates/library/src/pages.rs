@@ -264,7 +264,7 @@ fn live(theme: &YkTheme) -> impl IntoElement {
 }
 
 /// ⚠️ 仅剩兜底用途：`AppRoot` 在 `content_area` 里把「正在关注」交给
-/// `dynamic_feed` 渲染真实关注流，这个分支实际不会走到；保留只是让 match 穷尽，
+/// `following` 渲染真实关注流，这个分支实际不会走到；保留只是让 match 穷尽，
 /// 不要往这里加新的假数据。
 const FOLLOWING_UPDATES: [(&str, &str, &str, &str); 5] = [
     (

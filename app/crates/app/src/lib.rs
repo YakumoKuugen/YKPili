@@ -16,15 +16,15 @@
 //! 因此这个文件里 child 的排列顺序**就是**层级契约本身，改动顺序等于改动层级。
 
 use gpui::assets::IconName;
-use gpui::component::{v_virtual_list, Icon, VirtualListScrollHandle};
+use gpui::component::VirtualListScrollHandle;
 use gpui::prelude::*;
-use gpui::{ImageSource, InteractiveElement, StatefulInteractiveElement, *};
+use gpui::{InteractiveElement, StatefulInteractiveElement, *};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
 };
-use yk_infra::api::models::{RecommendVideoItem, VideoOwner, VideoStat};
-use yk_infra::dynamic::DynamicItem;
+use yk_infra::api::models::RecommendVideoItem;
+use yk_infra::dynamic::{DynamicItem, DynamicKind};
 use yk_domain::models::CoverItem;
 use yk_infra::Feed;
 
@@ -44,6 +44,8 @@ pub use yk_library::rank as rank_view;
 pub use yk_library::up_profile;
 pub use yk_shell::{account_view, login_view};
 pub use yk_player as player;
+use crate::dynamic_view::{CardOrigin, DynamicDetailView};
+use crate::player::CoverSource;
 use yk_shell::dock::{DockItem, DockSelect};
 use yk_library::messages::MessagesHost;
 pub use yk_library::history::HistoryHost;
@@ -54,21 +56,10 @@ pub use yk_library::search::SearchHost;
 pub use yk_shell::route::Route;
 pub use yk_player::{comment_section, comment_view, video, video_worker};
 
-pub mod dynamic_feed;
 pub mod dynamic_view;
+mod mock;
 mod history_actions;
-pub mod messages_view {
-    //! 消息页的类型与渲染都来自 library；这里只保留旧模块路径。
-    pub use yk_library::messages::*;
-    pub use yk_library::messages_ui::*;
-}
-pub mod search_view {
-    //! 搜索的类型与渲染都来自 library；这里只保留旧模块路径。
-    pub use yk_library::search::*;
-    pub use yk_library::search_ui::*;
-}
 use page_image_cache::PageImageCache;
-use yk_components::status::SKELETON_PULSE_MS;
 use yk_theme::theme::*;
 
 /// 退出确认提示文案。
@@ -195,9 +186,9 @@ pub struct AppRoot {
     /// 排行榜页状态（分区、整榜数据与请求代际）。
     rank: rank_view::RankState,
     /// 搜索：顶栏输入、联想面板与结果页共享同一份状态。
-    search: search_view::SearchState,
+    search: yk_library::search::SearchState,
     /// 消息中心：四通道列表、私信会话与未读角标。
-    messages: messages_view::MessageState,
+    messages: yk_library::messages::MessageState,
     /// 启动后是否已经自动弹过一次登录；取消后不再打扰。
     login_prompted: bool,
     /// 推荐流请求代际：登录后的带 Cookie 请求必须覆盖启动时的匿名请求。
@@ -555,7 +546,7 @@ impl AppRoot {
         self.messages.dm.conversations = vec![conversation.clone()];
         self.messages.dm.loaded = true;
         self.messages.apply_whitelist();
-        let mut chat = messages_view::ChatState::new(&conversation);
+        let mut chat = yk_library::messages::ChatState::new(&conversation);
         chat.messages = messages;
         chat.loading = false;
         chat.has_more = false;
@@ -1327,7 +1318,7 @@ impl AppRoot {
                         // 仅调试构建：注入一条纯文字动态，验收「左正文右评论」分支。
                         #[cfg(debug_assertions)]
                         if std::env::var("YK_DYNAMIC_TEXT_ONLY").is_ok() {
-                            view.following.insert(0, dynamic_feed::debug_text_item(0));
+                            view.following.insert(0, debug_text_item(0));
                             for (index, item) in view.following.iter_mut().enumerate() {
                                 item.index = index;
                             }
@@ -1590,7 +1581,7 @@ impl AppRoot {
                                 }
                                 None => {
                                     eprintln!("[offline] 没有可用缓存，使用占位数据");
-                                    view.feed.load(&mock_recommend(24));
+                                    view.feed.load(&crate::mock::recommend(24));
                                     view.using_mock = true;
                                     view.offline_updated_at = None;
                                 }
@@ -2093,7 +2084,7 @@ impl AppRoot {
             root_focus_pending: false,
             feed: {
                 let mut f = Feed::new();
-                f.load(&mock_recommend(24));
+                f.load(&crate::mock::recommend(24));
                 f
             },
             playing: None,
@@ -2134,8 +2125,8 @@ impl AppRoot {
             history: history_view::HistoryState::new(),
             favorites: favorites_view::FavoritesState::new(),
             rank: rank_view::RankState::new(),
-            search: search_view::SearchState::new(),
-            messages: messages_view::MessageState::new(),
+            search: yk_library::search::SearchState::new(),
+            messages: yk_library::messages::MessageState::new(),
             login_prompted: false,
             feed_generation: 0,
             feed_page: 0,
@@ -2190,6 +2181,65 @@ impl yk_library::dynamic_card::DynamicCardHost for AppRoot {
         cx: &mut Context<Self>,
     ) {
         self.open_image_viewer(urls, index, window, cx);
+    }
+
+    fn dynamic_open_card(
+        &mut self,
+        item: &DynamicItem,
+        origin: yk_library::dynamic_card::CardOrigin,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 播放器 / 详情已经开着一层时，卡片点击直接丢弃：动画期间不允许叠新的层。
+        if self.playing.is_some() || self.dynamic_detail.is_some() || self.close_player_requested {
+            return;
+        }
+        if item.kind == yk_infra::dynamic::DynamicKind::Video {
+            self.open_dynamic_video(item, Some(origin), cx);
+        } else {
+            self.open_dynamic_detail(item, Some(origin), cx);
+        }
+        window.refresh();
+    }
+}
+
+impl yk_library::following::FollowingHost for AppRoot {
+    fn following_state(&self) -> yk_library::following::FeedState<'_> {
+        yk_library::following::FeedState {
+            items: &self.following,
+            loading: self.following_loading,
+            error: self.following_error.as_deref(),
+            loaded: self.following_loaded,
+            has_more: self.following_has_more,
+            loading_more: self.following_loading_more,
+            signed_in: self.session.is_some(),
+        }
+    }
+
+    fn following_refresh(&mut self, cx: &mut Context<Self>) {
+        self.reload_following(cx);
+    }
+
+    fn following_load_more(&mut self, cx: &mut Context<Self>) {
+        if !self.following_loading_more {
+            self.load_following_page(true, false, cx);
+        }
+    }
+
+    fn following_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.ensure_login(cx);
+    }
+}
+
+impl yk_library::home::HomeHost for AppRoot {
+    fn home_state(&self) -> yk_library::home::HomeState<'_> {
+        yk_library::home::HomeState {
+            items: self.feed.items(),
+            loading: self.feed_loading,
+            hovered: self.hovered_card,
+            leaving: self.leaving_card,
+            hover_generation: self.hover_generation,
+        }
     }
 }
 
@@ -2349,11 +2399,11 @@ impl AppRoot {
 
 
 impl yk_library::search::SearchHost for AppRoot {
-    fn search_state(&self) -> &search_view::SearchState {
+    fn search_state(&self) -> &yk_library::search::SearchState {
         &self.search
     }
 
-    fn search_state_mut(&mut self) -> &mut search_view::SearchState {
+    fn search_state_mut(&mut self) -> &mut yk_library::search::SearchState {
         &mut self.search
     }
 
@@ -2437,11 +2487,11 @@ impl yk_library::search::SearchHost for AppRoot {
 
 
 impl yk_library::messages::MessagesHost for AppRoot {
-    fn messages(&self) -> &messages_view::MessageState {
+    fn messages(&self) -> &yk_library::messages::MessageState {
         &self.messages
     }
 
-    fn messages_mut(&mut self) -> &mut messages_view::MessageState {
+    fn messages_mut(&mut self) -> &mut yk_library::messages::MessageState {
         &mut self.messages
     }
 
@@ -2493,17 +2543,7 @@ impl yk_library::messages::MessagesHost for AppRoot {
 
 
 
-    fn messages_ask_remove_chat(&mut self, cx: &mut Context<Self>) {
-        self.messages_ask_remove_chat(cx);
-    }
 
-    fn messages_send_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.messages_send_chat(window, cx);
-    }
-
-    fn messages_mark_conversation_read(&mut self, talker_id: i64, cx: &mut Context<Self>) {
-        self.messages_mark_conversation_read(talker_id, cx);
-    }
 
 
 
@@ -2629,7 +2669,7 @@ impl Render for AppRoot {
                             && view.feed_has_more
                         {
                             if let Some(bounds) = view.layout_bounds.get() {
-                                let need = home_min_items(
+                                let need = yk_library::home::min_items(
                                     bounds.size.width.as_f32(),
                                     bounds.size.height.as_f32(),
                                 );
@@ -2843,7 +2883,7 @@ impl Render for AppRoot {
                             )
                             .into_any_element(),
                         ),
-                        search_view::search_bar(t, &self.search, window, cx).into_any_element(),
+                        yk_library::search_ui::search_bar(t, &self.search, window, cx).into_any_element(),
                         window,
                         cx,
                     )).into_any_element(),
@@ -2901,7 +2941,7 @@ impl Render for AppRoot {
                             self.leaving_card,
                             self.hover_generation,
                             self.scroll_settling(),
-                            dynamic_feed::FeedState {
+                            yk_library::following::FeedState {
                                 items: &self.following,
                                 loading: self.following_loading,
                                 error: self.following_error.as_deref(),
@@ -2981,13 +3021,13 @@ impl Render for AppRoot {
                 .render(t),
             )
             // 搜索联想面板：挂在根层，天然压在内容与 Dock 之上、播放浮窗之下。
-            .children(search_view::suggest_overlay(t, &self.search, window, cx))
+            .children(yk_library::search_ui::suggest_overlay(t, &self.search, window, cx))
             // 尚未接入的动作给一个明确提示，避免「点了没反应」。
             .children(
                 self.search
                     .notice
                     .as_deref()
-                    .map(|text| search_view::notice(t, text)),
+                    .map(|text| yk_library::search_ui::notice(t, text)),
             )
             // 历史页的删除确认：盖住内容与 Dock，但仍在播放浮窗之下。
             .children(self.history.confirm.as_ref().map(|kind| {
@@ -3001,7 +3041,7 @@ impl Render for AppRoot {
             }))
             // 消息页的移除会话确认 / 轻提示。
             .children(self.messages.confirm.as_ref().map(|confirm| {
-                messages_view::confirm_overlay(
+                yk_library::messages_ui::confirm_overlay(
                     t,
                     confirm,
                     self.messages.confirm_busy,
@@ -3013,7 +3053,7 @@ impl Render for AppRoot {
                 self.messages
                     .notice
                     .as_deref()
-                    .map(|text| messages_view::notice(t, text)),
+                    .map(|text| yk_library::messages_ui::notice(t, text)),
             )
             // 刷新 / 触底加载的浮层提示
             .children(
@@ -3151,13 +3191,13 @@ fn content_area(
     history: &history_view::HistoryState,
     favorites: &favorites_view::FavoritesState,
     rank: &rank_view::RankState,
-    search: &search_view::SearchState,
-    messages: &messages_view::MessageState,
+    search: &yk_library::search::SearchState,
+    messages: &yk_library::messages::MessageState,
     hovered_card: Option<usize>,
     leaving_card: Option<usize>,
     hover_generation: u64,
     scroll_settling: bool,
-    following: dynamic_feed::FeedState<'_>,
+    following: yk_library::following::FeedState<'_>,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
     window: &Window,
@@ -3191,7 +3231,7 @@ fn content_area(
             .min_h(px(0.))
             .w_full()
             .bg(t.surfaces.bg_base)
-            .child(messages_view::page(t, messages, active_images, window, cx))
+            .child(yk_library::messages_ui::page(t, messages, active_images, window, cx))
             .into_any_element();
     }
 
@@ -3226,7 +3266,7 @@ fn content_area(
             } else {
                 0.0..window.viewport_size().height.as_f32()
             };
-            dynamic_feed::page(
+            yk_library::following::page(
                 t,
                 following,
                 visible_y,
@@ -3236,7 +3276,7 @@ fn content_area(
                 cx,
             )
         } else if kind == Route::Search {
-            search_view::page(
+            yk_library::search_ui::page(
                 t,
                 search,
                 hovered_card,
@@ -3297,208 +3337,23 @@ fn content_area(
             .into_any_element();
     }
 
-    // ---- 首页：按视口宽把卡片分组为「行」，交给 v_virtual_list ----
-    // 列数 = 可用宽度能放下几个 208 + 16 的槽位；至少 1 列。
-    // 窗口缩放时列数会变，item_sizes 每帧重算（行数很少，成本可忽略）。
-    let available = (window.viewport_size().width.as_f32() - SPACE_6 * 2.0).max(COVER_CELL_WIDTH);
-    let cols = home_columns(window.viewport_size().width.as_f32());
-    // 行高 = 卡片高 + 行间距；行内只画卡片，多出来的 16 就是行距。
-    let row_h = COVER_CELL_HEIGHT + SPACE_4;
-
-    // 首屏加载：用与真实卡片完全同几何的骨架卡，避免数据回来时网格跳动。
-    // 只用一个 repeat 动画驱动整块网格的 opacity（1 → 0.45 → 1，1.5s），
-    // 不在每张骨架卡上各排一条动画，也不引入任何额外颜色。
-    if loading && items.is_empty() {
-        let viewport_h = window.viewport_size().height.as_f32();
-        let available_h = (viewport_h - TOP_BAR_HEIGHT - SPACE_4 - DOCK_RESERVED).max(row_h);
-        let skeleton_rows = ((available_h / row_h).floor() as usize).max(2);
-        let ease = ease_standard();
-        return div()
-            .flex()
-            .flex_col()
-            .gap(px(SPACE_4))
-            .w_full()
-            .px(px(SPACE_6))
-            .pt(px(SPACE_4))
-            .pb(px(DOCK_RESERVED))
-            .children((0..skeleton_rows).map(|_| {
-                div()
-                    .flex()
-                    .justify_center()
-                    .gap(px(SPACE_4))
-                    .w_full()
-                    .h(px(COVER_CELL_HEIGHT))
-                    .children((0..cols).map(|_| skeleton_card(t)))
-            }))
-            .with_animation(
-                "home-card-skeleton-pulse",
-                Animation::new(std::time::Duration::from_millis(SKELETON_PULSE_MS)).repeat(),
-                move |el, delta| {
-                    // 三角波：0 → 0.5 → 1 对应 1 → 0.45 → 1。
-                    let phase = if delta < 0.5 {
-                        delta * 2.0
-                    } else {
-                        (1.0 - delta) * 2.0
-                    };
-                    el.opacity(1.0 - 0.55 * ease(phase))
-                },
-            )
-            .into_any_element();
-    }
-
-    let rows = items.len().div_ceil(cols);
-    let sizes = Rc::new(vec![size(px(available), px(row_h)); rows]);
-
-    // 首页的真实可视范围从滚动偏移算，而不是用虚拟列表的 overdraw 范围：
-    // 后者会多给 2 行，拿它当加载范围会让最后一行「可见但没图」。
-    let viewport_h = (window.viewport_size().height.as_f32() - TOP_BAR_HEIGHT).max(row_h);
-    let offset_y = scroll.base_handle().offset().y.as_f32();
-    let first_visible = (((-offset_y) - SPACE_4).max(0.0) / row_h).floor() as usize;
-    let last_visible = (((-offset_y) + viewport_h - SPACE_4).max(0.0) / row_h).ceil() as usize;
-    let load_start = first_visible.min(rows);
-    let load_end = (last_visible + 1).min(rows).max(load_start);
-
-    // 即使虚拟列表这一帧没有调用 render_items，也要让缓存知道当前该保留哪些图。
-    for row in load_start..load_end {
-        let start = row * cols;
-        let end = (start + cols).min(items.len());
-        for item in &items[start..end] {
-            active_images.borrow_mut().mark(&item.cover_thumb_url());
-            if !item.up_face.is_empty() {
-                active_images.borrow_mut().mark(&item.up_face);
-            }
-        }
-    }
-
-    let entity = cx.entity();
-    let theme = t.clone();
-    let active_images_for_grid = active_images.clone();
-    v_virtual_list(
-        entity,
-        "home-grid",
-        sizes,
-        move |this, visible_rows, _window, cx| {
-            visible_rows
-                .map(|row| {
-                    let start = row * cols;
-                    let all = this.feed.items();
-                    let end = (start + cols).min(all.len());
-                    // 卡片行整体居中：窗口变宽时多出来的空间均分到两侧，
-                    // 而不是全堆在右边（否则网格看起来永远偏左上）。
-                    let mut row_el = div()
-                        .flex()
-                        .justify_center()
-                        .gap(px(SPACE_4))
-                        .w_full()
-                        .h(px(COVER_CELL_HEIGHT));
-                    let hovered_idx = if this.scroll_settling() {
-                        None
-                    } else {
-                        this.hovered_card
-                    };
-                    let leaving_idx = if this.scroll_settling() {
-                        None
-                    } else {
-                        this.leaving_card
-                    };
-                    let hover_gen = this.hover_generation;
-                    let root_bounds = this.layout_bounds.clone();
-                    let load_cover = row >= load_start && row < load_end;
-                    for item in &all[start..end] {
-                        let hovered = hovered_idx == Some(item.index);
-                        let leaving = leaving_idx == Some(item.index);
-                        row_el = row_el.child(card(
-                            &theme,
-                            item,
-                            hovered,
-                            leaving,
-                            hover_gen,
-                            root_bounds.clone(),
-                            load_cover,
-                            active_images_for_grid.clone(),
-                            cx,
-                        ));
-                    }
-                    row_el
-                })
-                .collect::<Vec<_>>()
+    // ---- 首页：按视口宽切行，虚拟列表只画可见行（实现在 `yk_library::home`）----
+    yk_library::home::grid(
+        t,
+        yk_library::home::HomeState {
+            items,
+            loading,
+            hovered: hovered_card,
+            leaving: leaving_card,
+            hover_generation,
         },
+        layout_bounds,
+        active_images,
+        scroll,
+        window,
+        cx,
     )
-    .track_scroll(scroll)
-    .px(px(SPACE_6))
-    .pt(px(SPACE_4))
-    .pb(px(DOCK_RESERVED))
-    .into_any_element()
 }
-
-
-
-
-
-
-
-
-
-
-
-
-/// 首屏骨架卡：与真实卡片同几何（208×184 / 封面 192×108 / 两行标题 / 署名行）。
-///
-/// 颜色只用 `SkeletonBrush`，脉冲由父级网格统一驱动。
-fn skeleton_card(t: &YkTheme) -> impl IntoElement {
-    let brush = t.surfaces.skeleton_brush;
-    div()
-        .w(px(COVER_CELL_WIDTH))
-        .h(px(COVER_CELL_HEIGHT))
-        .flex()
-        .flex_col()
-        .p(px(SPACE_2))
-        .child(
-            div()
-                .w(px(COVER_ITEM_WIDTH))
-                .h(px(COVER_ITEM_HEIGHT))
-                .rounded(px(MEDIA_RADIUS))
-                .bg(brush),
-        )
-        .child(
-            div()
-                .mt(px(SPACE_1))
-                .h(px(LINE_HEIGHT_CONTROL * 2.))
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(
-                    div()
-                        .h(px(11.))
-                        .w(relative(0.92))
-                        .rounded(px(RADIUS_SM))
-                        .bg(brush),
-                )
-                .child(
-                    div()
-                        .h(px(11.))
-                        .w(relative(0.64))
-                        .rounded(px(RADIUS_SM))
-                        .bg(brush),
-                ),
-        )
-        .child(
-            div()
-                .mt(px(2.))
-                .h(px(18.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .child(div().w(px(18.)).h(px(18.)).rounded_full().bg(brush))
-                .child(div().h(px(11.)).flex_1().rounded(px(RADIUS_SM)).bg(brush))
-                .child(div().h(px(11.)).w(px(32.)).rounded(px(RADIUS_SM)).bg(brush)),
-        )
-}
-
-
-
-
-
 
 // ================= Dock（页面场景内浮层） =================
 
@@ -3508,32 +3363,6 @@ fn skeleton_card(t: &YkTheme) -> impl IntoElement {
 /// 播放器入场动画结束后，再延迟一点停绘背后页面。
 /// 入场动画 280ms，留 40ms 余量，避免最后一帧还在展开时页面先消失。
 const PLAYER_PAGE_HIDE_DELAY_MS: u64 = 320;
-
-/// 首页网格列数：可用宽度能放下几个「卡片 + 间距」槽位，至少 1 列。
-///
-/// 网格绘制（[`content_area`]）和「一屏需要多少张封面」的判断共用这一份几何，
-/// 避免两处公式漂移。
-fn home_columns(viewport_width: f32) -> usize {
-    let available = (viewport_width - SPACE_6 * 2.0).max(COVER_CELL_WIDTH);
-    (((available + SPACE_4) / (COVER_CELL_WIDTH + SPACE_4)).floor() as usize).max(1)
-}
-
-/// 首页填满一屏所需的最少卡片数：列数 ×（整行数 + 1 行）。
-///
-/// 推荐接口一页固定 30 条；窗口大到一页填不满时，内容高度不足 → 滚动条
-/// 的 `max_offset` 为 0 → 「触底加载」永远不触发，表现就是没有滚动条、
-/// 也拉不到更多封面。这里按视口几何算出「至少几行才超出一屏」，不够就补页。
-///
-/// 网格容器上内边距 16 + 下内边距 `DOCK_RESERVED`，滚动视口高 = 窗口高 − 顶栏；
-/// 所以内容高 `rows × row_h + 112 > 视口高` 等价于 `rows × row_h > available_h`，
-/// 即整行数 + 1 行就够了（刚好多出不到一行，保证一定滚得动）。
-fn home_min_items(viewport_width: f32, viewport_height: f32) -> usize {
-    let cols = home_columns(viewport_width);
-    let row_h = COVER_CELL_HEIGHT + SPACE_4;
-    let available_h = (viewport_height - TOP_BAR_HEIGHT - SPACE_4 - DOCK_RESERVED).max(row_h);
-    let full_rows = (available_h / row_h).floor() as usize;
-    cols * (full_rows + 1)
-}
 
 struct DockEntry {
     label: &'static str,
@@ -3571,51 +3400,137 @@ const DOCK_ENTRIES: [DockEntry; 3] = [
 // ================= 工具 =================
 
 
-/// 占位数据。真实数据在 M1 的 `CoverItem::from_recommend` 里，
-/// 外壳阶段先用与设计稿一致的样例值，避免网络依赖挡住视觉验证。
+/// 验收用：一条纯文字动态。
 ///
-/// 注意：这里刻意产出 **接口原始模型**（`RecommendVideoItem`）而不是 `CoverItem`，
-/// 让样例数据也走一遍真实的映射路径 —— 否则 `from_recommend` 丢字段的 bug
-/// 在 mock 阶段就发现不了。
-fn mock_recommend(n: usize) -> Vec<RecommendVideoItem> {
-    const TITLES: [&str; 8] = [
-        "生肉烹饪师和他的猫：一顿饭的成本到底有多少",
-        "一碗甜子的深夜食堂 · 第 12 期",
-        "班长captain 的极限运动合集",
-        "用 Rust 从零写一个视频播放器",
-        "当我把整个 B 站的热门都下载下来",
-        "三分钟看懂 GPUI 的渲染管线",
-        "这个夏天最值得去的十个地方",
-        "为什么你的代码总是越写越乱",
-    ];
-    const UPS: [&str; 4] = ["生肉烹饪师", "一碗甜子", "班长captain", "技术宅小明"];
-    const VIEWS: [u64; 6] = [124_000, 2_600, 3_000_000, 862, 112_000, 15_190];
-    const DANMAKU: [u64; 6] = [144, 0, 1_200, 3, 124, 61];
-    const DURATION: [u64; 6] = [754, 1_320, 245, 3_725, 96, 480];
-    let now = yk_infra::api::client::now_wts();
+/// 关注流里不一定随时有纯文字动态，而「只有正文 → 左正文右评论」是本次需求
+/// 的独立布局分支。`YK_DYNAMIC_TEXT_ONLY=1` 时插到列表最前面，方便截图核对。
+#[cfg(debug_assertions)]
+pub(crate) fn debug_text_item(index: usize) -> DynamicItem {
+    DynamicItem {
+        index,
+        id: "debug-word-1".to_string(),
+        kind: DynamicKind::Text,
+        author: yk_infra::dynamic::DynamicAuthor {
+            mid: 42,
+            name: "一句话的 UP 主".to_string(),
+            face: String::new(),
+        },
+        pub_ts: yk_infra::api::client::now_wts(),
+        pub_time: "刚刚".to_string(),
+        action: String::new(),
+        title: String::new(),
+        text: "今天路过一条很窄的巷子，风从两边灌进来，像有人把夏天折成了一封信。\n\n走到巷尾才发现，尽头是一棵很大的梧桐树。树叶把光筛成碎金，落在一只睡着的橘猫身上。\n\n它眯着眼看我，像在说：别急，慢慢来。".to_string(),
+        images: Vec::new(),
+        video: None,
+        link: None,
+        stats: yk_infra::dynamic::DynamicStats {
+            forward: 3,
+            comment: 12,
+            like: 128,
+        },
+        comment_target: Some(yk_infra::dynamic::CommentTarget {
+            oid: "1263000000000000000".to_string(),
+            kind: 17,
+        }),
+        origin: None,
+        placeholder_color: "#4DB6AC".to_string(),
+    }
+}
 
-    (0..n)
-        .map(|i| RecommendVideoItem {
-            id: i as i64,
-            bvid: format!("BV1xx411c7m{i}"),
-            title: TITLES[i % TITLES.len()].to_string(),
-            pic: String::new(),
-            desc: String::new(),
-            duration: DURATION[i % 6],
-            pubdate: now.saturating_sub((i as u64 % 8) * 3_600 + 1_800),
-            goto: "av".into(),
-            owner: Some(VideoOwner {
-                name: UPS[i % UPS.len()].to_string(),
-                face: String::new(),
-                ..Default::default()
-            }),
-            stat: Some(VideoStat {
-                view: VIEWS[i % 6],
-                danmaku: DANMAKU[i % 6],
-                ..Default::default()
-            }),
-        })
-        .collect()
+// ================= AppRoot 入口 =================
+
+impl AppRoot {
+    /// 打开视频动态：和首页封面卡走同一条播放器入场动画。
+    pub(crate) fn open_dynamic_video(
+        &mut self,
+        item: &DynamicItem,
+        origin: Option<CardOrigin>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(video) = item.video.as_ref() else {
+            return;
+        };
+        if video.bvid.trim().is_empty() {
+            eprintln!("[dynamic] 视频动态缺少 bvid：{}", item.id);
+            return;
+        }
+        eprintln!("[dynamic] 展开视频动态：{}（{}）", video.title, video.bvid);
+        self.ensure_player(cx);
+        if let Some(player) = self.playing.clone() {
+            if let Some(origin) = origin {
+                let bounds = origin.cover_bounds.unwrap_or(origin.bounds);
+                let source = CoverSource {
+                    bounds,
+                    root_size: origin.root_size,
+                    bvid: video.bvid.clone(),
+                    title: video.title.clone(),
+                    image_url: video.cover_url(640.0, 1.0),
+                    placeholder_color: item.placeholder_color.clone(),
+                };
+                let _ = player.update(cx, |view, cx| view.set_entrance(source, cx));
+            }
+            let _ = player.update(cx, |view, cx| view.open_bvid(video.bvid.clone(), cx));
+        }
+        cx.notify();
+    }
+
+    /// 打开图文 / 文字动态详情浮层。
+    pub(crate) fn open_dynamic_detail(
+        &mut self,
+        item: &DynamicItem,
+        origin: Option<CardOrigin>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.dynamic_detail.is_some() {
+            return;
+        }
+        eprintln!(
+            "[dynamic] 展开动态详情：{} / {} 张图",
+            item.author_name(),
+            item.images.len()
+        );
+        let theme = self.theme.clone();
+        let item = item.clone();
+        let cookie = self.cookie();
+        let detail = cx.new(|cx| DynamicDetailView::new(theme, item, origin, cookie, cx));
+        let app = cx.entity().downgrade();
+        let _ = detail.update(cx, |view, _| {
+            view.set_close_handler(move |cx, finished| {
+                if !finished {
+                    return;
+                }
+                let _ = app.update(cx, |root, cx| {
+                    root.dynamic_detail_close_requested = true;
+                    cx.notify();
+                });
+            });
+        });
+        // 点详情页大图 → AppRoot 的查看器（缩放 / 拖动 / 左右切换）。
+        let app = cx.entity().downgrade();
+        let _ = detail.update(cx, |view, _| {
+            view.set_image_open_handler(move |cx, window, urls, index| {
+                let _ = app.update(cx, |root, cx| {
+                    root.open_image_viewer(urls, index, window, cx);
+                });
+            });
+        });
+        self.dynamic_detail = Some(detail.clone());
+        // 验收用：YK_DYNAMIC_AUTOCLOSE_MS=1000 在展开后自动触发一次关闭，
+        // 用来核对 260ms 缩回原卡片与实体回收。
+        if let Some(ms) = std::env::var("YK_DYNAMIC_AUTOCLOSE_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            cx.spawn(async move |_this, cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(ms))
+                    .await;
+                let _ = detail.update(cx, |view, cx| view.begin_close(cx));
+            })
+            .detach();
+        }
+        cx.notify();
+    }
 }
 
 #[cfg(test)]
@@ -3696,46 +3611,6 @@ mod scroll_hover_tests {
         app.mark_scrolling();
         assert!(app.scroll_settling(), "刚滚过：hover 动画应当暂停");
         assert!(app.scroll_render_pending, "滚动停止后需要补一帧恢复视觉");
-    }
-}
-
-#[cfg(test)]
-mod home_grid_tests {
-    use super::{home_columns, home_min_items};
-
-    #[test]
-    fn columns_follow_window_width() {
-        // 1280 可用宽 1232 → 5 列；2560 可用宽 2512 → 11 列。
-        assert_eq!(home_columns(1280.0), 5);
-        assert_eq!(home_columns(2560.0), 11);
-        // 极窄窗口至少保留 1 列。
-        assert_eq!(home_columns(200.0), 1);
-    }
-
-    #[test]
-    fn normal_window_fits_in_one_page() {
-        // 一页 30 条：普通窗口够用，不该无谓地多请求。
-        assert!(home_min_items(1280.0, 820.0) <= 30);
-        assert!(home_min_items(1440.0, 900.0) <= 30);
-    }
-
-    #[test]
-    fn large_window_needs_more_than_one_page() {
-        // 大窗口下一页 30 条填不满一屏，必须继续补页，否则 max_offset 恒为 0。
-        assert!(home_min_items(2560.0, 1440.0) > 30);
-        assert!(home_min_items(1920.0, 1200.0) > 30);
-        // 补页目标不能超过 Feed 的容量上限。
-        assert!(home_min_items(2560.0, 1440.0) <= yk_infra::feed::MAX_ITEMS);
-    }
-
-    #[test]
-    fn min_items_grows_with_viewport() {
-        let base = home_min_items(1920.0, 1080.0);
-        assert!(home_min_items(1920.0, 1440.0) > base, "更高 → 需要更多行");
-        assert!(
-            home_min_items(2560.0, 1080.0) > base,
-            "更宽 → 每行更多，同样高度需要更多条"
-        );
     }
 }
 

@@ -1,24 +1,25 @@
 //! yk-library —— 媒体库能力层。
 //!
-//! 负责「浏览内容」：列表、搜索、详情页。把领域模型（`yk-core`）映射成
+//! 负责「浏览内容」：列表、搜索、详情页。把领域模型（`yk-domain`）映射成
 //! GPUI 元素，只在这里组合组件，不重复实现通用积木。
 //!
 //! 分层约定：
 //! - 页面 / 列表的纯数据与状态放这里；
 //! - GPUI 的焦点、hover、布局测量只出现在本 crate 的 view 代码里；
-//! - 网络请求走 `yk-core` 的接口封装，不在视图里直接发请求。
+//! - 网络请求走 `yk-domain` 的接口封装，不在视图里直接发请求。
 //!
-//! 迁移进度：`pages`（热门 / 分区 / 排行 / 直播等页面的四态骨架）已迁入；
-//! 收藏夹 / 历史 / 搜索 / 关注流仍暂存在 `yk-app`，等视频卡片与 `AppRoot`
-//! 解耦后按同一套 host 接口迁入。
+//! 迁移进度：`pages`、收藏夹、历史、搜索、消息、动态（卡片 / 详情 / 关注流）
+//! 与首页网格已全部迁入；`yk-app` 只剩组装点与界面装配。
 
 pub mod card;
 pub mod cover;
 pub mod dynamic_card;
+pub mod dynamic_view;
 pub mod favorites;
 pub mod following;
 pub mod image;
 pub mod history;
+pub mod home;
 pub mod image_viewer;
 pub mod page_image_cache;
 pub mod messages;

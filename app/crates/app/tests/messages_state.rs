@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use yk_app::messages_view::{MessageRow, MessageState};
+use yk_library::messages::{MessageRow, MessageState};
 use yk_infra::messages::{Conversation, MessageChannel, MessageEntry, MessageTarget, MessageUser};
 
 fn entry(id: i64, time: u64, last_view_at: u64, unread: bool) -> MessageEntry {

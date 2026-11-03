@@ -15,7 +15,7 @@ use objc2_core_video::{
     CVPixelBufferUnlockBaseAddress,
 };
 
-use crate::convert::Nv12Frame;
+use super::convert::Nv12Frame;
 
 /// 把一帧 NV12 填进新建的 IOSurface-backed `CVPixelBuffer`。
 pub fn nv12_to_pixel_buffer(frame: &Nv12Frame) -> CFRetained<CVPixelBuffer> {
