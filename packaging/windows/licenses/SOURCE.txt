@@ -1,4 +1,4 @@
-﻿YKPili Windows 版 · 源码与第三方组件说明
+YKPili Windows 版 · 源码与第三方组件说明
 =========================================
 
 本程序（YKPili）是哔哩哔哩第三方客户端，使用 Rust + GPUI 编写。
@@ -12,20 +12,24 @@
 
 随包第三方组件
 --------------
-1. libmpv / mpv（GPLv2+）
-   - 来源：https://github.com/shinchiro/mpv-winbuild-cmake
-   - 构建版本：20261021（mpv git e471496c56，x86_64）
-   - 许可：GPLv2+（默认构建；含 GPL 版 FFmpeg）
+1. libmpv / mpv（GPLv2+）—— 按 YKPili 清单裁剪编译，非上游全量包
+   - 来源：https://github.com/mpv-player/mpv
+   - 构建版本：mpv v0.41.0 + FFmpeg 8.1.1（x86_64）
+   - 裁剪清单：LICENSES/LIBMPV-FEATURES.toml（仓库 packaging/libmpv/features.toml）
+   - 构建方式：scripts/build-libmpv.sh（FFmpeg --disable-everything 起步，
+     只启用清单里的解码器/解复用器/滤镜/音频输出）
+   - 许可：mpv 为 GPLv2+；本次 FFmpeg 未启用 GPL 编码器，为 LGPLv2.1+
    - 许可证全文：LICENSES/GPL-2.0.txt
    - 版权声明：LICENSES/MPV-Copyright.txt
    - mpv 源码：https://github.com/mpv-player/mpv
    - FFmpeg 源码：https://ffmpeg.org/
-
-2. Rust 依赖
+2. libass / libplacebo / harfbuzz / freetype / fribidi / dav1d 等运行时 DLL
+   - 由 MSYS2 提供，多为 LGPL/BSD 许可；许可证文本随各项目发行包分发。
+3. Rust 依赖
    - 完整清单见 app/Cargo.lock；各 crate 的许可证随其源码分发。
 
 说明
 ----
-本程序通过动态链接使用 libmpv-2.dll。由于所附 libmpv 为 GPL 构建，
-整体分发需遵守 GPLv2+；如果你需要闭源分发，请自行替换为 LGPL 构建的
-libmpv 与 LGPL 版 FFmpeg，并重新评估许可义务。
+本程序通过动态链接使用 libmpv-2.dll（及其同目录运行时 DLL）。由于所附 libmpv
+包含 GPL 的 mpv 代码，整体分发需遵守 GPLv2+；如果你需要闭源分发，请自行替换为
+LGPL 构建的 libmpv 与 LGPL 版 FFmpeg，并重新评估许可义务。

@@ -1,4 +1,4 @@
-﻿YKPili · Windows 版
+YKPili · Windows 版
 ===================
 
 哔哩哔哩第三方客户端（Rust + GPUI）。
@@ -15,7 +15,8 @@
   默认装到当前用户目录，不需要管理员权限。
   如果之前装过，安装程序会自动找到上次的安装目录并作为默认值（可手动改）。
 - 绿色版：解压 `YKPili-<版本>-windows-x64.zip`，双击 `ykpili.exe`。
-  不要单独把 exe 拷走，`libmpv-2.dll` 必须和 exe 放在同一目录。
+  不要单独把 exe 拷走：`libmpv-2.dll` 及其同目录的 `libass-*.dll` 等运行时库
+  必须和 exe 放在同一目录。
 
 数据目录
 --------
@@ -38,5 +39,6 @@
 
 开源许可
 --------
-本程序随包附带 GPL 版 libmpv（mpv / FFmpeg）。相关许可证文本在
-`LICENSES\` 目录；源码获取方式见同目录 `SOURCE.txt`。
+本程序随包附带按 `LIBMPV-FEATURES.toml` 裁剪编译的 libmpv（mpv 为 GPLv2+，
+FFmpeg 为 LGPLv2.1+），以及 libass / libplacebo 等 LGPL 运行时库。
+相关许可证文本在 `LICENSES\` 目录；源码获取方式见同目录 `SOURCE.txt`。
