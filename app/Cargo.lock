@@ -8880,47 +8880,100 @@ dependencies = [
 name = "yk-app"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "futures",
  "gpui-kit",
- "image",
- "objc2-core-foundation",
- "objc2-core-video",
  "raw-window-handle",
- "reqwest",
  "winresource",
- "yk-core",
- "yk-media",
- "yk-ui",
+ "yk-components",
+ "yk-domain",
+ "yk-infra",
+ "yk-library",
+ "yk-player",
+ "yk-shell",
+ "yk-theme",
 ]
 
 [[package]]
-name = "yk-core"
+name = "yk-components"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "gpui-kit",
+ "yk-theme",
+]
+
+[[package]]
+name = "yk-domain"
+version = "0.1.0"
+dependencies = [
  "chrono",
- "flate2",
- "md-5",
- "num-bigint",
- "percent-encoding",
- "rand 0.8.8",
- "reqwest",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "yk-media"
+name = "yk-infra"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "flate2",
+ "futures",
+ "gpui-kit",
+ "image",
  "libloading",
+ "md-5",
+ "num-bigint",
  "objc2-core-foundation",
  "objc2-core-video",
+ "percent-encoding",
+ "rand 0.8.8",
+ "raw-window-handle",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "yk-domain",
 ]
 
 [[package]]
-name = "yk-ui"
+name = "yk-library"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+ "yk-components",
+ "yk-domain",
+ "yk-infra",
+ "yk-player",
+ "yk-theme",
+]
+
+[[package]]
+name = "yk-player"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+ "image",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "yk-components",
+ "yk-domain",
+ "yk-infra",
+ "yk-theme",
+]
+
+[[package]]
+name = "yk-shell"
+version = "0.1.0"
+dependencies = [
+ "gpui-kit",
+ "raw-window-handle",
+ "yk-components",
+ "yk-domain",
+ "yk-infra",
+ "yk-theme",
+]
+
+[[package]]
+name = "yk-theme"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",

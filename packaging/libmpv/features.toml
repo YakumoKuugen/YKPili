@@ -15,7 +15,7 @@
 #     hwdec=auto-copy-safe（Windows）/ auto（macOS）
 #     http-header-fields 带 Referer，user-agent 伪装桌面浏览器
 #     loadfile + audio-add（B 站 DASH：视频 m4s + 独立音轨 m4s）
-#   app/crates/yk-app/src/video_worker/{windows,macos}.rs
+#   app/crates/app/src/video_worker/{windows,macos}.rs
 #     逐帧读回 BGRA/RGBA，不建窗口、不用 wid、不截图、不录屏
 #   docs/未完成任务清单.md（播放链路）
 #     只用 B 站 playurl 直出的 DASH/HLS 流，不接 yt-dlp、不播本地 DVD/蓝光

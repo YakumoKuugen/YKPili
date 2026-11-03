@@ -1,0 +1,30 @@
+[package]
+name = "yk-infra"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
+yk-domain = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+md-5 = "0.10"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+base64 = "0.22"
+num-bigint = "0.4"
+rand = "0.8"
+flate2 = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures = "0.3"
+anyhow = "1"
+libloading = "0.8"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-core-video = { version = "0.3.2", features = ["CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVBase", "CVReturn"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+image = { version = "0.25", default-features = false }
+raw-window-handle = "0.6"

@@ -1,0 +1,13 @@
+[package]
+name = "yk-library"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
+yk-domain = { path = "../core" }
+yk-theme = { path = "../theme" }
+yk-components = { path = "../components" }
+yk-player = { path = "../player" }
+yk-infra = { path = "../infra" }

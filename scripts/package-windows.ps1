@@ -4,7 +4,7 @@
     打包 YKPili 的 Windows 绿色版与 NSIS 安装包。
 
 .DESCRIPTION
-    1. release 构建 app/crates/yk-app 的 ykpili.exe；
+    1. release 构建 app/crates/app 的 ykpili.exe；
     2. 按 packaging/libmpv/features.toml 裁剪编译 libmpv（已有最新产物则跳过）；
     3. 暂存 exe + libmpv 及其依赖 DLL + 许可证 + 说明；
     4. 压成 dist/YKPili-<版本>-windows-x64.zip；

@@ -1,6 +1,6 @@
 # Windows 打包说明
 
-把 `app/crates/yk-app` 的 `ykpili` 打成 Windows 绿色包与 NSIS 安装包。
+把 `app/crates/app` 的 `ykpili` 打成 Windows 绿色包与 NSIS 安装包。
 
 ## 一键打包
 
@@ -95,7 +95,7 @@ FFmpeg 共享库、libass/libplacebo/harfbuzz 等运行时 DLL 共 **约 41 MB**
 python -c "from PIL import Image; im=Image.open('packaging/macos/AppIcon.icns').convert('RGBA'); im.save('packaging/windows/ykpili.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 ```
 
-`app/crates/yk-app/build.rs` 用 `winresource` 把图标与版本信息写进 exe。
+`app/crates/app/build.rs` 用 `winresource` 把图标与版本信息写进 exe。
 
 ## 安装包行为
 

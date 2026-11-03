@@ -1,6 +1,15 @@
 [workspace]
 resolver = "2"
-members = ["crates/yk-app", "crates/yk-core", "crates/yk-ui", "crates/yk-media"]
+members = [
+    "crates/app",
+    "crates/player",
+    "crates/library",
+    "crates/infra",
+    "crates/core",
+    "crates/shell",
+    "crates/theme",
+    "crates/components",
+]
 # demo/验证工程在仓库根目录 demos/，各自独立，不属于本 workspace。
 
 [workspace.package]

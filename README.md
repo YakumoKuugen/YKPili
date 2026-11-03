@@ -8,7 +8,7 @@
 
 | 路径 | 说明 |
 | --- | --- |
-| `app/` | **正式工程**：Cargo workspace（`yk-app` / `yk-core` / `yk-ui` / `yk-media`） |
+| `app/` | **正式工程**：Cargo workspace（`app` / `theme` / `components` / `player` / `library` / `shell` / `core` / `infra`，见 `docs/代码架构.md`） |
 | `demos/` | **Demo / 验证工程**：各自独立，有单独的 `Cargo.toml`、`Cargo.lock` 与构建缓存 |
 | `docs/` | **文档**：UX 设计预览、调研、截图、技能与归档 |
 | `scripts/` | 构建、打包、图标脚本 |
@@ -71,6 +71,7 @@ cargo run --bin decode_test
 ## 文档入口
 
 - `docs/ux-design-preview.html` — UX 设计规范与实景预览
+- `docs/代码架构.md` — crate 分层、归属标准与迁移进度
 - `docs/未完成任务清单.md` — 当前待办
 - `docs/windows-移植记录.md` — Windows 平台隔离、视频链路与打包说明
 - `packaging/windows/README.md` — Windows 绿色包 / NSIS 安装包

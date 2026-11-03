@@ -1,0 +1,15 @@
+[package]
+name = "yk-shell"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+gpui.workspace = true
+yk-domain = { path = "../core" }
+yk-infra = { path = "../infra" }
+yk-theme = { path = "../theme" }
+yk-components = { path = "../components" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+raw-window-handle = "0.6"

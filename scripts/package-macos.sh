@@ -3,7 +3,7 @@
 # 打一个可双击运行的 macOS .app（可选打成 DMG）。
 #
 # 默认行为：
-#   - release 编译 app/crates/yk-app 的 ykpili 二进制（当前架构）；
+#   - release 编译 app/crates/app 的 ykpili 二进制（当前架构）；
 #   - 生成 dist/YKPili.app；
 #   - 按 packaging/libmpv/features.toml 裁剪编译 libmpv（已有最新产物则跳过），
 #     把 libmpv 及整棵依赖树打进 Contents/Frameworks，重写 install_name，

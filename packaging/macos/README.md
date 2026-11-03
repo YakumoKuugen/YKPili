@@ -1,6 +1,6 @@
 # macOS 打包说明
 
-把 `app/crates/yk-app` 的 `ykpili` 打包成可双击的 `.app`。
+把 `app/crates/app` 的 `ykpili` 打包成可双击的 `.app`。
 
 ## 一键打包
 
