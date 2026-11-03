@@ -62,11 +62,11 @@ cargo run --bin decode_test
 
 | # | 方向 | 要做什么 | 状态 |
 | --- | --- | --- | --- |
-| 1 | Linux 桌面 | 打通第三个桌面平台：`packaging/libmpv/features.toml` 只有 `windows` / `macos` 两段，要补 linux 段和 `build-libmpv.sh` 的 linux 构建分支，再做发行包（deb / AppImage）与窗口、输入法适配。 | 未开始 |
-| 2 | iOS | 接 `gpui-pre` 的移动端支持（`gpui-pre-mobile`），解决签名与上架、后台播放与音频会话、libmpv 交叉编译。 | 未开始 |
-| 3 | Android | 同上再加 NDK 交叉编译、JNI 桥接、生命周期与返回键适配。 | 未开始 |
-| 4 | 专栏 | 现在专栏只在搜索和 UP 主空间里露出标题摘要，点不进去；要补图文阅读页（正文渲染、代码块、图片查看、评论）。 | 未开始 |
-| 5 | 合集 | 视频合集 / 番剧分集：合集列表、连播与进度记忆；代码里目前没有 `ugc_season` 相关实现。 | 未开始 |
+| 1 | 专栏 | 现在专栏只在搜索和 UP 主空间里露出标题摘要，点不进去；要补图文阅读页（正文渲染、代码块、图片查看、评论）。 | 未开始 |
+| 2 | 合集 | 视频合集 / 番剧分集：合集列表、连播与进度记忆；代码里目前没有 `ugc_season` 相关实现。 | 未开始 |
+| 3 | Linux 桌面 | 打通第三个桌面平台：`packaging/libmpv/features.toml` 只有 `windows` / `macos` 两段，要补 linux 段和 `build-libmpv.sh` 的 linux 构建分支，再做发行包（deb / AppImage）与窗口、输入法适配。 | 未开始 |
+| 4 | iOS | 接 `gpui-pre` 的移动端支持（`gpui-pre-mobile`），解决签名与上架、后台播放与音频会话、libmpv 交叉编译。 | 未开始 |
+| 5 | Android | 同上再加 NDK 交叉编译、JNI 桥接、生命周期与返回键适配。 | 未开始 |
 
 ## 文档入口
 
