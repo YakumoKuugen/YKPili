@@ -116,6 +116,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True, help="目标 .app 路径")
     parser.add_argument("--libmpv", required=True, help="libmpv dylib 路径")
+    parser.add_argument(
+        "--strip",
+        action="store_true",
+        help="拷进 bundle 后用 strip -x 去掉调试符号（导出符号保留；签名在之后做）",
+    )
     args = parser.parse_args()
 
     frameworks = os.path.join(args.app, "Contents", "Frameworks")
@@ -141,6 +146,11 @@ def main() -> int:
 
     for real, name in by_realpath.items():
         shutil.copy2(real, os.path.join(frameworks, name))
+
+    if args.strip:
+        for name in by_realpath.values():
+            run("strip", "-x", os.path.join(frameworks, name))
+        print(f"已 strip -x：{len(by_realpath)} 个 dylib")
 
     # 重写每个 dylib 自己的 id 和它引用到的闭包内依赖。
     changed = 0

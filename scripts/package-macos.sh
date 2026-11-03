@@ -5,12 +5,13 @@
 # 默认行为：
 #   - release 编译 app/crates/yk-app 的 ykpili 二进制（当前架构）；
 #   - 生成 dist/YKPili.app；
-#   - 若本机装了 Homebrew 的 libmpv，就把 libmpv 及整棵依赖树打进
-#     Contents/Frameworks，并重写 install_name，做到不依赖用户装 mpv；
+#   - 按 packaging/libmpv/features.toml 裁剪编译 libmpv（已有最新产物则跳过），
+#     把 libmpv 及整棵依赖树打进 Contents/Frameworks，重写 install_name，
+#     做到不依赖用户装 mpv；
 #   - ad-hoc 签名（本机可运行；分发给别人仍会被 Gatekeeper 拦）。
 #
 # 常用参数：
-#   ./scripts/package-macos.sh                  # release + 内置 libmpv + DMG
+#   ./scripts/package-macos.sh                  # release + 裁剪并内置 libmpv + DMG
 #   ./scripts/package-macos.sh --debug          # 快速验证（用 debug 构建）
 #   ./scripts/package-macos.sh --no-libmpv      # 不内置 libmpv（用系统安装的）
 #   ./scripts/package-macos.sh --no-dmg         # 只出 .app
@@ -95,47 +96,49 @@ sed \
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 # ---------- 内置 libmpv ----------
+if [[ "$BUNDLE_LIBMPV" != "0" ]]; then
+    echo "==> 裁剪 libmpv（只编译清单启用的功能；已有最新产物则跳过）"
+    ./scripts/build-libmpv.sh --platform macos
+fi
+
+VENDOR_LIBMPV="$ROOT/packaging/macos/vendor/libmpv.2.dylib"
 LIBMPV=""
-for candidate in \
-    /opt/homebrew/opt/mpv/lib/libmpv.2.dylib \
-    /opt/homebrew/lib/libmpv.2.dylib \
-    /usr/local/opt/mpv/lib/libmpv.2.dylib \
-    /usr/local/lib/libmpv.2.dylib; do
-    if [[ -f "$candidate" ]]; then
-        LIBMPV="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate")"
-        break
-    fi
-done
+if [[ -f "$VENDOR_LIBMPV" ]]; then
+    LIBMPV="$VENDOR_LIBMPV"
+fi
 
 if [[ "$BUNDLE_LIBMPV" == "1" && -z "$LIBMPV" ]]; then
-    echo "找不到 libmpv，先执行：brew install mpv" >&2
+    echo "找不到 libmpv：先跑 ./scripts/build-libmpv.sh --platform macos" >&2
     exit 1
 fi
 
 if [[ -n "$LIBMPV" && "$BUNDLE_LIBMPV" != "0" ]]; then
-    echo "==> 内置 libmpv：$LIBMPV"
-    python3 scripts/bundle-libmpv.py --app "$APP" --libmpv "$LIBMPV"
-
-    # 内置的是 GPL 构建的 mpv/ffmpeg，分发时把许可证一并带上。
-    BREW_PREFIX=""
-    if [[ "$LIBMPV" == /opt/homebrew/* ]]; then
-        BREW_PREFIX="/opt/homebrew"
-    elif [[ "$LIBMPV" == /usr/local/* ]]; then
-        BREW_PREFIX="/usr/local"
+    echo "==> 校验 libmpv 裁剪产物：$LIBMPV"
+    if ! python3 scripts/libmpv_features.py verify --platform macos --file "$LIBMPV"; then
+        echo "libmpv 校验未通过。排错见 packaging/libmpv/README.md。" >&2
+        exit 1
     fi
+fi
+
+if [[ -n "$LIBMPV" && "$BUNDLE_LIBMPV" != "0" ]]; then
+    echo "==> 内置 libmpv：$LIBMPV"
+    python3 scripts/bundle-libmpv.py --app "$APP" --libmpv "$LIBMPV" --strip
+
+    # mpv 是 GPL、FFmpeg 本次为 LGPL（未启用 GPL 编码器），分发时把许可证一并带上。
     LICENSE_DIR="$APP/Contents/Resources/Licenses"
+    mkdir -p "$LICENSE_DIR"
     for license in \
-        "$BREW_PREFIX/opt/mpv/LICENSE.GPL" \
-        "$BREW_PREFIX/opt/mpv/LICENSE.LGPL" \
-        "$BREW_PREFIX/opt/ffmpeg/COPYING.GPLv2" \
-        "$BREW_PREFIX/opt/ffmpeg/COPYING.GPLv3" \
-        "$BREW_PREFIX/opt/ffmpeg/COPYING.LGPLv2.1" \
-        "$BREW_PREFIX/opt/ffmpeg/COPYING.LGPLv3"; do
-        if [[ -n "$BREW_PREFIX" && -f "$license" ]]; then
-            mkdir -p "$LICENSE_DIR"
-            cp "$license" "$LICENSE_DIR/"
-        fi
+        "$ROOT/packaging/windows/licenses/GPL-2.0.txt" \
+        "$ROOT/packaging/windows/licenses/MPV-Copyright.txt"; do
+        [[ -f "$license" ]] && cp "$license" "$LICENSE_DIR/"
     done
+    cat > "$LICENSE_DIR/LIBMPV-BUILD.txt" <<EOF
+libmpv 为 YKPili 按 packaging/libmpv/features.toml 裁剪编译的版本。
+mpv：https://github.com/mpv-player/mpv（GPL-2.0-or-later）
+FFmpeg：https://ffmpeg.org（LGPL-2.1-or-later，未启用 GPL 编码器）
+其余动态库来自 Homebrew，许可证见同目录与各库发行包。
+源码获取：见项目仓库的对应 tag 与上述上游。
+EOF
 else
     echo "==> 跳过内置 libmpv（运行时需要本机已安装 mpv）"
     rmdir "$APP/Contents/Frameworks"
