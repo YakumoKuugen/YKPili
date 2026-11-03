@@ -11,7 +11,7 @@ libmpv 是**单体库**：上游 `mpv-dev`（shinchiro）把 FFmpeg 的全量编
 
 | 能力 | 应用里的出处 |
 | --- | --- |
-| `vo=libmpv` + `MPV_RENDER_API_TYPE_SW` | `app/crates/yk-media/src/lib.rs` |
+| `vo=libmpv` + `MPV_RENDER_API_TYPE_SW` | `app/crates/infra/src/media/mod.rs` |
 | `ao=wasapi` / `avfoundation` | 同上（`YK_AO` 可覆盖） |
 | `hwdec=auto-copy-safe` / `auto` | 同上，帧要回读到 CPU，只用 copy-back |
 | H.264 / HEVC / AV1，AAC / EC-3 / FLAC | 哔哩哔哩 `playurl` 的 DASH 编码 |
@@ -56,8 +56,22 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install-msys2.ps1
 ### macOS
 
 ```bash
-brew install meson ninja pkgconf nasm libass libplacebo harfbuzz freetype fribidi dav1d
+# 依赖（meson/ninja/pkgconf/nasm/libass/…）缺什么会自动 brew install
 ./scripts/build-libmpv.sh --platform macos   # package-macos.sh 打包时会自动调用
+```
+
+FFmpeg 源码按顺序获取，前一个失败/过慢会自动换下一个：
+
+1. `YK_FFMPEG_MIRROR` 指定的镜像（指向 releases 目录）；
+2. 官方 `https://ffmpeg.org/releases/`（SHA256 固定校验）；
+3. GitHub 的 `FFmpeg/FFmpeg` tag `n<版本>`，走 `gh-proxy.org` 加速，
+   克隆后用固定 commit 校验内容。
+
+```bash
+# 例如指向内网镜像
+YK_FFMPEG_MIRROR=https://内网/ffmpeg/releases ./scripts/build-libmpv.sh --platform macos
+# 关闭 GitHub 加速（mpv / FFmpeg 的 GitHub 源都会直连）
+YK_GH_PROXY= ./scripts/build-libmpv.sh --platform macos
 ```
 
 产物：`packaging/macos/vendor/libmpv.2.dylib`。打包脚本仍用

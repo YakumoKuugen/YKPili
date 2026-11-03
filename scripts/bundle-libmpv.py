@@ -33,8 +33,17 @@ def run(*args: str) -> str:
 
 def otool_libraries(path: str) -> list[str]:
     """返回 otool -L 里除自身 id 之外的所有依赖。"""
-    lines = run("otool", "-L", path).splitlines()[1:]
-    return [line.strip().split(" (compat")[0] for line in lines]
+    try:
+        own_id = run("otool", "-D", path).splitlines()[1].strip()
+    except (subprocess.CalledProcessError, IndexError):
+        own_id = ""
+    deps: list[str] = []
+    for line in run("otool", "-L", path).splitlines()[1:]:
+        dep = line.strip().split(" (compat")[0].strip()
+        if not dep or dep == own_id:  # 跳过 LC_ID_DYLIB（otool -L 的第一条）
+            continue
+        deps.append(dep)
+    return deps
 
 
 def rpaths(path: str) -> list[str]:
@@ -145,7 +154,11 @@ def main() -> int:
         by_realpath[real] = name
 
     for real, name in by_realpath.items():
-        shutil.copy2(real, os.path.join(frameworks, name))
+        dest = os.path.join(frameworks, name)
+        shutil.copy2(real, dest)
+        # Homebrew 里不少 dylib 是 444 只读，后面的 strip / install_name_tool
+        # 都需要写权限，复制后统一放开。
+        os.chmod(dest, 0o755)
 
     if args.strip:
         for name in by_realpath.values():

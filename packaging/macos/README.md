@@ -95,11 +95,13 @@ cargo build --manifest-path app/Cargo.toml --release --target x86_64-apple-darwi
 已有最新产物时跳过编译，重复打包不会重编。
 
 ```bash
-# 先装依赖（一次性）
-brew install meson ninja pkgconf nasm libass libplacebo harfbuzz freetype fribidi dav1d
-# 正常打包即可
+# 直接打包即可：缺的构建依赖会自动用 Homebrew 装上（只需本机有 brew）
 ./scripts/package-macos.sh
 ```
+
+自动安装的依赖：`meson ninja pkgconf nasm libass libplacebo harfbuzz freetype
+fribidi dav1d`。想自己管理工具链时可以先手动装好，脚本检测到就不再执行
+`brew install`。
 
 编译完会用 `scripts/libmpv_features.py verify` 核对指纹与体积预算；
 校验不过直接终止打包。强制重编：`./scripts/build-libmpv.sh --platform macos --force`。
