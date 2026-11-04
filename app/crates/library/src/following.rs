@@ -430,11 +430,27 @@ fn waterfall<V: FollowingHost + 'static>(
                 .w(px(col_w))
                 .children(indices.into_iter().map(|i| {
                     let item = &items[i];
+                    let height = card_height(item, col_w);
+                    // 只给「可视 + 上下各一张」建真实卡片，其余用等高占位。
+                    //
+                    // 以前这里对**每个 item** 都调 `card()`：每张卡会注册 hover /
+                    // click / mouse_move 一串全局监听器，而 GPUI 分发鼠标事件时
+                    // 要遍历全部监听器。全屏滚两页后监听器数量上来，鼠标一动
+                    // 主线程就满了，表现就是界面卡死。
+                    //
+                    // 占位块高度与卡片一致，滚动条高度、瀑布流分配都不变；
+                    // 卡片进入可视范围后再换成真实元素。
+                    if !load_flags[i] {
+                        return div()
+                            .w_full()
+                            .h(px(height))
+                            .into_any_element();
+                    }
                     card::<V>(
                         t,
                         item,
                         col_w,
-                        card_height(item, col_w),
+                        height,
                         scale_factor,
                         load_flags[i],
                         active_images.clone(),

@@ -13,8 +13,13 @@
 use crate::api::models::RecommendVideoItem;
 use crate::models::CoverItem;
 
-/// 数据条数上限。与旧实现一致（`MaxItemCount`）。
-pub const MAX_ITEMS: usize = 200;
+/// 数据条数上限。
+///
+/// 旧实现是 200，全屏 2560 宽（11 列）只够约 18 行、两屏多一点，
+/// 用户滚到底会以为「下面不加载了」。这里放宽到 1000：
+/// 每条只是一个 URL 字符串，1000 条内存可忽略；封面图仍由
+/// `PageImageCache` 按可视范围回收，不会因为条数变多而多占图。
+pub const MAX_ITEMS: usize = 1000;
 
 /// 占位色调色板（封面加载完成前的底色）。与旧实现同一组色值。
 pub const PLACEHOLDER_PALETTE: [&str; 20] = [

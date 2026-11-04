@@ -180,6 +180,12 @@ fn main() {
                     // 同时释放 CPU 解码资源与窗口图集条目。
                     let page_image_cache = yk_app::page_image_cache::PageImageCache::new(cx);
                     let _ = entity.update(cx, |app, _| app.set_page_image_cache(page_image_cache));
+                    // 根节点远程图缓存：顶栏 / 播放器面板 / 账号 / 动态详情共用。
+                    // 关闭播放器时由 AppRoot 整体清空，回收评论头像等图片。
+                    let remote_image_cache = gpui::RetainAllImageCache::new(cx);
+                    let _ = entity.update(cx, |app, _| {
+                        app.set_remote_image_cache(remote_image_cache)
+                    });
                     let _ = entity.update(cx, |app, cx| app.install_player_close_handler(cx));
                     if !forced_offline {
                         // 首屏请求放到窗口里异步跑：窗口先出骨架/缓存，不阻塞启动。

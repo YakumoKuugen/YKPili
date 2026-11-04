@@ -21,6 +21,7 @@ use gpui::prelude::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement, *};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     rc::Rc,
 };
 use yk_infra::api::models::RecommendVideoItem;
@@ -135,8 +136,18 @@ pub struct AppRoot {
     settings: Option<Entity<settings_view::SettingsView>>,
     /// 页面级图片缓存：只绑定在内容区，顶栏/浮层不受影响。
     page_image_cache: Option<Entity<PageImageCache>>,
+    /// 根节点远程图缓存：顶栏头像、播放器面板、账号 / 动态详情 / 图片查看器
+    /// 都在内容区之外，必须有一个 ImageCache 才会加载。
+    ///
+    /// 它只增不减（GPUI 的 `RetainAllImageCache` 语义），所以播放器关闭时
+    /// 整体清空一次 —— 否则每看一个视频留下的评论头像会一直堆到窗口销毁。
+    remote_image_cache: Option<Entity<RetainAllImageCache>>,
     /// 本帧实际加载的卡片图 URL。
     active_images: Rc<RefCell<ImageResidency>>,
+    /// 上一次 prune 时的页面。页面切换后的第一帧不能拿上一页的
+    /// `active_images` 当 keep，否则旧页面的封面会被一直钉在缓存和图集里。
+    page_images_route: Option<Route>,
+    page_images_route_known: bool,
     /// 滚动监测：滚轮不会触发 AppRoot render，需要轮询偏移量后 notify。
     scroll_watchdog_started: bool,
     /// 窗口可见性状态机（失焦与不可见要分开，见 `player::VisibilityGate`）。
@@ -1434,18 +1445,49 @@ impl AppRoot {
         self.page_image_cache = Some(cache);
     }
 
+    /// 注入根节点远程图缓存。由 main 创建，保证整窗共用一个实体；
+    /// 播放器关闭时才有地方把它整体清空。
+    pub fn set_remote_image_cache(&mut self, cache: Entity<RetainAllImageCache>) {
+        self.remote_image_cache = Some(cache);
+    }
+
+    /// 清空根节点远程图缓存。
+    ///
+    /// 评论头像、播放器封面海报、UP 主 / 账号面板图片都挂在这个缓存上；
+    /// 播放器关闭后它们不再被任何元素引用，留下来只会让 CPU 解码缓冲和
+    /// DirectX 图集纹理随播放次数线性增长。内容区的封面由内层
+    /// `PageImageCache` 按视口管理，不受这里影响。
+    fn clear_remote_images(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cache) = self.remote_image_cache.clone() else {
+            return;
+        };
+        cache.update(cx, |cache, cx| cache.clear(window, cx));
+    }
+
     /// 丢掉滚出可视区 + 一行缓冲的卡片图。
     ///
     /// 使用上一帧实际挂出的 URL 作为 keep 集合；当前帧渲染时卡片会重新标记。
     /// 播放器/详情浮层打开期间跳过，避免误删它们正在使用的同一张封面。
-    fn prune_page_images(&self, window: &mut Window, cx: &mut Context<Self>) {
+    fn prune_page_images(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.playing.is_some() || self.dynamic_detail.is_some() {
             return;
         }
         let Some(cache) = self.page_image_cache.clone() else {
             return;
         };
-        let keep = std::mem::take(&mut self.active_images.borrow_mut().current);
+        // 页面切换后的第一帧：`current` 里还是上一页的驻留集合。拿它当 keep
+        // 会把旧页面的封面一直钉在缓存里；而这一帧之后如果没有第二次重绘
+        // （停在消息页这类静态页面很常见），就再没有机会淘汰。
+        let route_changed = !self.page_images_route_known || self.page_images_route != self.page;
+        self.page_images_route = self.page;
+        self.page_images_route_known = true;
+
+        let keep = if route_changed {
+            self.active_images.borrow_mut().current.clear();
+            HashSet::new()
+        } else {
+            std::mem::take(&mut self.active_images.borrow_mut().current)
+        };
         cache.update(cx, |cache, cx| cache.prune(&keep, window, cx));
     }
 
@@ -2103,7 +2145,10 @@ impl AppRoot {
             player_on_top: false,
             settings: None,
             page_image_cache: None,
+            remote_image_cache: None,
             active_images: Rc::new(RefCell::new(ImageResidency::default())),
+            page_images_route: None,
+            page_images_route_known: false,
             scroll_watchdog_started: false,
             visibility: player::VisibilityGate::default(),
             visibility_observed: false,
@@ -2565,6 +2610,9 @@ impl Render for AppRoot {
             self.playing = None;
             self.hovered_card = None;
             self.leaving_card = None;
+            // 播放器实体已经移除：评论头像 / 封面海报等根缓存图不再需要，
+            // 趁这一拍把 CPU 缓冲和 GPU 图集一起回收。
+            self.clear_remote_images(window, cx);
         }
         if self.dynamic_detail_close_requested {
             self.dynamic_detail_close_requested = false;
@@ -2790,15 +2838,15 @@ impl Render for AppRoot {
 
         let layout_bounds = self.layout_bounds.clone();
         let weak_root = cx.entity().downgrade();
-        div()
+        // 顶栏 / 播放浮窗 / 账号面板 / 动态详情都在页面图片缓存范围之外；
+        // GPUI 的 `img()` 没有 `ImageCache` 就不会发请求（评论头像、顶栏头像
+        // 都只会剩渐变占位）。这里给整棵树挂一个缓存：正常由 main 注入的
+        // 实体（关闭播放器时可整体清空），测试 / 未注入时退回 retain-all，
+        // 内容区仍由内层 `PageImageCache` 按视口淘汰。
+        let root = div()
             .relative()
             .size_full()
             .track_focus(&focus_handle)
-            // 顶栏 / 播放浮窗 / 账号面板 / 动态详情都在页面图片缓存范围之外；
-            // GPUI 的 `img()` 没有 `ImageCache` 就不会发请求（评论头像、顶栏头像
-            // 都只会剩渐变占位）。这里给整棵树挂一个 retain-all 缓存兜底，
-            // 内容区仍由内层 `PageImageCache` 按视口淘汰。
-            .image_cache(retain_all("app-remote-images"))
             // 点空白处收起搜索联想面板；搜索框与面板自己会 stop_propagation。
             .on_mouse_down(
                 MouseButton::Left,
@@ -3094,7 +3142,12 @@ impl Render for AppRoot {
                 self.quit_hint_shown_at
                     .is_some()
                     .then(|| yk_shell::overlay::quit_hint(t, QUIT_HINT_TEXT)),
-            )
+            );
+
+        match self.remote_image_cache.clone() {
+            Some(cache) => root.image_cache(cache),
+            None => root.image_cache(retain_all("app-remote-images")),
+        }
     }
 }
 
