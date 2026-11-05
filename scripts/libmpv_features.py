@@ -10,6 +10,7 @@
     python3 scripts/libmpv_features.py plan      --platform windows
     python3 scripts/libmpv_features.py ffmpeg    --platform windows   # 每行一个参数
     python3 scripts/libmpv_features.py mpv       --platform windows   # 每行一个 -D 参数
+    python3 scripts/libmpv_features.py patches   --platform windows   # 每行一个补丁绝对路径
     python3 scripts/libmpv_features.py fingerprint --platform windows
     python3 scripts/libmpv_features.py verify    --file <libmpv> [--sidecar <json>]
     python3 scripts/libmpv_features.py sidecar   --file <libmpv> --mpv-version ... 
@@ -40,6 +41,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "packaging" / "libmpv" / "features.toml"
+PATCH_DIR = ROOT / "packaging" / "libmpv" / "patches"
 
 # 构建参数生成逻辑的版本：改了 ffmpeg_args/mpv_args 的取舍就 +1，
 # 这样旧产物会因为指纹变化被包脚本判定为「需要重建」。
@@ -217,11 +219,28 @@ def canonical(config: dict[str, Any]) -> str:
     return json.dumps(config, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
+def patch_files(platform: str) -> list[Path]:
+    """清单 platform.<p>.patches 列出的 mpv 源码补丁，按书写顺序返回。"""
+    out: list[Path] = []
+    for name in resolve(platform).get("patches") or []:
+        path = (PATCH_DIR / name).resolve()
+        if path.parent != PATCH_DIR.resolve() or not path.is_file():
+            raise SystemExit(f"补丁不存在或不在 {PATCH_DIR} 下：{name}")
+        out.append(path)
+    return out
+
+
 def fingerprint(platform: str) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "generator": GENERATOR_VERSION,
         "config": resolve(platform),
     }
+    # 补丁也是构建输入：内容改了必须重编，否则会继续复用旧产物。
+    # 没有补丁的平台不加这个键 —— 否则 macOS 的补丁会把 Windows 的指纹也改掉，
+    # 逼着没改动的平台白白重编一遍 FFmpeg。
+    patches = patch_files(platform)
+    if patches:
+        payload["patches"] = [{"name": p.name, "sha256": _sha256(p)} for p in patches]
     return hashlib.sha256(canonical(payload).encode("utf-8")).hexdigest()
 
 
@@ -317,6 +336,7 @@ def plan_text(platform: str) -> str:
         f"  解复用（{len(cfg['demuxers'])}）：{' '.join(cfg['demuxers'])}",
         f"  协议（{len(cfg['protocols'])}）：{' '.join(cfg['protocols'])}",
         f"  音频输出：{'、'.join(cfg.get('audio_outputs', [])) or '无'}；TLS：{cfg.get('tls', '系统默认')}",
+        f"  源码补丁：{'、'.join(p.name for p in patch_files(platform)) or '无'}",
         f"  硬件解码：{hw}（只用 copy-back，软件渲染回读）",
         f"  体积预算：{cfg.get('size_budget_mb')} MB",
         f"  永久关闭：{off}",
@@ -423,7 +443,7 @@ def verify_artifact(path: Path, platform: str, sidecar: Path | None) -> int:
     meta = json.loads(sidecar.read_text(encoding="utf-8"))
     if meta.get("fingerprint") != fingerprint(platform):
         print(
-            "[libmpv] 指纹不符：features.toml 改过，但产物没重建。\n"
+            "[libmpv] 指纹不符：清单或源码补丁改过，但产物没重建。\n"
             f"  清单：{fingerprint(platform)}\n  产物：{meta.get('fingerprint')}",
             file=sys.stderr,
         )
@@ -456,6 +476,8 @@ def write_sidecar(path: Path, meta: dict[str, Any], platform: str) -> Path:
         "sha256": _sha256(path),
         "size": path.stat().st_size,
         "size_budget_mb": cfg.get("size_budget_mb"),
+        # 留个凭据：这份产物打了哪些补丁。
+        "patches": [p.name for p in patch_files(platform)],
         **meta,
     }
     target = path.with_suffix(path.suffix + ".build.json")
@@ -473,6 +495,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("plan", parents=[common], help="打印裁剪计划")
     sub.add_parser("ffmpeg", parents=[common], help="输出 FFmpeg configure 参数（每行一个）")
     sub.add_parser("mpv", parents=[common], help="输出 mpv meson 参数（每行一个）")
+    sub.add_parser("patches", parents=[common], help="输出 mpv 源码补丁路径（每行一个）")
     sub.add_parser("fingerprint", parents=[common], help="输出清单指纹")
 
     p_verify = sub.add_parser("verify", parents=[common], help="校验随包产物")
@@ -494,6 +517,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(ffmpeg_args(platform)))
     elif args.cmd == "mpv":
         print("\n".join(mpv_args(platform)))
+    elif args.cmd == "patches":
+        print("\n".join(str(p) for p in patch_files(platform)))
     elif args.cmd == "fingerprint":
         print(fingerprint(platform))
     elif args.cmd == "verify":

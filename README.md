@@ -76,5 +76,6 @@ cargo run --bin decode_test
 - `docs/windows-移植记录.md` — Windows 平台隔离、视频链路与打包说明
 - `packaging/windows/README.md` — Windows 绿色包 / NSIS 安装包
 - `docs/macos-零拷贝视频播放器踩坑全记录.md` — 播放内核调研
+- `docs/macos-音频设备掉线崩溃.md` — 拔耳机闪退的定位与 libmpv 补丁
 - `docs/skills/` — 可复用的技能说明与参考
 - `docs/archive/` — 历史版本与旧 Avalonia 工程归档

@@ -101,6 +101,12 @@ size_budget_mb = 40
 target_os = "darwin"
 # 应用默认 ao=avfoundation（coreaudio 在部分机型初始化失败，留作 YK_AO 覆盖）。
 audio_outputs = ["avfoundation", "coreaudio"]
+# mpv 源码补丁，按顺序 `git apply`；文件在 packaging/libmpv/patches/，
+# 内容参与产物指纹（改补丁会触发重编）。
+#   0001：音频设备掉线时 AVSampleBufferAudioRenderer 的 flush 通知在
+#         CoreMedia 队列上直接 stop()/start()，与 AO 线程/ uninit 抢
+#         renderer、queue，导致 libmpv 里跳 0 崩溃。改为 ao_request_reload()。
+patches = ["0001-ao-avfoundation-notification-race.patch"]
 # 渲染是 SW，视频帧要回读到 CPU：只用 videotoolbox 的 copy-back 路径。
 hwdec_families = ["videotoolbox"]
 tls = "securetransport"

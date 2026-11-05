@@ -361,6 +361,32 @@ if [[ ! -d "$MPV_SRC" ]]; then
     fi
 fi
 
+# ---------- mpv 源码补丁 ----------
+# 补丁清单在 features.toml 的 platform.<p>.patches，内容参与产物指纹：
+# 改补丁会触发重编，不会继续复用旧 dylib。已应用过的用 --reverse 判定，
+# 所以中途失败重跑是幂等的。
+PATCHES=()
+while IFS= read -r _line; do
+    if [[ -n "$_line" ]]; then PATCHES+=("$_line"); fi
+done < <("$PY" "$FEATURES" patches --platform "$PLATFORM")
+if [[ ${#PATCHES[@]} -gt 0 ]]; then
+    say "应用 mpv 源码补丁（${#PATCHES[@]} 个）"
+    for patch in "${PATCHES[@]}"; do
+        # Windows 侧 python 输出的是 `D:\...`，MSYS2 的 git 只认 `/d/...`。
+        if [[ "$PLATFORM" == "windows" ]]; then patch="$(cygpath -u "$patch")"; fi
+        if git -C "$MPV_SRC" apply --check "$patch" 2>/dev/null; then
+            run git -C "$MPV_SRC" apply "$patch"
+            echo "  已应用：$(basename "$patch")"
+        elif git -C "$MPV_SRC" apply --check --reverse "$patch" 2>/dev/null; then
+            echo "  已应用过：$(basename "$patch")"
+        else
+            echo "补丁打不上：$(basename "$patch")" >&2
+            echo "  多半是 mpv 版本（$MPV_VER）变了：同步改 packaging/libmpv/patches/ 与清单。" >&2
+            exit 6
+        fi
+    done
+fi
+
 # ---------- 校验 mpv 选项名 ----------
 # 清单按 v0.41.0 写；换版本时这一步会立刻暴露改名的选项，而不是编到一半才报。
 if [[ "$PRINT_ONLY" != "1" ]]; then

@@ -1,0 +1,92 @@
+fix(ao/avfoundation): 通知回调不再跨线程 stop/start，改为请求 AO 重载
+
+崩溃现场（macOS，音频设备掉线 / 切换输出设备）：
+
+  -[AVSampleBufferAudioRenderer _wasFlushedAutomaticallyAtTime:]
+   → -[NSNotificationCenter postNotificationName:object:userInfo:]
+     → __CFNOTIFICATIONCENTER_IS_CALLING_OUT_TO_AN_OBSERVER__
+       → libmpv.2.dylib  AVObserver handleRestartNotification:
+         → 0x0   （EXC_BAD_ACCESS at 0x0，线程 com.apple.coremedia.audiorenderer.notification）
+
+原因：该通知在 CoreMedia 自己的队列上派发，不在 AO 线程。handler 里直接
+stop()/start()，而 stop() 会对 p->queue 做 dispatch_sync；同一时刻 uninit
+（切换视频 / 退出播放）可能正在另一个线程 dispatch_release 同一个 queue 并
+release renderer，于是跳到空指针。uninit 里又是「先释放 renderer/queue，
+后摘观察者」，把竞态窗口放得更大。
+
+修改：
+  - handler 只调用线程安全的 ao_request_reload()，由播放线程走
+    fill_audio_out_buffers() → reload_audio_output() 重建 AO；
+  - uninit 先 detach + removeObserver，再 stop / 释放；
+  - detach 与 handler 共用一把锁，摘除之后回调不再触碰 ao。
+diff --git a/audio/out/ao_avfoundation.m b/audio/out/ao_avfoundation.m
+index 09f3ef0..177b13a 100644
+--- a/audio/out/ao_avfoundation.m
++++ b/audio/out/ao_avfoundation.m
+@@ -35,6 +35,8 @@
+ @interface AVObserver : NSObject {
+     struct ao *ao;
+ }
++- (instancetype)initWithAO:(struct ao*)_ao;
++- (void)detach;
+ - (void)handleRestartNotification:(NSNotification*)notification;
+ @end
+ 
+@@ -205,13 +207,31 @@ - (instancetype)initWithAO:(struct ao*)_ao {
+     }
+     return self;
+ }
++- (void)detach {
++    // detach 与 handleRestartNotification: 共用一把锁：解除之后回调再也拿不到
++    // ao 指针，uninit 才能放心释放 renderer / queue。
++    @synchronized (self) {
++        ao = NULL;
++    }
++}
+ - (void)handleRestartNotification:(NSNotification*)notification {
+-    char *name = cfstr_get_cstr((CFStringRef)notification.name);
+-    MP_WARN(ao, "restarting due to system notification; this will cause desync\n");
+-    MP_VERBOSE(ao, "notification name: %s\n", name);
+-    talloc_free(name);
+-    stop(ao);
+-    start(ao);
++    @synchronized (self) {
++        if (!ao)
++            return;
++
++        // 通知由 CoreMedia 自己的队列（com.apple.coremedia.audiorenderer.notification）
++        // 派发，**不在 AO 线程上**。原实现直接在这里 stop()/start()：
++        //   - stop() 会对 p->queue 做 dispatch_sync，而 uninit（切视频 / 退出播放）
++        //     可能正在另一线程 dispatch_release 同一个 queue —— 设备掉线时就是
++        //     「观察者回调 → 跳 0」的崩溃；
++        //   - 即便没释放，也会和 AO 线程并发动 p->renderer / p->synchronizer。
++        // ao_request_reload() 只置一个原子事件，由播放线程在
++        // fill_audio_out_buffers() 里走 reload_audio_output() 重建 AO，
++        // 新 renderer 的 end_time_av 随之归位，跨线程不碰 priv。
++        MP_VERBOSE(ao, "renderer flushed / output configuration changed; "
++                       "reloading audio output\n");
++        ao_request_reload(ao);
++    }
+ }
+ @end
+ 
+@@ -333,6 +353,11 @@ static void uninit(struct ao *ao)
+ {
+     struct priv *p = ao->priv;
+ 
++    // 先摘观察者，再停/释放：通知是异步派发的，晚一步就可能落在已经
++    // release 掉的 renderer / queue 上（设备掉线时表现为回调里跳 0）。
++    [p->observer detach];
++    [[NSNotificationCenter defaultCenter] removeObserver:p->observer];
++
+     stop(ao);
+ 
+     [p->renderer release];
+@@ -340,7 +365,6 @@ static void uninit(struct ao *ao)
+     dispatch_release(p->queue);
+     CFRelease(p->format_description);
+ 
+-    [[NSNotificationCenter defaultCenter] removeObserver:p->observer];
+     [p->observer release];
+ 
+ #if TARGET_OS_IPHONE

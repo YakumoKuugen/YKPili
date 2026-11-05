@@ -100,6 +100,30 @@ python3 scripts/libmpv_features.py plan --platform windows   # 打印启用了�
 清单与参数都会参与**指纹**计算：改了 `features.toml` 而没重新编译，打包脚本
 会直接指出来（见下）。
 
+## mpv 源码补丁
+
+上游 bug 等不到发行版修的时候，补丁放在 [`patches/`](patches/)，克隆完 mpv
+源码后按清单顺序 `git apply`：
+
+```toml
+[platform.macos]
+patches = ["0001-ao-avfoundation-notification-race.patch"]
+```
+
+- 目录与顺序都以 `features.toml` 为准，脚本不扫目录（避免误打半成品补丁）；
+- 补丁内容参与指纹：改了补丁，`verify` 会判定「产物需要重建」；
+- 重复构建幂等：已应用的补丁用 `git apply --reverse --check` 识别，不会重复打；
+- 打不上（mpv 升级改了上下文）直接退出码 6，不会编出一个「只打了一半」的库。
+
+现有补丁：
+
+| 补丁 | 平台 | 修什么 |
+| --- | --- | --- |
+| `0001-ao-avfoundation-notification-race.patch` | macOS | 音频设备掉线 / 切换输出时，`AVSampleBufferAudioRenderer` 的 flush 通知在 CoreMedia 队列上直接 `stop()`/`start()`，与 AO 线程、`uninit` 抢 `renderer` / `queue`，崩溃栈顶是 `libmpv … → 0x0`。改成 `ao_request_reload()`，由播放线程重建 AO |
+
+不内置补丁的 Homebrew libmpv 仍有这个崩溃：本机开发跑 `cargo run` 时若加载的是
+`/opt/homebrew/lib/libmpv.2.dylib`，用 `YK_LIBMPV` 指向打过补丁的产物即可复现/验证。
+
 ## 打包时的校验
 
 ```bash

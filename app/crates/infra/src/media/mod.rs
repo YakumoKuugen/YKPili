@@ -210,8 +210,15 @@ impl MpvPlayer {
             }
 
             // 离屏：不要窗口、不要音频设备（音频后续由 AVSampleBufferAudioRenderer 承担）
-            // AO 按平台选：macOS 用 avfoundation（coreaudio 在本机会初始化失败），
-            // Windows 用 wasapi。两边都可以用 YK_AO 覆盖。
+            // AO 按平台选：macOS 用 avfoundation（coreaudio 在部分机型设声道布局
+            // 会报 -50），Windows 用 wasapi。两边都可以用 YK_AO 覆盖。
+            //
+            // 注意 mpv 0.41 的 avfoundation AO 有崩溃：音频设备掉线 / 切换输出时，
+            // AVSampleBufferAudioRenderer 的 flush 通知在 CoreMedia 队列上直接
+            // stop()/start()，与 AO 线程和 uninit 抢 renderer / queue，
+            // 崩溃栈顶是「libmpv → 0x0」。随包 libmpv 已由
+            // packaging/libmpv/patches/0001-* 修掉（改为 ao_request_reload）；
+            // 开发时若加载的是未打补丁的 Homebrew libmpv，仍会复现。
             let default_ao = if cfg!(target_os = "windows") {
                 "wasapi"
             } else {

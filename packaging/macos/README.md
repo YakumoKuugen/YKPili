@@ -91,7 +91,9 @@ cargo build --manifest-path app/Cargo.toml --release --target x86_64-apple-darwi
 打包脚本默认就会调用 `./scripts/build-libmpv.sh --platform macos`，按
 [`packaging/libmpv/features.toml`](../libmpv/features.toml) 编出裁剪版
 （只含播放链路启用的解码器、解复用器、`avfoundation`/`coreaudio` 输出和
-`videotoolbox` copy-back 硬解），产物在 `packaging/macos/vendor/libmpv.2.dylib`。
+`videotoolbox` copy-back 硬解），并按清单里的 `patches` 打上
+[`packaging/libmpv/patches/`](../libmpv/patches/) 的源码补丁（当前是音频设备
+掉线时通知回调跨线程的崩溃修复），产物在 `packaging/macos/vendor/libmpv.2.dylib`。
 已有最新产物时跳过编译，重复打包不会重编。
 
 ```bash
