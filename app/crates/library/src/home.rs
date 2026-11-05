@@ -14,7 +14,7 @@ use yk_components::status::SKELETON_PULSE_MS;
 use yk_domain::models::CoverItem;
 use yk_theme::theme::*;
 
-use crate::card::{card, CardHost};
+use crate::card::{card, card_height, CardHost};
 use crate::image::ImageResidency;
 
 /// 一次首页渲染需要的只读快照。
@@ -38,6 +38,19 @@ pub fn columns(viewport_width: f32) -> usize {
     (((available + SPACE_4) / (COVER_CELL_WIDTH + SPACE_4)).floor() as usize).max(1)
 }
 
+/// 每张卡片的槽位宽：把可用宽度（扣掉左右各 24 内边距）减去行内间距后，
+/// 均分给 [`columns`] 切出来的列。
+///
+/// 定宽 208 + 居中会在左右各留一条空带（`columns` 取整剩多少就空多少），
+/// 窗口越宽空得越明显。均分之后每行恰好铺满内容区，窗口变宽时卡片跟着
+/// 变大——上限由「再多一列就放不下 208」约束，最多 208 + 224/cols。
+pub fn card_width(viewport_width: f32) -> f32 {
+    let cols = columns(viewport_width);
+    let available = (viewport_width - SPACE_6 * 2.0).max(COVER_CELL_WIDTH);
+    let gaps = SPACE_4 * cols.saturating_sub(1) as f32;
+    ((available - gaps) / cols as f32).max(COVER_CELL_WIDTH)
+}
+
 /// 首页填满一屏所需的最少卡片数：列数 ×（整行数 + 1 行）。
 ///
 /// 推荐接口一页固定 30 条；窗口大到一页填不满时，内容高度不足 → 滚动条
@@ -49,7 +62,7 @@ pub fn columns(viewport_width: f32) -> usize {
 /// 即整行数 + 1 行就够了（刚好多出不到一行，保证一定滚得动）。
 pub fn min_items(viewport_width: f32, viewport_height: f32) -> usize {
     let cols = columns(viewport_width);
-    let row_h = COVER_CELL_HEIGHT + SPACE_4;
+    let row_h = card_height(card_width(viewport_width)) + SPACE_4;
     let available_h = (viewport_height - TOP_BAR_HEIGHT - SPACE_4 - DOCK_RESERVED).max(row_h);
     let full_rows = (available_h / row_h).floor() as usize;
     cols * (full_rows + 1)
@@ -66,8 +79,11 @@ pub fn grid<V: HomeHost + 'static>(
     cx: &mut Context<V>,
 ) -> AnyElement {
     let items = state.items;
+    // 每行恰好铺满内容区：卡片宽度按窗口均分，高度按 16:9 封面 + 固定文字区推导。
     // 行高 = 卡片高 + 行间距；行内只画卡片，多出来的 16 就是行距。
-    let row_h = COVER_CELL_HEIGHT + SPACE_4;
+    let card_w = card_width(window.viewport_size().width.as_f32());
+    let card_h = card_height(card_w);
+    let row_h = card_h + SPACE_4;
     let cols = columns(window.viewport_size().width.as_f32());
 
     // 首屏加载：用与真实卡片完全同几何的骨架卡，避免数据回来时网格跳动。
@@ -92,8 +108,8 @@ pub fn grid<V: HomeHost + 'static>(
                     .justify_center()
                     .gap(px(SPACE_4))
                     .w_full()
-                    .h(px(COVER_CELL_HEIGHT))
-                    .children((0..cols).map(|_| skeleton_card(t)))
+                    .h(px(card_h))
+                    .children((0..cols).map(|_| skeleton_card(t, card_w, card_h)))
             }))
             .with_animation(
                 "home-card-skeleton-pulse",
@@ -151,14 +167,14 @@ pub fn grid<V: HomeHost + 'static>(
                     let all = cur.items;
                     let start = row * cols;
                     let end = (start + cols).min(all.len());
-                    // 卡片行整体居中：窗口变宽时多出来的空间均分到两侧，
-                    // 而不是全堆在右边（否则网格看起来永远偏左上）。
+                    // 卡片宽度已经按窗口均分，整行恰好铺满内容区；保留居中
+                    // 只是兜住浮点误差，不会再在两侧留出空带。
                     let mut row_el = div()
                         .flex()
                         .justify_center()
                         .gap(px(SPACE_4))
                         .w_full()
-                        .h(px(COVER_CELL_HEIGHT));
+                        .h(px(card_h));
                     let settling = this.card_scroll_settling();
                     let hovered_idx = if settling { None } else { cur.hovered };
                     let leaving_idx = if settling { None } else { cur.leaving };
@@ -169,6 +185,7 @@ pub fn grid<V: HomeHost + 'static>(
                         let leaving = leaving_idx == Some(item.index);
                         row_el = row_el.child(card(
                             &theme,
+                            card_w,
                             item,
                             hovered,
                             leaving,
@@ -191,21 +208,23 @@ pub fn grid<V: HomeHost + 'static>(
     .into_any_element()
 }
 
-/// 首屏骨架卡：与真实卡片同几何（208×184 / 封面 192×108 / 两行标题 / 署名行）。
+/// 首屏骨架卡：与真实卡片同几何（宽度按窗口均分，封面 16:9，两行标题 + 署名行）。
 ///
 /// 颜色只用 `SkeletonBrush`，脉冲由父级网格统一驱动。
-fn skeleton_card(t: &YkTheme) -> impl IntoElement {
+fn skeleton_card(t: &YkTheme, card_w: f32, card_h: f32) -> impl IntoElement {
     let brush = t.surfaces.skeleton_brush;
+    let cover_w = (card_w - SPACE_2 * 2.0).max(1.0);
+    let cover_h = cover_w * (COVER_ITEM_HEIGHT / COVER_ITEM_WIDTH);
     div()
-        .w(px(COVER_CELL_WIDTH))
-        .h(px(COVER_CELL_HEIGHT))
+        .w(px(card_w))
+        .h(px(card_h))
         .flex()
         .flex_col()
         .p(px(SPACE_2))
         .child(
             div()
-                .w(px(COVER_ITEM_WIDTH))
-                .h(px(COVER_ITEM_HEIGHT))
+                .w(px(cover_w))
+                .h(px(cover_h))
                 .rounded(px(MEDIA_RADIUS))
                 .bg(brush),
         )
@@ -246,7 +265,8 @@ fn skeleton_card(t: &YkTheme) -> impl IntoElement {
 
 #[cfg(test)]
 mod tests {
-    use super::{columns, min_items};
+    use super::{card_width, columns, min_items};
+    use yk_theme::theme::{COVER_CELL_WIDTH, SPACE_4, SPACE_6};
 
     #[test]
     fn columns_follow_window_width() {
@@ -255,6 +275,26 @@ mod tests {
         assert_eq!(columns(2560.0), 11);
         // 极窄窗口至少保留 1 列。
         assert_eq!(columns(200.0), 1);
+    }
+
+    /// 每行必须正好铺满内容区：两侧不能再留空带（本轮反馈的核心）。
+    #[test]
+    fn card_width_fills_the_row() {
+        for viewport in [1024.0, 1280.0, 1440.0, 1512.0, 1920.0, 2560.0] {
+            let cols = columns(viewport);
+            let width = card_width(viewport);
+            let available = (viewport - SPACE_6 * 2.0).max(COVER_CELL_WIDTH);
+            let used = width * cols as f32 + SPACE_4 * (cols - 1) as f32;
+            assert!(
+                (used - available).abs() < 0.01,
+                "{viewport} 宽下两侧还剩 {} 的空带",
+                available - used
+            );
+            assert!(
+                width >= COVER_CELL_WIDTH,
+                "{viewport} 宽下卡片被压到 {width}，小于 208"
+            );
+        }
     }
 
     #[test]

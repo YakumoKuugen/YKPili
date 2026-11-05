@@ -774,6 +774,7 @@ fn content<V: FavoritesHost>(
         let item = video.to_cover_item(index);
         grid = grid.child(card(
             t,
+            COVER_CELL_WIDTH,
             &item,
             hovered_card == Some(index),
             leaving_card == Some(index),

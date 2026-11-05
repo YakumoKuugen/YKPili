@@ -84,6 +84,9 @@ enum QuitDecision {
     Quit,
 }
 
+/// 顶栏搜索浮层的开 / 合代际：每次切换都换一个动画 id，GPUI 才会重新播。
+static SEARCH_ANIM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// 应用根视图。
 pub struct AppRoot {
     theme: YkTheme,
@@ -198,6 +201,15 @@ pub struct AppRoot {
     rank: rank_view::RankState,
     /// 搜索：顶栏输入、联想面板与结果页共享同一份状态。
     search: yk_library::search::SearchState,
+    /// 搜索浮层正在播「收回」动画：此时 `search.open` 已经是 false，
+    /// 但浮层还要留在树上把动画播完。
+    search_closing: bool,
+    /// 展开动画已经落地。落地后才显示联想面板，避免面板先于搜索框冒出来。
+    search_bar_expanded: bool,
+    /// 展开动画代际（`with_animation` 的 id，变了才重播）。
+    search_open_generation: u64,
+    /// 收回动画代际。
+    search_close_generation: u64,
     /// 消息中心：四通道列表、私信会话与未读角标。
     messages: yk_library::messages::MessageState,
     /// 启动后是否已经自动弹过一次登录；取消后不再打扰。
@@ -471,13 +483,209 @@ impl AppRoot {
         self.quit_hint_shown_at.is_some()
     }
 
-    /// 测试入口：把焦点放到顶栏搜索框，让窗口有真实的键盘焦点。
-    pub fn focus_search_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_search_input(window, cx);
+    /// 测试 / 验收：顶栏搜索浮层当前是否展开。
+    pub fn search_open_for_test(&self) -> bool {
+        self.search.open
+    }
+
+    /// 测试 / 验收：搜索浮层是否正在播收回动画。
+    pub fn search_closing_for_test(&self) -> bool {
+        self.search_closing
+    }
+
+    /// 展开顶栏搜索浮层：收起态胶囊 → 浮在最上层的完整搜索框。
+    ///
+    /// 代际 +1 换动画 id；`search_bar_expanded` 等动画落地后才置 true，
+    /// 联想面板不会先于搜索框冒出来。
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.open = true;
+        self.search_closing = false;
+        self.search_bar_expanded = false;
+        self.search.selected = None;
+        self.search_open_generation =
+            SEARCH_ANIM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.search_ensure_hotwords(cx);
         if let Some(input) = self.search.input.clone() {
             let handle = input.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
         }
+        let generation = self.search_open_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(
+                    yk_library::search_ui::SEARCH_GROW_MS + 20,
+                ))
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.search.open
+                    && !view.search_closing
+                    && view.search_open_generation == generation
+                {
+                    view.search_bar_expanded = true;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 收起顶栏搜索浮层：先播收回动画，动画结束再卸掉浮层。
+    ///
+    /// 只管「本来展开着」的情况；提交搜索 / 打开播放器等路径直接置
+    /// `open = false`，浮层下一帧消失，不需要动画。
+    fn begin_search_close(&mut self, cx: &mut Context<Self>) {
+        if !self.search.open || self.search_closing {
+            return;
+        }
+        self.search.open = false;
+        self.search.selected = None;
+        self.search_bar_expanded = false;
+        self.search_closing = true;
+        self.search_close_generation =
+            SEARCH_ANIM_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let generation = self.search_close_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(
+                    yk_library::search_ui::SEARCH_CLOSE_MS + 20,
+                ))
+                .await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                if view.search_closing && view.search_close_generation == generation {
+                    view.search_closing = false;
+                    // 浮层里的输入框随动画卸载：焦点不能悬在不在树上的元素上，
+                    // 否则 ⌘Q 的 capture 监听不在派发路径上，退出提示会失灵。
+                    let handle = match view.root_focus.clone() {
+                        Some(handle) => handle,
+                        None => {
+                            let handle = cx.focus_handle();
+                            view.root_focus = Some(handle.clone());
+                            handle
+                        }
+                    };
+                    window.focus(&handle, cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// 搜索浮层：一份透明遮罩 + 展开 / 收回中的搜索框 + 联想面板。
+    ///
+    /// 挂在根节点 children 的**最后**，永远压在播放器 / 账号面板等所有
+    /// 浮层之上；遮罩负责「点外面收起」，避免这一击同时落到下面的卡片上。
+    fn search_overlay(
+        &self,
+        t: &YkTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let viewport_width = window.viewport_size().width.as_f32();
+        let source = yk_library::search_ui::search_collapsed_bounds(viewport_width);
+        let target = yk_library::search_ui::search_expanded_bounds(viewport_width);
+        // 收回时由浮层自己画渐隐的聚焦环（见 SearchPopover），
+        // 这里把搜索框自带的环关掉，避免结束时硬消失。
+        let bar = yk_library::search_ui::search_bar(
+            t,
+            &self.search,
+            window,
+            cx,
+            !self.search_closing,
+        );
+        // 验收注入（YK_SEARCH_SUGGEST / with_search_suggestions）在第一帧就是
+        // 展开态：代际为 0，直接按终点画，不播动画。
+        let static_open =
+            self.search.open && !self.search_closing && self.search_open_generation == 0;
+        let popover = yk_library::search_ui::SearchPopover {
+            theme: t.clone(),
+            bar,
+            source,
+            target,
+            progress: if static_open { 1.0 } else { 0.0 },
+            closing: self.search_closing,
+        };
+        let popover = if static_open {
+            popover.into_any_element()
+        } else if self.search_closing {
+            popover
+                .with_animation(
+                    format!("search-close-{}", self.search_close_generation),
+                    Animation::new(std::time::Duration::from_millis(
+                        yk_library::search_ui::SEARCH_CLOSE_MS,
+                    ))
+                    .with_easing(|t| t),
+                    // 收回从 1 → 0：先快后慢，最后几帧贴回胶囊。
+                    |el, p| yk_library::search_ui::SearchPopover {
+                        progress: 1.0 - ease_entrance()(p),
+                        ..el
+                    },
+                )
+                .into_any_element()
+        } else {
+            popover
+                .with_animation(
+                    format!("search-open-{}", self.search_open_generation),
+                    Animation::new(std::time::Duration::from_millis(
+                        yk_library::search_ui::SEARCH_OPEN_MS,
+                    ))
+                    .with_easing(|t| t),
+                    // 长到目标 + 150ms 缓动落稳（曲线自带过冲，见 search_ui）。
+                    |el, p| yk_library::search_ui::SearchPopover {
+                        progress: yk_library::search_ui::search_open_progress(p),
+                        ..el
+                    },
+                )
+                .into_any_element()
+        };
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .id("search-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(rgba(0x00000001))
+                    .occlude()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|view, _: &MouseDownEvent, _window, cx| {
+                            view.begin_search_close(cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+            .child(popover)
+            // 联想面板必须和浮层一起放在遮罩之上，否则会被遮罩挡住点击。
+            .children(
+                (self.search.open
+                    && (self.search_bar_expanded || self.search_open_generation == 0))
+                    .then(|| {
+                        yk_library::search_ui::suggest_overlay(t, &self.search, window, cx)
+                    })
+                    .flatten(),
+            )
+            .into_any_element()
+    }
+
+    /// 测试入口：把焦点放到顶栏搜索框，让窗口有真实的键盘焦点。
+    ///
+    /// 搜索框现在只在展开态存在，这里顺便把浮层置成「静态展开」
+    /// （代际 0，不播动画）。调用方随后要画一帧，键事件才能沿着
+    /// 输入框所在的元素树找到根节点。
+    pub fn focus_search_for_test(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_search_input(window, cx);
+        self.search.open = true;
+        self.search_closing = false;
+        self.search_bar_expanded = true;
+        if let Some(input) = self.search.input.clone() {
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
     }
 
     /// 测试 / 截图入口：直接注入一张榜单。
@@ -2171,6 +2379,10 @@ impl AppRoot {
             favorites: favorites_view::FavoritesState::new(),
             rank: rank_view::RankState::new(),
             search: yk_library::search::SearchState::new(),
+            search_closing: false,
+            search_bar_expanded: false,
+            search_open_generation: 0,
+            search_close_generation: 0,
             messages: yk_library::messages::MessageState::new(),
             login_prompted: false,
             feed_generation: 0,
@@ -2456,6 +2668,14 @@ impl yk_library::search::SearchHost for AppRoot {
         self.cookie()
     }
 
+    fn search_request_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_search(window, cx);
+    }
+
+    fn search_request_close(&mut self, cx: &mut Context<Self>) {
+        self.begin_search_close(cx);
+    }
+
     fn search_session(&self) -> Option<UserSession> {
         self.session.clone()
     }
@@ -2639,6 +2859,18 @@ impl Render for AppRoot {
                     window.focus(&handle, cx);
                 }
             });
+        }
+
+        // 搜索浮层被直接置为关闭（提交搜索、打开播放器等）时，输入框会随
+        // 浮层下树；焦点若还挂在它身上，⌘Q 的 capture 就不在派发路径上。
+        // 这类路径不播收回动画，这里把焦点还给根节点兜底。
+        if !self.search.open && !self.search_closing {
+            if let Some(input) = self.search.input.as_ref() {
+                let input_focus = input.read(cx).focus_handle(cx);
+                if window.focused(cx).as_ref() == Some(&input_focus) {
+                    window.focus(&focus_handle, cx);
+                }
+            }
         }
 
         // 窗口可见性：最小化 / 被完全遮挡时停掉页面侧的动画与补帧。
@@ -2836,6 +3068,13 @@ impl Render for AppRoot {
 
         let t = &self.theme;
 
+        // 搜索浮层要挂在根层（压在内容 / Dock 之上），先在这里备好。
+        let search_overlay = if self.search.open || self.search_closing {
+            Some(self.search_overlay(t, window, cx))
+        } else {
+            None
+        };
+
         let layout_bounds = self.layout_bounds.clone();
         let weak_root = cx.entity().downgrade();
         // 顶栏 / 播放浮窗 / 账号面板 / 动态详情都在页面图片缓存范围之外；
@@ -2852,9 +3091,7 @@ impl Render for AppRoot {
                 MouseButton::Left,
                 cx.listener(|view, _: &MouseDownEvent, _window, cx| {
                     if view.search.open {
-                        view.search.open = false;
-                        view.search.selected = None;
-                        cx.notify();
+                        view.begin_search_close(cx);
                     }
                 }),
             )
@@ -2931,7 +3168,13 @@ impl Render for AppRoot {
                             )
                             .into_any_element(),
                         ),
-                        yk_library::search_ui::search_bar(t, &self.search, window, cx).into_any_element(),
+                        // 收起态是顶栏里的小胶囊；展开 / 收回过程中由根层浮层
+                        // 接管，这里留空，避免中间同时出现两份搜索框。
+                        if self.search.open || self.search_closing {
+                            div().into_any_element()
+                        } else {
+                            yk_library::search_ui::search_pill(t, &self.search, window, cx)
+                        },
                         window,
                         cx,
                     )).into_any_element(),
@@ -3068,8 +3311,6 @@ impl Render for AppRoot {
                 }
                 .render(t),
             )
-            // 搜索联想面板：挂在根层，天然压在内容与 Dock 之上、播放浮窗之下。
-            .children(yk_library::search_ui::suggest_overlay(t, &self.search, window, cx))
             // 尚未接入的动作给一个明确提示，避免「点了没反应」。
             .children(
                 self.search
@@ -3142,7 +3383,10 @@ impl Render for AppRoot {
                 self.quit_hint_shown_at
                     .is_some()
                     .then(|| yk_shell::overlay::quit_hint(t, QUIT_HINT_TEXT)),
-            );
+            )
+            // 搜索浮层永远最上层：播放器 / 账号面板 / 退出提示都压在它之下，
+            // 开启时连遮罩一起盖住整窗。
+            .children(search_overlay);
 
         match self.remote_image_cache.clone() {
             Some(cache) => root.image_cache(cache),
@@ -3199,8 +3443,8 @@ fn avatar(
     };
     div()
         .id("topbar-avatar")
-        .w(px(34.))
-        .h(px(34.))
+        .w(px(TOP_BAR_AVATAR_SIZE))
+        .h(px(TOP_BAR_AVATAR_SIZE))
         .rounded_full()
         .border_1()
         .border_color(t.surfaces.border_popover)
@@ -3217,7 +3461,7 @@ fn avatar(
         }))
         .when(hidden, |el| el.invisible())
         .child(
-            yk_components::avatar::Avatar::new(34.0)
+            yk_components::avatar::Avatar::new(TOP_BAR_AVATAR_SIZE)
                 .url(face.unwrap_or_default())
                 .background(linear_gradient(
                     135.,

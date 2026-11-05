@@ -71,12 +71,14 @@ fn main() {
                     titlebar: Some(TitlebarOptions {
                         title: Some("YKPili".into()),
                         // macOS：原生标题栏透明 + FullSizeContentView，红黄绿按钮
-                        // 直接压在应用顶栏上；y = 26 让按钮中心落在 64 高顶栏中线。
+                        // 直接压在应用顶栏上。`traffic_light_position` 是按钮**左上角**
+                        // 的位置，按钮直径约 14；y = 9 让中心落在 32 高顶栏中线
+                        // （9 + 14 / 2 = 16）。
                         // Windows：同样隐藏系统标题栏，由应用顶栏自绘
                         // 最小化 / 最大化 / 关闭，并把整条顶栏作为拖动区。
                         appears_transparent: true,
                         traffic_light_position: if cfg!(target_os = "macos") {
-                            Some(point(px(20.), px(26.)))
+                            Some(point(px(20.), px(9.)))
                         } else {
                             None
                         },

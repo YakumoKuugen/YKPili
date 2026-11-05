@@ -25,7 +25,17 @@ pub fn top_bar<V: 'static>(
         .relative()
         // 整条顶栏都能按住拖动窗口。控件组各自截住 mouse_down，
         // 所以点头像 / 输入框 / 窗口按钮不会误拖窗口。
-        .on_mouse_down(MouseButton::Left, |_, window, _| begin_window_drag(window))
+        //
+        // 双击必须在这里分流，不能挂 `on_double_click`：ClickEvent 会从
+        // 搜索框冒泡到顶栏，双击输入框里的文字就会误缩放窗口；而搜索框在
+        // capture 阶段就吞掉了 mouse_down，放在这里双击它不会被顶栏接住。
+        .on_mouse_down(MouseButton::Left, |event, window, _| {
+            match titlebar_mouse_action(event.click_count) {
+                TitlebarMouseAction::Drag => begin_window_drag(window),
+                TitlebarMouseAction::DoubleClick => perform_titlebar_double_click(window),
+                TitlebarMouseAction::Ignore => {}
+            }
+        })
         .flex()
         .items_center()
         .w_full()
@@ -51,13 +61,15 @@ pub fn top_bar<V: 'static>(
         .border_b_1()
         .border_color(s.border_subtle)
         .child(leading)
+        // 搜索槽位按**窗口中线**绝对定位：收起态胶囊和展开浮层用同一个中心，
+        // 展开 / 收回时不会因为左侧头像占位而横向跳一下。
         .child(
             div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .justify_center()
+                .absolute()
+                .left(px(
+                    (window.viewport_size().width.as_f32() - TOP_BAR_SEARCH_COLLAPSED_WIDTH) / 2.0,
+                ))
+                .top(px(TOP_BAR_SEARCH_TOP))
                 .child(search),
         );
 
@@ -74,7 +86,7 @@ pub fn toolbar_group(t: &YkTheme, child: AnyElement) -> AnyElement {
         .flex()
         .items_center()
         .gap(px(SPACE_0_5))
-        .p(px(6.))
+        .p(px(SPACE_0_5))
         .h(px(TOP_BAR_CONTROL_HEIGHT))
         .flex_shrink_0()
         .rounded_full()
@@ -99,6 +111,51 @@ fn window_hwnd(window: &Window) -> Option<*mut core::ffi::c_void> {
         RawWindowHandle::Win32(win32) => Some(win32.hwnd.get() as *mut core::ffi::c_void),
         _ => None,
     }
+}
+
+/// 顶栏左键按下要做什么。
+///
+/// 顶栏同时是拖动区，双击必须和拖动分开处理：第二次按下若继续
+/// `begin_window_drag`，只会再进一次系统拖动循环，永远走不到双击动作。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TitlebarMouseAction {
+    /// 单击：按住拖动窗口。
+    Drag,
+    /// 双击：执行平台原生的标题栏双击动作。
+    DoubleClick,
+    /// 三连击及以上：什么都不做，避免刚缩放又被还原。
+    Ignore,
+}
+
+fn titlebar_mouse_action(click_count: usize) -> TitlebarMouseAction {
+    match click_count {
+        1 => TitlebarMouseAction::Drag,
+        2 => TitlebarMouseAction::DoubleClick,
+        _ => TitlebarMouseAction::Ignore,
+    }
+}
+
+/// 双击标题栏：交给平台执行「连按标题栏」的默认动作。
+///
+/// macOS 走 `Window::titlebar_double_click()`：GPUI 会读取系统设置
+/// `AppleActionOnDoubleClick`，按用户选的「缩放 / 最小化 / 填充 / 无操作」
+/// 执行，和原生标题栏完全一致（`Fill` 在系统支持时走 `_zoomFill:`，
+/// 尊重「平铺窗口留边距」）。这里不能直接调 `zoom_window`，否则会无视
+/// 系统设置里的最小化 / 填充选项。
+///
+/// 之所以要自己转发：窗口开了 `app_owns_titlebar_drag`（整条 64px 顶栏
+/// 可拖），AppKit 不再把内容区当系统标题栏，双击也就不会自动生效。
+/// 见 main.rs 里 `app_owns_titlebar_drag` 的说明。
+pub fn perform_titlebar_double_click(window: &Window) {
+    eprintln!("[window] 标题栏双击");
+    #[cfg(target_os = "macos")]
+    window.titlebar_double_click();
+    // Windows 约定：双击标题栏 = 最大化 / 还原。复用窗口按钮那条
+    // PostMessage 路径，避免在事件回调里同步进系统循环造成 GPUI 重入。
+    #[cfg(target_os = "windows")]
+    toggle_maximize(window);
+    #[cfg(target_os = "linux")]
+    window.zoom_window();
 }
 
 /// 按住顶栏拖动窗口。
@@ -225,4 +282,21 @@ extern "system" {
     fn ReleaseCapture() -> i32;
     fn PostMessageW(hwnd: *mut core::ffi::c_void, msg: u32, wparam: usize, lparam: isize) -> i32;
     fn IsZoomed(hwnd: *mut core::ffi::c_void) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    // 只精确导入被测项：`use super::*` 会把父模块 `use gpui::*` 带来的
+    // `test` 宏一起拉进来，`#[test]` 就会解析成 gpui 的测试宏并递归展开。
+    use super::{titlebar_mouse_action, TitlebarMouseAction};
+
+    /// 单击拖动、双击交给平台、三连击忽略 —— 三连击必须落在 Ignore，
+    /// 否则会「缩放 → 还原」来回切。
+    #[test]
+    fn click_count_maps_to_titlebar_action() {
+        assert_eq!(titlebar_mouse_action(1), TitlebarMouseAction::Drag);
+        assert_eq!(titlebar_mouse_action(2), TitlebarMouseAction::DoubleClick);
+        assert_eq!(titlebar_mouse_action(3), TitlebarMouseAction::Ignore);
+        assert_eq!(titlebar_mouse_action(0), TitlebarMouseAction::Ignore);
+    }
 }

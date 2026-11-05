@@ -597,10 +597,18 @@ impl UpProfileView {
     }
 
     fn target_bounds(&self) -> Bounds<Pixels> {
-        let w = PANEL_W.min(self.viewport.width.as_f32() - 48.0).max(360.0);
-        let h = PANEL_H.min(self.viewport.height.as_f32() - 48.0).max(360.0);
-        let x = ((self.viewport.width.as_f32() - w) / 2.0).max(24.0);
-        let y = ((self.viewport.height.as_f32() - h) / 2.0).max(24.0);
+        let viewport_w = self.viewport.width.as_f32();
+        let viewport_h = self.viewport.height.as_f32();
+        let w = PANEL_W.min(viewport_w - 48.0).max(360.0);
+        // 和播放浮窗 / 账号面板一致：标题栏以下才是浮窗的地盘。
+        // 顶部固定为「顶栏 + 16」，不再按整窗垂直居中 —— 否则窗口矮时
+        // 面板会顶到标题栏上；高度不够时往下收缩，底部留 24。
+        let top = TOP_BAR_HEIGHT + SPACE_4;
+        let bottom = SPACE_6;
+        let available_h = (viewport_h - top - bottom).max(360.0);
+        let h = PANEL_H.min(available_h).max(360.0);
+        let x = ((viewport_w - w) / 2.0).max(24.0);
+        let y = top;
         Bounds {
             origin: point(px(x), px(y)),
             size: size(px(w), px(h)),
@@ -663,6 +671,8 @@ impl UpProfileView {
         };
 
         // 遮罩：0.55 黑，与浮窗同一帧起收（12.9.3 的时间线）。
+        // 铺满点击层即可 —— 点击层本身已经是从顶栏下沿开始的
+        // （标题栏保持原亮度、原交互，和播放浮窗一致）。
         let scrim = div()
             .absolute()
             .inset_0()
@@ -692,7 +702,10 @@ impl UpProfileView {
                 div()
                     .id("up-profile-backdrop")
                     .absolute()
-                    .inset_0()
+                    .top(px(TOP_BAR_HEIGHT))
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
                     .occlude()
                     .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
                         view.begin_close(cx);

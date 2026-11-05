@@ -168,6 +168,9 @@ pub fn search_bar<V: SearchHost + 'static>(
     state: &SearchState,
     window: &Window,
     cx: &mut Context<V>,
+    // 是否画聚焦环。收回动画里由浮层另画一枚随进度渐隐的环，
+    // 这里先关掉，避免结束时「啪」一下消失。
+    show_ring: bool,
 ) -> AnyElement {
     let s = &t.surfaces;
     let p = &t.palette;
@@ -175,7 +178,7 @@ pub fn search_bar<V: SearchHost + 'static>(
         return div()
             .w_full()
             .max_w(px(SEARCH_BAR_WIDTH))
-            .h(px(TOP_BAR_CONTROL_HEIGHT))
+            .h_full()
             .rounded_full()
             .bg(s.surface_elevated_solid)
             .border_1()
@@ -184,10 +187,11 @@ pub fn search_bar<V: SearchHost + 'static>(
     };
     let handle = input.read(cx).focus_handle(cx);
     let focused = handle.is_focused(window) || state.open;
+    let ringed = focused && show_ring;
 
     let mut shadow = t.shadows.shadow_1.clone();
     shadow.extend(t.shadows.edge_glow_1.clone());
-    if focused {
+    if ringed {
         // 聚焦态：参考稿的「亮蓝色粗环 + 外圈柔光」。
         // 边框只有 1px，靠两段 BoxShadow 把环撑到约 2.5px：
         // 内段 1.5px 硬边跟着圆角走，外段 14px 柔光负责发光。
@@ -205,7 +209,7 @@ pub fn search_bar<V: SearchHost + 'static>(
         .gap(px(SPACE_2))
         .w_full()
         .max_w(px(SEARCH_BAR_WIDTH))
-        .h(px(TOP_BAR_CONTROL_HEIGHT))
+        .h_full()
         .pl(px(SPACE_4))
         .pr(px(SPACE_2))
         .rounded_full()
@@ -216,7 +220,7 @@ pub fn search_bar<V: SearchHost + 'static>(
         .border_1()
         // 未聚焦时保留一圈很浅的高光边（不能像白色贴片，但要在深色工具栏上
         // 看得出这是可输入的控件）；聚焦时交给主题色粗环去抢注意力。
-        .border_color(if focused {
+        .border_color(if ringed {
             p.theme_primary
         } else {
             s.border_popover
@@ -251,13 +255,14 @@ pub fn search_bar<V: SearchHost + 'static>(
             }
             let key = event.keystroke.key.as_str();
             if key == "escape" {
+                cx.stop_propagation();
                 if view.search_state_mut().selected.is_some() {
                     view.search_state_mut().selected = None;
+                    cx.notify();
                 } else {
-                    view.search_state_mut().open = false;
+                    // 交给组装点播「收回」动画；默认实现直接收起。
+                    view.search_request_close(cx);
                 }
-                cx.stop_propagation();
-                cx.notify();
                 return;
             }
             if key != "down" && key != "up" {
@@ -345,6 +350,7 @@ pub fn search_bar<V: SearchHost + 'static>(
     let bounds = state.bar_bounds.clone();
     div()
         .w_full()
+        .h_full()
         .flex()
         .justify_center()
         .on_children_prepainted(move |children, _window, _cx| {
@@ -354,6 +360,201 @@ pub fn search_bar<V: SearchHost + 'static>(
         })
         .child(bar)
         .into_any_element()
+}
+
+/// 搜索浮层时长：展开总 320ms（阻尼弹簧，峰值≈200ms 后落稳），收回 180ms。
+/// 几何与时长集中在这里，组装点只负责驱动。
+pub const SEARCH_GROW_MS: u64 = 200;
+pub const SEARCH_OPEN_MS: u64 = 320;
+pub const SEARCH_CLOSE_MS: u64 = 180;
+
+/// 展开曲线：macOS 面板展开的阻尼弹簧节奏（ζ = 0.8 / 归一化角频率 5）。
+///
+/// 不是匀速长大再硬停：约 63% 时长（≈200ms）处轻微过冲 ~1.4%，
+/// 之后 120ms 平滑收敛，没有二次回弹 —— 这就是「结束时的缓动」。
+/// 起点速度为 0，符合 macOS 弹簧从静止开始的手感。
+pub fn search_open_progress(t: f32) -> f32 {
+    const ZETA: f32 = 0.8;
+    const OMEGA_D: f32 = 5.0;
+
+    let u = t.clamp(0.0, 1.0);
+    let omega = OMEGA_D / (1.0 - ZETA * ZETA).sqrt();
+    let decay = ZETA * omega;
+    let ring = |x: f32| {
+        1.0 - (-decay * x).exp()
+            * ((OMEGA_D * x).cos() + (decay / OMEGA_D) * (OMEGA_D * x).sin())
+    };
+    // 归一化：终点严格落在 1（弹簧解析解在 u=1 时有 ~0.1% 残差）。
+    (ring(u) / ring(1.0)).clamp(0.0, 1.02)
+}
+
+/// 收起态搜索胶囊在窗口里的矩形：以窗口中线为基准，和展开浮层同一个中心，
+/// 这样展开 / 收回时不会横向跳一下。
+pub fn search_collapsed_bounds(viewport_width: f32) -> Bounds<Pixels> {
+    let width = TOP_BAR_SEARCH_COLLAPSED_WIDTH;
+    Bounds {
+        origin: point(px((viewport_width - width) / 2.0), px(TOP_BAR_SEARCH_TOP)),
+        size: size(px(width), px(TOP_BAR_CONTROL_HEIGHT)),
+    }
+}
+
+/// 展开态搜索框：宽度夹在 600 与窗口可用宽之间，顶部与收起态胶囊对齐、
+/// 向下多出 14px 压在内容上（浮层，不是把顶栏撑高）。
+pub fn search_expanded_bounds(viewport_width: f32) -> Bounds<Pixels> {
+    let width = (viewport_width - SPACE_6 * 2.0)
+        .min(TOP_BAR_SEARCH_WIDTH)
+        .max(200.0);
+    Bounds {
+        origin: point(px((viewport_width - width) / 2.0), px(TOP_BAR_SEARCH_TOP)),
+        size: size(px(width), px(TOP_BAR_SEARCH_HEIGHT)),
+    }
+}
+
+/// 收起态胶囊：顶栏里常驻的入口，点击后展开成浮在最上层的完整搜索框。
+pub fn search_pill<V: SearchHost + 'static>(
+    t: &YkTheme,
+    state: &SearchState,
+    _window: &Window,
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let s = &t.surfaces;
+    let draft = state.draft.trim().to_string();
+    let placeholder = draft.is_empty();
+    let label = if placeholder {
+        "搜索视频、UP 主、番剧".to_string()
+    } else {
+        draft
+    };
+    let hover_border = s.border_strong;
+    // 和展开态未聚焦时同一套底影：收起动画最后一帧与胶囊重合，不留接缝。
+    let mut shadow = t.shadows.shadow_1.clone();
+    shadow.extend(t.shadows.edge_glow_1.clone());
+    div()
+        .id("topbar-search-pill")
+        .w(px(TOP_BAR_SEARCH_COLLAPSED_WIDTH))
+        .h(px(TOP_BAR_CONTROL_HEIGHT))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_2))
+        .pl(px(SPACE_4))
+        .pr(px(SPACE_2))
+        .rounded_full()
+        // 与展开态搜索框同一套材质 / 内边距 / 图标位置：
+        // 展开动画从胶囊矩形长到 600×46 时，内容不会“跳”一下。
+        .bg(s.surface_elevated_solid)
+        .border_1()
+        .border_color(s.border_popover)
+        .shadow(shadow)
+        .cursor_pointer()
+        .occlude()
+        // 点在胶囊上不能触发顶栏拖拽 / 双击缩放。
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|view, _: &ClickEvent, window, cx| {
+            view.search_request_open(window, cx);
+            cx.stop_propagation();
+        }))
+        .hover(move |style| style.border_color(hover_border))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                // 与展开态输入框的文字几何逐项对齐，避免开合瞬间文字跳位：
+                // 左内边距 = Input 的 `input_px(Medium)`（10）；字号 / 行高 =
+                // Input 的 `text_sm`（0.875rem）与 `line_height(1.25rem)`。
+                .pl(px(10.))
+                .truncate()
+                .text_sm()
+                .line_height(px(20.))
+                .text_color(if placeholder {
+                    s.text_tertiary
+                } else {
+                    s.text_primary
+                })
+                .child(label),
+        )
+        .child(
+            // 右侧放大镜与展开态搜索按钮同一个尺寸 / 位置：
+            // 32 宽的按钮位 + 19px 图标，右边距 8。
+            div()
+                .w(px(32.))
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(IconName::Search)
+                        .size(px(19.))
+                        .text_color(s.text_secondary),
+                ),
+        )
+        .into_any_element()
+}
+
+/// 搜索浮层：在收起态胶囊矩形与展开态矩形之间插值，做出「放大 / 回收」动画。
+#[derive(gpui::IntoElement)]
+pub struct SearchPopover {
+    pub theme: YkTheme,
+    pub bar: AnyElement,
+    pub source: Bounds<Pixels>,
+    pub target: Bounds<Pixels>,
+    pub progress: f32,
+    /// 收回动画：聚焦环由浮层自己画，随进度渐隐；打开态仍用搜索框自带的环。
+    pub closing: bool,
+}
+
+impl RenderOnce for SearchPopover {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let Self {
+            theme,
+            bar,
+            source,
+            target,
+            progress,
+            closing,
+        } = self;
+        let p = progress.clamp(0.0, 1.0);
+        let bounds = lerp_bounds(source, target, p);
+        // 收回时蓝色聚焦环跟着外框一起渐隐：结束时环已经透明，
+        // 不会在浮层卸载的那一帧硬消失。
+        let ring = closing.then(|| {
+            div()
+                .absolute()
+                .inset_0()
+                .rounded_full()
+                .border_1()
+                .border_color(theme.palette.theme_primary)
+                .shadow(vec![
+                    BoxShadow::new(px(0.), px(0.), theme.palette.theme_primary)
+                        .spread_radius(px(1.5)),
+                    BoxShadow::new(px(0.), px(0.), theme.palette.theme_primary_40)
+                        .blur_radius(px(14.))
+                        .spread_radius(px(1.)),
+                ])
+                .opacity(p)
+        });
+        // 胶囊和展开框同构（同内边距 / 同图标位置），整段动画只插值外框，
+        // 内容始终按当前尺寸排版，不会出现「先长壳后显字」的空档。
+        div()
+            .id("search-floating")
+            .absolute()
+            .left(px(bounds.origin.x.as_f32()))
+            .top(px(bounds.origin.y.as_f32()))
+            .w(px(bounds.size.width.as_f32().max(1.0)))
+            .h(px(bounds.size.height.as_f32().max(1.0)))
+            .child(div().absolute().inset_0().child(bar))
+            .children(ring)
+    }
+}
+
+fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
+    let mix = |a: Pixels, b: Pixels| px(a.as_f32() + (b.as_f32() - a.as_f32()) * t);
+    Bounds {
+        origin: point(mix(a.origin.x, b.origin.x), mix(a.origin.y, b.origin.y)),
+        size: size(
+            mix(a.size.width, b.size.width),
+            mix(a.size.height, b.size.height),
+        ),
+    }
 }
 
 pub fn suggest_overlay<V: SearchHost + 'static>(
@@ -370,16 +571,20 @@ pub fn suggest_overlay<V: SearchHost + 'static>(
     // 面板是一个挂在根层的浮层：贴着搜索框下沿 6px，宽度与搜索框一致。
     // 搜索框在顶栏里是被 logo / 头像夹住的 flex 居中，不是窗口正中；
     // 用 prepaint 记下的实际矩形定位，窗口缩放也不会错位。
+    let viewport_width = window.viewport_size().width.as_f32();
+    let fallback = search_expanded_bounds(viewport_width);
     let bar = state.bar_bounds.get();
     let left = bar
         .map(|b| b.origin.x.as_f32())
-        .unwrap_or_else(|| (window.viewport_size().width.as_f32() - SEARCH_BAR_WIDTH) / 2.0);
+        .unwrap_or_else(|| fallback.origin.x.as_f32());
     let top = bar
         .map(|b| b.origin.y.as_f32() + b.size.height.as_f32() + 6.0)
-        .unwrap_or(TOP_BAR_HEIGHT - 2.0);
+        .unwrap_or_else(|| {
+            fallback.origin.y.as_f32() + fallback.size.height.as_f32() + 6.0
+        });
     let width = bar
         .map(|b| b.size.width.as_f32())
-        .unwrap_or(SEARCH_BAR_WIDTH)
+        .unwrap_or(fallback.size.width.as_f32())
         .max(320.0);
 
     let mut panel = div()
@@ -1210,6 +1415,7 @@ pub fn video_grid<V: SearchHost + 'static>(
         }
         grid = grid.child(card(
             t,
+            COVER_CELL_WIDTH,
             &item,
             hovered == Some(index),
             leaving == Some(index),
@@ -2154,3 +2360,34 @@ pub fn notice(t: &YkTheme, text: &str) -> AnyElement {
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    // 精确导入，避免父模块 `use gpui::*` 的 `test` 宏把 `#[test]` 抢走。
+    use super::search_open_progress;
+
+    /// 展开曲线必须有「结束缓动」：终点严格落在 1，峰值轻微过冲，
+    /// 过冲之后单调收敛 —— 参考 macOS 弹簧节奏。
+    #[test]
+    fn open_curve_settles_with_soft_overshoot() {
+        assert!(search_open_progress(0.0).abs() < 1e-4);
+        assert!((search_open_progress(1.0) - 1.0).abs() < 1e-4);
+
+        let mut peak = 0.0_f32;
+        for i in 0..=1000 {
+            peak = peak.max(search_open_progress(i as f32 / 1000.0));
+        }
+        assert!(
+            peak > 1.005 && peak < 1.02,
+            "过冲应控制在 0.5%~2%，peak = {peak}"
+        );
+
+        // 峰值之后只能回落，不能二次回弹。
+        let mut prev = peak;
+        for i in 700..=1000 {
+            let v = search_open_progress(i as f32 / 1000.0);
+            assert!(v <= prev + 1e-4, "尾部出现二次回弹");
+            prev = v;
+        }
+    }
+}

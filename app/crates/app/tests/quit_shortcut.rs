@@ -46,6 +46,10 @@ fn cmd_q_shows_quit_hint(cx: &mut TestAppContext) {
     app.update_in(&mut cx, |app, window, cx| {
         app.focus_search_for_test(window, cx);
     });
+    // 搜索框只在展开态存在：补画一帧，键事件才有输入框节点可走。
+    cx.update(|window, cx| {
+        window.draw(cx).clear(cx);
+    });
     assert!(!app.read_with(&cx, |app, _| app.quit_hint_visible()));
 
     cx.simulate_keystrokes(quit_shortcut());

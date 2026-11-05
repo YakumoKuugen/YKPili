@@ -70,12 +70,21 @@ pub const PADDING_BUTTON: (f32, f32) = (16.0, 8.0);
 // ================= 控件几何 =================
 
 pub const CONTROL_HEIGHT: f32 = 34.0;
-pub const TOP_BAR_CONTROL_HEIGHT: f32 = 46.0;
-/// 顶栏胶囊里的图标按钮：46 高胶囊内上下各留 6。
-pub const TOP_BAR_ICON_BUTTON_SIZE: f32 = 34.0;
-/// 顶栏搜索框最大宽（参考稿把搜索做成顶栏唯一的大件）。
+/// 顶栏胶囊高度：32 高顶栏里上下各留 4。
+pub const TOP_BAR_CONTROL_HEIGHT: f32 = 24.0;
+/// 顶栏胶囊里的头像尺寸：24 高胶囊内再留 2。
+pub const TOP_BAR_AVATAR_SIZE: f32 = 20.0;
+/// 顶栏胶囊里的图标按钮：24 高胶囊内上下各留 2。
+pub const TOP_BAR_ICON_BUTTON_SIZE: f32 = 20.0;
+/// 顶栏搜索框展开态最大宽（参考稿把搜索做成顶栏唯一的大件）。
 pub const TOP_BAR_SEARCH_WIDTH: f32 = 600.0;
-pub const TOP_BAR_HEIGHT: f32 = 64.0;
+/// 收起态搜索胶囊宽度：刚好放下放大镜 + 一行占位文案。
+pub const TOP_BAR_SEARCH_COLLAPSED_WIDTH: f32 = 260.0;
+/// 展开态搜索框高度（沿用原 64 高顶栏里的控件高度）。
+pub const TOP_BAR_SEARCH_HEIGHT: f32 = 46.0;
+/// 搜索胶囊 / 展开浮层的顶部偏移：32 高顶栏里居中 = (32 − 24) / 2。
+pub const TOP_BAR_SEARCH_TOP: f32 = 4.0;
+pub const TOP_BAR_HEIGHT: f32 = 32.0;
 pub const SCROLL_BAR_SIZE: f32 = 6.0;
 
 pub const PLAYER_PANEL_WIDTH: f32 = 900.0;

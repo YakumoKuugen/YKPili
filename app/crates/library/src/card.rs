@@ -45,7 +45,27 @@ pub trait CardHost: Sized + 'static {
     ) -> AnyElement;
 }
 
-/// 封面卡片：208 × 184（COVER_CELL_WIDTH / COVER_CELL_HEIGHT）。
+/// 署名行固定高度（头像 / 文字行高）。卡片高度推导也用它，改一处即可。
+const CARD_BYLINE_HEIGHT: f32 = 18.0;
+
+/// 卡片高度：封面按 16:9 跟着卡片宽度长高，封面以下的文字区固定。
+///
+/// = 上下各 8 内边距 + 封面 + 标题（上边距 4 + 2×18 行高）
+/// + 署名行（上边距 2 + 18）。宽度变了高度不跟，标题 / 署名会被裁掉。
+pub fn card_height(card_w: f32) -> f32 {
+    let cover_w = (card_w - SPACE_2 * 2.0).max(1.0);
+    cover_w * (COVER_ITEM_HEIGHT / COVER_ITEM_WIDTH)
+        + SPACE_2 * 2.0
+        + SPACE_1
+        + LINE_HEIGHT_CONTROL * 2.0
+        + 2.0
+        + CARD_BYLINE_HEIGHT
+}
+
+/// 封面卡片：默认 208 × 184（`COVER_CELL_WIDTH` / `COVER_CELL_HEIGHT`）。
+///
+/// 实际宽度由首页网格按窗口宽度分配（见 `yk_library::home::card_width`），
+/// 封面按 16:9 跟着宽度长高，封面以下的文字区高度固定。
 ///
 /// 结构对应设计文档第 04 节「封面卡片解剖」：
 ///
@@ -67,6 +87,7 @@ pub trait CardHost: Sized + 'static {
 /// 由占位色派生暗/亮两档后用 `linear_gradient` 画出来。
 pub fn card<V: CardHost>(
     t: &YkTheme,
+    card_w: f32,
     item: &CoverItem,
     hovered: bool,
     leaving: bool,
@@ -78,6 +99,8 @@ pub fn card<V: CardHost>(
 ) -> impl IntoElement {
     let s = &t.surfaces;
     let p = &t.palette;
+    let cover_w = (card_w - SPACE_2 * 2.0).max(1.0);
+    let card_h = card_height(card_w);
     let title = item.title.clone();
     let bvid = item.bvid.clone();
     let idx = item.index;
@@ -164,13 +187,13 @@ pub fn card<V: CardHost>(
         .inset_0()
         .flex()
         .flex_col()
-        // 8 padding：192 封面 + 184 单元格几何都从这里推出来。
+        // 8 padding：封面宽度 = 卡片宽 − 16，卡片高度由 `card_height` 推导。
         .p(px(SPACE_2))
         .child(cover)
         .child(
             div()
-                // 标题/署名固定 192 宽：卡片 hover 放大时文本不再重排。
-                .w(px(COVER_ITEM_WIDTH))
+                // 标题/署名跟随封面宽度：卡片 hover 放大时文本不再重排。
+                .w(px(cover_w))
                 .flex()
                 .flex_col()
                 .child(
@@ -240,8 +263,8 @@ pub fn card<V: CardHost>(
     div()
         .id(("cover", idx))
         .relative()
-        .w(px(COVER_CELL_WIDTH))
-        .h(px(COVER_CELL_HEIGHT))
+        .w(px(card_w))
+        .h(px(card_h))
         .rounded(px(CARD_RADIUS))
         .overflow_hidden()
         // 默认态透明（设计稿 `.card` 默认无底色），悬停时才浮出表面色。
@@ -439,7 +462,7 @@ fn byline<V: CardHost>(
         .flex()
         .items_center()
         .gap(px(6.))
-        .h(px(18.))
+        .h(px(CARD_BYLINE_HEIGHT))
         .mt(px(2.))
         .text_size(px(FONT_SIZE_CAPTION))
         .text_color(s.text_tertiary)

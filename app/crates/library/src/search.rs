@@ -11,7 +11,7 @@ use std::rc::Rc;
 use gpui::component::input::InputState;
 use gpui::component::input::InputEvent;
 use gpui::AppContext as _;
-use gpui::{Bounds, Context, Entity, Pixels};
+use gpui::{Bounds, Context, Entity, Focusable as _, Pixels, Window};
 use yk_infra::search::{
     Hotword, SearchHistory, SearchResults, SearchSort, SearchTab, SearchVideo, SuggestItem,
 };
@@ -205,6 +205,25 @@ pub trait SearchHost: crate::card::CardHost + Sized {
     fn search_load_more(&mut self, cx: &mut Context<Self>) { self.load_search_page(true, cx); }
     fn search_reload(&mut self, cx: &mut Context<Self>) { self.load_search_page(false, cx); }
     fn search_notice(&mut self, text: String, cx: &mut Context<Self>) { self.set_search_notice(text, cx); }
+
+    /// 打开顶栏搜索浮层。组装点覆盖成带动画的展开；默认直接展开。
+    fn search_request_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_state_mut().open = true;
+        self.search_state_mut().selected = None;
+        self.search_ensure_hotwords(cx);
+        if let Some(input) = self.search_state().input.clone() {
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    /// 收起顶栏搜索浮层。组装点覆盖成带动画的回收；默认直接收起。
+    fn search_request_close(&mut self, cx: &mut Context<Self>) {
+        self.search_state_mut().open = false;
+        self.search_state_mut().selected = None;
+        cx.notify();
+    }
 
     /// 提交搜索后把页面切到结果页；组装点覆盖。
     fn search_route_to_results(&mut self, _cx: &mut Context<Self>) {}
@@ -507,7 +526,8 @@ pub trait SearchHost: crate::card::CardHost + Sized {
         }
         self.search_state_mut().draft = query.clone();
         self.search_state_mut().query = query;
-        self.search_state_mut().open = false;
+        // 走统一的收起入口：组装点会播回收动画，并把焦点还给根节点。
+        self.search_request_close(cx);
         self.search_state_mut().selected = None;
         // 提交后取消还在防抖窗口里的联想请求；结果页不再需要它。
         self.search_state_mut().suggest_generation = self.search_state_mut().suggest_generation.wrapping_add(1);
@@ -692,10 +712,12 @@ pub trait SearchHost: crate::card::CardHost + Sized {
                         .timer(Duration::from_millis(160))
                         .await;
                     let _ = this.update(cx, |view, cx| {
-                        if view.search_state_mut().suggest_generation == generation && view.search_state_mut().open {
-                            view.search_state_mut().open = false;
-                            view.search_state_mut().selected = None;
-                            cx.notify();
+                        if view.search_state_mut().suggest_generation == generation
+                            && view.search_state_mut().open
+                        {
+                            // 失焦 = 点到了外面：走和 Esc 同一条收起路径，
+                            // 组装点会播收回动画。
+                            view.search_request_close(cx);
                         }
                     });
                 })

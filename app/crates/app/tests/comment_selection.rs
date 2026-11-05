@@ -121,7 +121,8 @@ fn horizontal_drag_in_comment_does_not_scroll_panel(cx: &mut TestAppContext) {
     // 侧栏正文起点：右缘内缩 16 − 面板宽 400，再让开 padding 16 + 头像 28 + 间距 8。
     let text_left = WINDOW_W - WINDOW_INSET - PANEL_WIDTH + 16.0 + 28.0 + 8.0;
     // 取评论正文靠上的位置：修复前它落在「正文裁切区的上 16px」里。
-    let y = 285.0;
+    // 播放浮窗顶部 = TOP_BAR_HEIGHT + 16，这里取浮窗内 205px 处。
+    let y = yk_theme::theme::TOP_BAR_HEIGHT + 16.0 + 205.0;
 
     vcx.simulate_mouse_move(
         point(px(text_left + 10.0), px(y)),
@@ -197,7 +198,10 @@ fn horizontal_drag_in_comment_does_not_scroll_panel(cx: &mut TestAppContext) {
         });
         window.render_frame(cx);
     });
-    let press = point(px(text_left + 40.0), px(285.0));
+    let press = point(
+        px(text_left + 40.0),
+        px(yk_theme::theme::TOP_BAR_HEIGHT + 16.0 + 205.0),
+    );
     vcx.simulate_mouse_down(press, MouseButton::Right, Modifiers::default());
     vcx.simulate_mouse_up(press, MouseButton::Right, Modifiers::default());
     vcx.update(|window, cx| {

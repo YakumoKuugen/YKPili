@@ -423,9 +423,12 @@ impl Render for AccountView {
             SPACE_5
         };
         let source = Bounds {
-            // 胶囊内边距 6，头像本体 34。
-            origin: point(px(left + 6.), px((TOP_BAR_HEIGHT - 34.) / 2.)),
-            size: size(px(34.), px(34.)),
+            // 胶囊内边距 2，头像本体 20。
+            origin: point(
+                px(left + SPACE_0_5),
+                px((TOP_BAR_HEIGHT - TOP_BAR_AVATAR_SIZE) / 2.),
+            ),
+            size: size(px(TOP_BAR_AVATAR_SIZE), px(TOP_BAR_AVATAR_SIZE)),
         };
         let target = Bounds {
             origin: point(px(left), px(TOP_BAR_HEIGHT + SPACE_4)),
