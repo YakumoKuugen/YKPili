@@ -43,12 +43,26 @@ fn luma709(r: f32, g: f32, b: f32) -> f32 {
 ///
 /// 尺寸为奇数时，UV 平面按向下取整处理（右/下边缘那一个像素不参与色度采样）。
 pub fn rgba_to_nv12(data: &[u8], width: u32, height: u32) -> Nv12Frame {
+    let mut frame = Nv12Frame { width, height, y: Vec::new(), uv: Vec::new() };
+    rgba_to_nv12_into(&mut frame, data, width, height);
+    frame
+}
+
+/// 同 [`rgba_to_nv12`]，但写进调用方复用的 `Nv12Frame`。
+///
+/// 逐帧链路用这个：平面容量够时只覆写像素，不再每帧分配 Y/UV 两个 `Vec`
+/// （1080p 约 3 MB/帧，4K 约 12 MB/帧）。尺寸变化时 `resize` 自动扩容。
+pub fn rgba_to_nv12_into(out: &mut Nv12Frame, data: &[u8], width: u32, height: u32) {
     let w = width as usize;
     let h = height as usize;
-    let mut y_plane = vec![0u8; w * h];
+    out.width = width;
+    out.height = height;
+    out.y.resize(w * h, 0);
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
-    let mut uv_plane = vec![128u8; cw * ch * 2];
+    out.uv.resize(cw * ch * 2, 128);
+    let y_plane = &mut out.y;
+    let uv_plane = &mut out.uv;
 
     for row in 0..h {
         for col in 0..w {
@@ -94,7 +108,6 @@ pub fn rgba_to_nv12(data: &[u8], width: u32, height: u32) -> Nv12Frame {
         }
     }
 
-    Nv12Frame { width, height, y: y_plane, uv: uv_plane }
 }
 
 #[cfg(test)]

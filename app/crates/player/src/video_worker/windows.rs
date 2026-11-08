@@ -9,7 +9,7 @@
 //! 通知重绘」。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, TryRecvError, TrySendError};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -68,7 +68,9 @@ impl FrameWorker {
         height: u32,
         start_secs: f64,
     ) -> Option<Self> {
-        let (tx, rx) = mpsc::channel::<WorkerFrame>();
+        // 与 macOS 同一条理由：无界队列遇到 UI 卡顿会按 60fps 堆积整帧 BGRA，
+        // 1080p 每帧 8 MB，几秒就是几百 MB。容量 2 + try_send，内存恒定。
+        let (tx, rx) = mpsc::sync_channel::<WorkerFrame>(2);
         let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_in_thread = stop.clone();
@@ -146,8 +148,9 @@ impl FrameWorker {
                     // 但整帧 BGRA 拷贝 + 贴图上传没人看就别做；
                     // 只把播放位置报回去，进度条与续播位置不能停。
                     if render_paused {
-                        if tx.send(WorkerFrame::Position(t)).is_err() {
-                            break;
+                        match tx.try_send(WorkerFrame::Position(t)) {
+                            Ok(()) | Err(TrySendError::Full(_)) => {}
+                            Err(TrySendError::Disconnected(_)) => break,
                         }
                         std::thread::sleep(Duration::from_millis(100));
                         continue;
@@ -184,9 +187,11 @@ impl FrameWorker {
                                 bgra: frame.data,
                                 serial: frames_sent,
                             };
-                            // 队列里积压的旧帧由 UI 侧的 latest() 丢弃。
-                            if tx.send(WorkerFrame::Frame(out, t)).is_err() {
-                                break;
+                            // UI 还没取走上一帧就丢掉本帧：绝不积压。
+                            match tx.try_send(WorkerFrame::Frame(out, t)) {
+                                Ok(()) => {}
+                                Err(TrySendError::Full(_)) => {}
+                                Err(TrySendError::Disconnected(_)) => break,
                             }
                         }
                         Err(e) => {

@@ -17,14 +17,14 @@
 //! 两者各自独立 —— 这是 UI 线程不再做重活的直接结果。
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, TryRecvError, TrySendError};
 use std::sync::Arc;
 use std::time::Duration;
 
 use objc2_core_foundation::CFRetained;
 use objc2_core_video::CVPixelBuffer;
 
-use yk_infra::media::convert::rgba_to_nv12;
+use yk_infra::media::convert::{rgba_to_nv12_into, Nv12Frame};
 use yk_infra::media::pixel_buffer::nv12_to_pixel_buffer;
 use yk_infra::media::MpvPlayer;
 
@@ -88,7 +88,12 @@ impl FrameWorker {
         height: u32,
         start_secs: f64,
     ) -> Option<Self> {
-        let (tx, rx) = mpsc::channel::<WorkerFrame>();
+        // 队列**必须有界**：一帧 1080p 的 CVPixelBuffer 约 3 MB，4K 约 12 MB。
+        // 无界 channel 在 UI 线程卡顿（切页、解码封面、系统调度）时会按 60fps
+        // 一直堆积，十几秒就能吃出 2–3 GB —— 表现就是「内存泄漏」。
+        // 容量 2 + try_send：UI 没取走就丢本帧。留两格只是给 60fps 抖动一点
+        // 余量，内存上限仍是「最多两帧」——1080p 约 6 MB，4K 约 24 MB。
+        let (tx, rx) = mpsc::sync_channel::<WorkerFrame>(2);
         let (command_tx, command_rx) = mpsc::channel::<WorkerCommand>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_in_thread = stop.clone();
@@ -127,6 +132,8 @@ impl FrameWorker {
                 let mut frames_sent = 0u64;
                 let mut render_errors = 0u32;
                 let mut render_paused = false;
+                // 逐帧复用的 NV12 目标：不再每帧分配 Y/UV 两个 Vec。
+                let mut nv12 = Nv12Frame { width: 0, height: 0, y: Vec::new(), uv: Vec::new() };
                 // 目标帧间隔：60fps。注意这是「**上限**」而不是「固定睡眠」——
                 // 单帧渲染 + 色彩转换本身要 10–25ms，再无条件 sleep 16ms 会把
                 // 60fps 源压到 ~38fps（实测 Dropped 一路涨）。这里改成
@@ -168,40 +175,54 @@ impl FrameWorker {
                     // 是整条链里最贵的一段，没人看就别做。
                     // 只把播放位置报回去：进度条与续播位置不能停。
                     if render_paused {
-                        if tx.send(WorkerFrame::Position(t)).is_err() {
-                            break; // UI 侧已释放 channel
+                        match tx.try_send(WorkerFrame::Position(t)) {
+                            Ok(()) | Err(TrySendError::Full(_)) => {}
+                            Err(TrySendError::Disconnected(_)) => break, // UI 侧已释放 channel
                         }
                         std::thread::sleep(Duration::from_millis(100));
                         continue;
                     }
-                    match player.render_frame() {
-                        Ok(rgba) => {
-                            if frames_sent == 0 {
-                                let vw = player.get_property_double("width").unwrap_or(0.0);
-                                let vh = player.get_property_double("height").unwrap_or(0.0);
+                    // 借用 mpv 的复用缓冲，不复制：1080p 每帧省 8 MB，
+                    // 4K 省 33 MB 的分配 + 拷贝（60fps 下就是几百 MB/s 的抖动）。
+                    let mut fallback_seek = None;
+                    // 片源尺寸要在借用帧之前读：`render_frame_ref` 借的是 `&mut player`，
+                    // 借用期间不能再拿 `&player`。
+                    let first_frame = frames_sent == 0;
+                    let (src_w, src_h) = if first_frame {
+                        (
+                            player.get_property_double("width").unwrap_or(0.0),
+                            player.get_property_double("height").unwrap_or(0.0),
+                        )
+                    } else {
+                        (0.0, 0.0)
+                    };
+                    match player.render_frame_ref() {
+                        Ok(frame) => {
+                            if first_frame {
                                 eprintln!(
-                                    "[video] 首帧 {}x{}（片源 {vw:.0}x{vh:.0}）t={t:.2}",
-                                    rgba.width, rgba.height
+                                    "[video] 首帧 {}x{}（片源 {src_w:.0}x{src_h:.0}）t={t:.2}",
+                                    frame.width, frame.height
                                 );
                             }
                             frames_sent += 1;
                             // 续播兜底：`start` 选项没生效时（部分片源会忽略）
                             // 补一刀 seek。判断放在首帧之后 —— 这时 time-pos
                             // 才是真实位置，加载完成那一刻读到的可能是 0。
+                            // seek 需要 `&mut player`，不能夹在借用帧的期间做。
                             if frames_sent == 1 && start_secs > 0.0 && (t - start_secs).abs() > 3.0
                             {
                                 eprintln!(
                                     "[video] 起播位置没生效（当前 {t:.1}s，目标 {start_secs:.1}s），补 seek"
                                 );
-                                if let Err(e) = player.seek(start_secs) {
-                                    eprintln!("[video] seek 失败：{e}");
-                                }
+                                fallback_seek = Some(start_secs);
                             }
-                            let nv12 = rgba_to_nv12(&rgba.data, rgba.width, rgba.height);
+                            rgba_to_nv12_into(&mut nv12, frame.data, frame.width, frame.height);
                             let buf = nv12_to_pixel_buffer(&nv12);
-                            // 队列里积压的旧帧直接丢弃：UI 只要最新的
-                            if tx.send(WorkerFrame::Frame(buf, t)).is_err() {
-                                break; // UI 侧已释放 channel
+                            match tx.try_send(WorkerFrame::Frame(buf, t)) {
+                                Ok(()) => {}
+                                // UI 还没取走上一帧：丢掉本帧，绝不积压。
+                                Err(TrySendError::Full(_)) => {}
+                                Err(TrySendError::Disconnected(_)) => break,
                             }
                         }
                         Err(e) => {
@@ -211,6 +232,11 @@ impl FrameWorker {
                                     "[video] render_frame 失败（第 {render_errors} 次）：{e}"
                                 );
                             }
+                        }
+                    }
+                    if let Some(secs) = fallback_seek {
+                        if let Err(e) = player.seek(secs) {
+                            eprintln!("[video] seek 失败：{e}");
                         }
                     }
                     // 补齐到目标帧间隔；本帧已经超时就不睡，直接进下一帧。

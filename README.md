@@ -77,5 +77,6 @@ cargo run --bin decode_test
 - `packaging/windows/README.md` — Windows 绿色包 / NSIS 安装包
 - `docs/macos-零拷贝视频播放器踩坑全记录.md` — 播放内核调研
 - `docs/macos-音频设备掉线崩溃.md` — 拔耳机闪退的定位与 libmpv 补丁
+- `docs/播放器内存排查.md` — 内存涨到 2.7 G 的定位：无界帧队列与每帧分配
 - `docs/skills/` — 可复用的技能说明与参考
 - `docs/archive/` — 历史版本与旧 Avalonia 工程归档

@@ -131,6 +131,17 @@ pub struct RgbaFrame {
     pub data: Vec<u8>,
 }
 
+/// 借用版帧视图：直接指向 mpv 的复用缓冲，不复制。
+///
+/// 逐帧链路（解码 → NV12 → CVPixelBuffer）只需要读一次像素，
+/// 用它可以把每帧一次 8 MB（4K 33 MB）的 `Vec` 分配/拷贝整段省掉。
+pub struct RgbaFrameRef<'a> {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4`，格式 rgb0 / bgra。
+    pub data: &'a [u8],
+}
+
 pub struct MpvPlayer {
     _lib: Library,
     ctx: *mut MpvHandle,
@@ -526,8 +537,31 @@ impl MpvPlayer {
         }
     }
 
+    /// 渲染一帧并**复制**出来（`width * height * 4` 字节）。
+    ///
+    /// 逐帧热路径不要用这个：1080p 每帧多一次 8 MB 拷贝，4K 是 33 MB，
+    /// 60fps 下就是几百 MB/s 的分配抖动。播放线程用
+    /// [`MpvPlayer::render_frame_ref`] 借用同一块缓冲即可。
     pub fn render_frame(&mut self) -> Result<RgbaFrame, MpvError> {
-        self.render_with_format("rgb0")
+        let frame = self.render_frame_ref()?;
+        Ok(RgbaFrame {
+            width: frame.width,
+            height: frame.height,
+            data: frame.data.to_vec(),
+        })
+    }
+
+    /// 逐帧热路径：渲染进内部复用缓冲，返回**借用**视图，不复制。
+    ///
+    /// 借用期内只能再调 `&self` 方法（`get_property_*` 之类）；
+    /// 需要 `&mut self` 时先把上一帧用完。
+    pub fn render_frame_ref(&mut self) -> Result<RgbaFrameRef<'_>, MpvError> {
+        self.render_into("rgb0")?;
+        Ok(RgbaFrameRef {
+            width: self.width,
+            height: self.height,
+            data: &self.buf,
+        })
     }
 
     /// 同 [`MpvPlayer::render_frame`]，但直接要 **BGRA**。
@@ -536,10 +570,25 @@ impl MpvPlayer {
     /// `DXGI_FORMAT_B8G8R8A8_UNORM`），所以 Windows 视频链路用这个入口，
     /// 省掉 UI 线程里每帧一次 92 万像素的通道交换。
     pub fn render_frame_bgra(&mut self) -> Result<RgbaFrame, MpvError> {
-        self.render_with_format("bgra")
+        let frame = self.render_frame_bgra_ref()?;
+        Ok(RgbaFrame {
+            width: frame.width,
+            height: frame.height,
+            data: frame.data.to_vec(),
+        })
     }
 
-    fn render_with_format(&mut self, format: &str) -> Result<RgbaFrame, MpvError> {
+    /// BGRA 版的借用视图，见 [`MpvPlayer::render_frame_ref`]。
+    pub fn render_frame_bgra_ref(&mut self) -> Result<RgbaFrameRef<'_>, MpvError> {
+        self.render_into("bgra")?;
+        Ok(RgbaFrameRef {
+            width: self.width,
+            height: self.height,
+            data: &self.buf,
+        })
+    }
+
+    fn render_into(&mut self, format: &str) -> Result<(), MpvError> {
         // MPV_RENDER_PARAM_SW_SIZE 要的是 `int[2]`，不是两个独立 int ——
         // 传单个 int 时 mpv 会把相邻栈内存当作高度，直接触发 mp_image_set_size 断言。
         let mut size = [self.width as c_int, self.height as c_int];
@@ -575,11 +624,7 @@ impl MpvPlayer {
         }
         unsafe { (self.report_swap)(self.render) };
 
-        Ok(RgbaFrame {
-            width: self.width,
-            height: self.height,
-            data: self.buf.clone(),
-        })
+        Ok(())
     }
 
     pub fn dimensions(&self) -> (u32, u32) {
