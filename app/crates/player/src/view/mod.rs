@@ -19,7 +19,9 @@ use crate::controller::*;
 
 impl Render for PlayerView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let lane_capacity = scroll_lane_capacity(window);
+        self.sync_fullscreen(window, cx);
+        let fullscreen = self.model.state.fullscreen;
+        let lane_capacity = scroll_lane_capacity(window, fullscreen);
         if lane_capacity != self.scroll_lanes {
             self.scroll_lanes = lane_capacity;
             self.reflow_danmaku();
@@ -34,6 +36,9 @@ impl Render for PlayerView {
                     .timer(std::time::Duration::from_millis(100))
                     .await;
                 let alive = this.update_in(cx, |view, window, cx| {
+                    // 系统全屏可能被绿色按钮 / 手势退出；暂停时没有播放帧，
+                    // 靠这个 100ms 巡检把浮窗几何同步回来。
+                    view.sync_fullscreen(window, cx);
                     if !view.expanded {
                         return;
                     }
@@ -187,8 +192,10 @@ impl Render for PlayerView {
             None
         };
         let mini_progress = (!self.model.controls_visible).then(|| self.mini_progress(&t, window, cx));
-        // 弹幕只在「播放层」里跑：右侧面板那 200/400px 不穿弹幕（设计第 14 节）。
-        let danmaku_width = playback_layer_width(window, self.panel_width());
+        // 弹幕只在「播放层」里跑：窗口态右侧面板占 200/400px；全屏没有面板，
+        // 弹幕直接铺满整个窗口。
+        let danmaku_width = self.playback_width(window);
+        let panel_inset = if fullscreen { 0.0 } else { INFO_PANEL_COLLAPSED };
         // 浮窗内部：绝对铺满窗口。窗口本身负责圆角/裁剪/阴影/遮挡。
         let content = div()
             .id("player-content")
@@ -203,7 +210,7 @@ impl Render for PlayerView {
                     .top_0()
                     .left_0()
                     .bottom_0()
-                    .right(px(INFO_PANEL_COLLAPSED))
+                    .right(px(panel_inset))
                     .child({
                         #[cfg(target_os = "macos")]
                         {
@@ -240,7 +247,7 @@ impl Render for PlayerView {
                         .top_0()
                         .left_0()
                         .bottom_0()
-                        .right(px(INFO_PANEL_COLLAPSED))
+                        .right(px(panel_inset))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -257,10 +264,10 @@ impl Render for PlayerView {
             // ③ 控制栏右端压在面板/视频边界上，仍保持可点击。
             .children(bar)
             .children(mini_progress)
-            // ④ 信息面板：通高浮层，从播放页层顶一直到底
-            .child(self.info_panel(&t, window, cx))
+            // ④ 信息面板：通高浮层，从播放页层顶一直到底（全屏时收起）
+            .children((!fullscreen).then(|| self.info_panel(&t, window, cx)))
             // ⑤ 骑边界按钮：面板之后挂载 → 压在面板之上（GPUI 没有 z-index）
-            .child(self.panel_toggle(&t, cx))
+            .children((!fullscreen).then(|| self.panel_toggle(&t, cx)))
             // ⑥ 互动反馈 toast：窗口底部居中，浮在视频与右侧面板之上。
             .children(self.interaction_toast(&t))
             // 鼠标移动 / 点击都算活动：把控制栏叫回来并重新计时 5 秒。
@@ -404,6 +411,7 @@ impl Render for PlayerView {
                         this.handle_player_key(event, window, cx);
                     },
                 )),
+                fullscreen,
                 progress: 0.0,
             };
             entrance
@@ -418,17 +426,20 @@ impl Render for PlayerView {
             div()
                 .id("player-window")
                 .absolute()
-                // 跟随窗口拉伸：顶在顶栏下方 16，底在 Dock 上方 20。
-                .top(px(TOP_BAR_HEIGHT + SPACE_4))
-                .left(px(SPACE_4))
-                .right(px(SPACE_4))
-                .bottom(px(PLAYER_BOTTOM_INSET))
-                .rounded(px(CARD_RADIUS))
+                // 窗口态：顶在顶栏下方 16，底在 Dock 上方 20；
+                // 全屏态：铺满整个窗口，去掉圆角 / 描边 / 阴影。
+                .top(px(if fullscreen { 0.0 } else { TOP_BAR_HEIGHT + SPACE_4 }))
+                .left(px(if fullscreen { 0.0 } else { SPACE_4 }))
+                .right(px(if fullscreen { 0.0 } else { SPACE_4 }))
+                .bottom(px(if fullscreen { 0.0 } else { PLAYER_BOTTOM_INSET }))
+                .rounded(px(if fullscreen { 0.0 } else { CARD_RADIUS }))
                 .overflow_hidden()
                 .bg(rgb(0x0B0F14))
-                .border_1()
-                .border_color(t.surfaces.border_popover)
-                .shadow(t.shadows.shadow_glass_modal.clone())
+                .when(!fullscreen, |el| {
+                    el.border_1()
+                        .border_color(t.surfaces.border_popover)
+                        .shadow(t.shadows.shadow_glass_modal.clone())
+                })
                 // 浮窗本体截断命中的穿透；子控件仍在更上层。
                 .occlude()
                 .key_context("Player")
@@ -440,12 +451,11 @@ impl Render for PlayerView {
                 .into_any_element()
         };
 
-        div()
-            .absolute()
-            .inset_0()
-            .child(backdrop)
-            .child(scrim)
-            .child(window)
+        let mut root = div().absolute().inset_0();
+        if !fullscreen {
+            root = root.child(backdrop).child(scrim);
+        }
+        root.child(window)
             // 第一次 Esc 提示放在浮窗之外：顶栏右侧。
             .children(self.escape_hint_overlay(&t, cx))
             // 评论图片查看器：压在播放器全部内容之上（含侧栏）。
@@ -472,7 +482,11 @@ impl PlayerView {
             .top_0()
             .left_0()
             .bottom_0()
-            .right(px(INFO_PANEL_COLLAPSED))
+            .right(px(if self.model.state.fullscreen {
+                0.0
+            } else {
+                INFO_PANEL_COLLAPSED
+            }))
             .flex()
             .items_center()
             .justify_center()

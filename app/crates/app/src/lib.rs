@@ -3196,6 +3196,15 @@ impl yk_library::messages::MessagesHost for AppRoot {
 impl Render for AppRoot {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.close_player_requested {
+            // 全屏关闭时由这里负责把系统窗口退出全屏：PlayerView 已经开始
+            // 拆实体，不能再等它自己处理；窗口级动作只有 AppRoot 拿得到。
+            let was_fullscreen = self
+                .playing
+                .as_ref()
+                .is_some_and(|player| player.read(cx).is_fullscreen());
+            if was_fullscreen {
+                window.toggle_fullscreen();
+            }
             self.close_player_requested = false;
             self.player_page_hidden = false;
             self.playing = None;

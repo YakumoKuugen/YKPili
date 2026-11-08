@@ -281,7 +281,18 @@ pub(crate) fn control_bar(
                 ))
                 .child(ctrl_icon(IconName::Captions, icon_color))
                 .child(ctrl_icon(IconName::Settings, icon_color))
-                .child(ctrl_icon(IconName::Maximize, icon_color)),
+                .child(ctrl_icon_button(
+                    "player-fullscreen",
+                    if state.fullscreen {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    },
+                    icon_color,
+                    cx.listener(|view, _: &ClickEvent, window, cx| {
+                        view.toggle_fullscreen(window, cx);
+                    }),
+                )),
         )
         .text_color(s.text_on_accent)
 }
@@ -871,6 +882,28 @@ pub(crate) fn ctrl_icon(icon: IconName, color: Hsla) -> impl IntoElement {
         .rounded(px(RADIUS_HALF))
         .cursor_pointer()
         .hover(|style| style.bg(rgba(0xFFFFFF1A)))
+        .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color))
+}
+
+/// 可点击的控制栏图标：全屏 / 退出全屏这类带动作的按钮。
+pub(crate) fn ctrl_icon_button(
+    id: &'static str,
+    icon: IconName,
+    color: Hsla,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .w(px(32.))
+        .h(px(32.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_HALF))
+        .cursor_pointer()
+        .hover(|style| style.bg(rgba(0xFFFFFF1A)))
+        .on_click(on_click)
         .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color))
 }
 

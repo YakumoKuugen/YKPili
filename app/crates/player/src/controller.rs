@@ -1034,6 +1034,77 @@ impl PlayerView {
         }
     }
 
+    // ================= 全屏 =================
+
+    /// 当前是否处于播放器全屏（系统全屏 + 播放器铺满窗口）。
+    pub fn is_fullscreen(&self) -> bool {
+        self.model.state.fullscreen
+    }
+
+    /// 切换播放器全屏：窗口进入系统全屏，播放器同时铺满整个窗口。
+    ///
+    /// 只调 `window.toggle_fullscreen()` 还不够 —— 播放器仍然按「顶栏下方 16 /
+    /// 底部 Dock 上方 20」的浮窗几何排版，全屏后会留一圈黑边。所以这里把
+    /// 播放状态里的 `fullscreen` 一并翻转，渲染层据此去掉边距、侧栏与圆角。
+    pub(crate) fn toggle_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 系统全屏动画期间不接受第二次切换：否则 Enter/Exit 两次系统调用会打架，
+        // 最终窗口状态和播放器布局可能对不上。
+        if self
+            .fullscreen_changed_at
+            .is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(900))
+        {
+            return;
+        }
+        let entering = !self.model.state.fullscreen;
+        self.model.state.fullscreen = entering;
+        self.fullscreen_changed_at = Some(std::time::Instant::now());
+        if entering {
+            // 全屏里不保留信息面板 / 浮层：画面优先，Esc 先退出全屏。
+            self.expanded = false;
+            self.panel_collapse_pending = false;
+            self.panel_hover_grace_until = None;
+            self.quality_popover_open = false;
+            self.speed_popover_open = false;
+            self.volume_popover_open = false;
+            self.control_popover_bounds.set(None);
+        }
+        window.toggle_fullscreen();
+        // 用户刚点了按钮 / 按了 F：把控制栏叫出来，给一个可见反馈。
+        self.note_activity(window, cx);
+        cx.notify();
+    }
+
+    /// 把窗口真实的全屏状态同步回播放器。
+    ///
+    /// 用户可能用 macOS 绿色按钮 / 系统手势退出全屏，这时播放器要跟着恢复
+    /// 浮窗几何。系统动画期间 `is_fullscreen()` 还是旧值，切换后留 900ms 宽限。
+    pub(crate) fn sync_fullscreen(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if let Some(at) = self.fullscreen_changed_at {
+            if at.elapsed() < std::time::Duration::from_millis(900) {
+                return;
+            }
+            self.fullscreen_changed_at = None;
+        }
+        let actual = window.is_fullscreen();
+        if actual != self.model.state.fullscreen {
+            self.model.state.fullscreen = actual;
+            if !actual {
+                self.expanded = false;
+            }
+            // 暂停时没有播放帧驱动重绘：这里主动补一帧把浮窗几何切回来。
+            cx.notify();
+        }
+    }
+
+    /// 播放层宽度：全屏时铺满整窗，否则扣掉两侧 16px 与右侧信息面板。
+    pub(crate) fn playback_width(&self, window: &Window) -> f32 {
+        if self.model.state.fullscreen {
+            window.viewport_size().width.as_f32().max(1.0)
+        } else {
+            playback_layer_width(window, self.panel_width())
+        }
+    }
+
     /// 拉当前分 P 的真实弹幕（`/x/v1/dm/list.so`，按 cid 区分）。
     ///
     /// 与标签 / 评论分开请求：弹幕和评论互不阻塞，谁先回来谁先渲染。
@@ -1858,6 +1929,19 @@ impl PlayerView {
         self
     }
 
+    /// 测试 / 截图入口：按全屏布局渲染（不真的调系统全屏）。
+    pub fn with_fullscreen_layout(mut self) -> Self {
+        self.model.state.fullscreen = true;
+        // 截图窗口没有真的进系统全屏：把宽限时间设到未来，别被 sync_fullscreen 改回去。
+        self.fullscreen_changed_at =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        self.force_controls_visible = true;
+        self.tried_worker = true;
+        // 全屏不挂信息面板；停在收起态更接近真实进入全屏后的状态。
+        self.expanded = false;
+        self
+    }
+
     /// 测试 / 截图入口：预先展开倍速菜单。
     pub fn with_speed_menu(mut self) -> Self {
         self.force_controls_visible = true;
@@ -2055,6 +2139,17 @@ impl PlayerView {
         if self.closing {
             return;
         }
+        // 全屏关闭不在系统全屏动画里再做缩回：直接请 AppRoot 移除浮窗，
+        // 由 AppRoot 在同一拍把窗口退出全屏，避免两层动画叠在一起。
+        if self.model.state.fullscreen {
+            self.flush_history_report();
+            self.save_resume_position();
+            self.escape_hint = false;
+            if let Some(handler) = self.close_handler.as_ref() {
+                handler(cx, true);
+            }
+            return;
+        }
         // 关闭前补最后一拍；打开不足 5s 的会在 flush 里被冷却拦掉。
         self.flush_history_report();
         // 关闭时把当前位置存进本地续播记录，下次打开从这里继续。
@@ -2126,7 +2221,10 @@ impl PlayerView {
     }
 
     pub(crate) fn panel_width(&self) -> f32 {
-        if self.expanded {
+        if self.model.state.fullscreen {
+            // 全屏不挂信息面板，右侧不再占位。
+            0.0
+        } else if self.expanded {
             INFO_PANEL_EXPANDED
         } else {
             INFO_PANEL_COLLAPSED
@@ -2135,13 +2233,22 @@ impl PlayerView {
 
     /// 视频按 Contain 放进播放层后的实际宽度与左偏移。
     ///
-    /// 播放层宽度 = 窗口 − 两侧 16 − 收起态侧栏 200；高度 = 窗口 − 顶栏下方 16
-    /// − 底部 92。控制条跟着这段**实际画面**走，而不是铺满整个播放层。
+    /// 窗口态：播放层宽度 = 窗口 − 两侧 16 − 收起态侧栏 200；高度 = 窗口 −
+    /// 顶栏下方 16 − 底部 92。全屏态：播放层就是整个窗口，没有边距和侧栏。
+    /// 控制条跟着这段**实际画面**走，而不是铺满整个播放层。
     pub(crate) fn video_bar_geometry(&self, window: &Window) -> (f32, f32) {
         let viewport = window.viewport_size();
-        let available_w = playback_layer_width(window, INFO_PANEL_COLLAPSED);
-        let available_h =
-            (viewport.height.as_f32() - (TOP_BAR_HEIGHT + SPACE_4) - PLAYER_BOTTOM_INSET).max(1.0);
+        let fullscreen = self.model.state.fullscreen;
+        let available_w = if fullscreen {
+            viewport.width.as_f32().max(1.0)
+        } else {
+            playback_layer_width(window, INFO_PANEL_COLLAPSED)
+        };
+        let available_h = if fullscreen {
+            viewport.height.as_f32().max(1.0)
+        } else {
+            (viewport.height.as_f32() - (TOP_BAR_HEIGHT + SPACE_4) - PLAYER_BOTTOM_INSET).max(1.0)
+        };
         let (video_w, video_h) = self.video_pixel_size();
         if video_w <= 0.0 || video_h <= 0.0 {
             return (0.0, available_w);
@@ -2221,6 +2328,10 @@ impl PlayerView {
     /// 面板内滚动 / 控制条显隐都可能让它在指针没动时闪一次 false。
     /// 收起前用真实鼠标坐标兜底，避免面板被这种假移出事件收掉。
     pub(crate) fn pointer_in_panel_zone(&self, position: Point<Pixels>, window: &Window) -> bool {
+        // 全屏没有右侧面板，任何位置都不该触发展开。
+        if self.model.state.fullscreen {
+            return false;
+        }
         let viewport = window.viewport_size();
         // 播放器窗口贴窗口右缘内缩 SPACE_4；面板再贴播放器右缘。
         // 右边界以内缩后的面板右缘为准：移出到窗口最右 16px 边距
@@ -2252,6 +2363,12 @@ impl PlayerView {
     /// 指针是否还在播放器窗口内（不是顶栏 / Dock / 页面）。
     pub(crate) fn pointer_in_player(&self, position: Point<Pixels>, window: &Window) -> bool {
         let viewport = window.viewport_size();
+        if self.model.state.fullscreen {
+            return position.x >= px(0.)
+                && position.x <= viewport.width
+                && position.y >= px(0.)
+                && position.y <= viewport.height;
+        }
         let top = px(TOP_BAR_HEIGHT + SPACE_4);
         let bottom = viewport.height - px(PLAYER_BOTTOM_INSET);
         position.x >= px(SPACE_4) - px(1.)
@@ -2324,6 +2441,11 @@ impl PlayerView {
                 self.set_volume(volume, window, cx);
                 cx.stop_propagation();
             }
+            // F：系统全屏 / 退出全屏（B 站网页版与 YouTube 的共同键位）。
+            "f" if plain && !typing => {
+                self.toggle_fullscreen(window, cx);
+                cx.stop_propagation();
+            }
             // 回车：分享面板开着时复制链接（面板上有对应的键位提示）。
             "enter" => {
                 if self.handle_enter(cx) {
@@ -2334,6 +2456,12 @@ impl PlayerView {
                 // 弹层开着时 Esc 只关弹层（APG：Esc 关闭并把焦点还给触发按钮），
                 // 别一按就进「再按一次退出播放器」——用户想关的是面前这张卡。
                 if self.close_action_overlays(cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                // 全屏时 Esc 先退出全屏，再按才是「关闭播放器」。
+                if self.model.state.fullscreen {
+                    self.toggle_fullscreen(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -2412,6 +2540,8 @@ pub(crate) struct PlayerEntrance {
     /// 全套播放器快捷键。用 `Rc` 是因为动画每帧会用 `..el` 重建结构体，
     /// 必须能克隆；`Box<dyn Fn>` 在这里不可 Clone。
     pub(crate) on_key: Rc<dyn Fn(&KeyDownEvent, &mut Window, &mut App)>,
+    /// 是否全屏：目标框从「顶栏下方 / Dock 上方」改为整个窗口。
+    pub(crate) fullscreen: bool,
     pub(crate) progress: f32,
 }
 
@@ -2423,6 +2553,7 @@ impl RenderOnce for PlayerEntrance {
             content,
             focus_handle,
             on_key,
+            fullscreen,
             progress,
         } = self;
         let p = entrance_progress(progress);
@@ -2433,12 +2564,20 @@ impl RenderOnce for PlayerEntrance {
             .as_f32()
             .max(TOP_BAR_HEIGHT + SPACE_4 + PLAYER_BOTTOM_INSET + 1.0);
         let top = TOP_BAR_HEIGHT + SPACE_4;
-        let destination = Bounds {
-            origin: point(px(SPACE_4), px(top)),
-            size: size(
-                px(root_w - 2.0 * SPACE_4),
-                px((root_h - top - PLAYER_BOTTOM_INSET).max(1.0)),
-            ),
+        let destination = if fullscreen {
+            // 全屏：入场动画的终点就是整个窗口，不留顶栏 / Dock 边距。
+            Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(root_w), px(root_h)),
+            }
+        } else {
+            Bounds {
+                origin: point(px(SPACE_4), px(top)),
+                size: size(
+                    px(root_w - 2.0 * SPACE_4),
+                    px((root_h - top - PLAYER_BOTTOM_INSET).max(1.0)),
+                ),
+            }
         };
         let bounds = lerp_bounds(source.bounds, destination, p);
 
@@ -2449,12 +2588,14 @@ impl RenderOnce for PlayerEntrance {
             .top(px(bounds.origin.y.as_f32()))
             .w(px(bounds.size.width.as_f32().max(1.0)))
             .h(px(bounds.size.height.as_f32().max(1.0)))
-            .rounded(px(CARD_RADIUS))
+            .rounded(px(if fullscreen { 0.0 } else { CARD_RADIUS }))
             .overflow_hidden()
             .bg(rgb(0x0B0F14))
-            .border_1()
-            .border_color(theme.surfaces.border_popover)
-            .shadow(theme.shadows.shadow_glass_modal.clone())
+            .when(!fullscreen, |el| {
+                el.border_1()
+                    .border_color(theme.surfaces.border_popover)
+                    .shadow(theme.shadows.shadow_glass_modal.clone())
+            })
             .occlude()
             .key_context("Player")
             .track_focus(&focus_handle)
@@ -3121,7 +3262,7 @@ impl PlayerView {
                         // 上屏时间用「此刻」而不是发送时：一次请求的往返里视频又走了几百毫秒，
                         // 用旧时间会让刚发的弹幕直接从屏幕中间冒出来。
                         let shown_at = view.play_time + 0.05;
-                        let width = playback_layer_width(window, view.panel_width());
+                        let width = view.playback_width(window);
                         view.insert_sent_danmaku(shown_at, &text, width);
                         if let Some(st) = view.danmaku_input.clone() {
                             st.update(cx, |st, cx| st.set_value("", window, cx));

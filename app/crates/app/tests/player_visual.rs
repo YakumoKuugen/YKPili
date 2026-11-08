@@ -62,6 +62,7 @@ fn capture(
                         match menu {
                             1 => player = player.with_quality_menu(),
                             2 => player = player.with_speed_menu(),
+                            3 => player = player.with_fullscreen_layout(),
                             _ => {}
                         }
                         player
@@ -158,5 +159,15 @@ fn main() {
         false,
         false,
         2,
+    );
+    capture(
+        "ykpili-player-fullscreen.ppm",
+        1280.0,
+        820.0,
+        false,
+        false,
+        false,
+        false,
+        3,
     );
 }

@@ -152,6 +152,17 @@ fn keyboard_controls_playback_and_volume(cx: &mut TestAppContext) {
         (state(&player, &mut vcx).1 - (before + 5.0)).abs() < 0.01,
         "卡片入场路径下 → 也应该前进 5 秒"
     );
+
+    // F：进入全屏。状态立即翻转，窗口的系统全屏由平台自己完成。
+    assert!(
+        !player.read_with(&vcx, |player, _| player.is_fullscreen()),
+        "刚打开播放器时不应是全屏"
+    );
+    vcx.simulate_keystrokes("f");
+    assert!(
+        player.read_with(&vcx, |player, _| player.is_fullscreen()),
+        "按 F 应该进入全屏（系统窗口 + 播放器铺满）"
+    );
 }
 
 

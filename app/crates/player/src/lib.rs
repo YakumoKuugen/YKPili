@@ -319,10 +319,13 @@ const SCROLL_LANE_HEIGHT: f32 = 30.0;
 ///
 /// 播放浮窗高度 = 窗口高 − 顶栏下方 16 − 底部 92；弹幕从 y=8 开始排，
 /// 每条占 30px。旧实现写死 14 条，在 820 高的窗口里只够铺到画面中部。
-fn scroll_lane_capacity(window: &Window) -> usize {
-    let area_height =
-        (window.viewport_size().height.as_f32() - (TOP_BAR_HEIGHT + SPACE_4) - PLAYER_BOTTOM_INSET)
-            .max(120.0);
+fn scroll_lane_capacity(window: &Window, fullscreen: bool) -> usize {
+    let chrome = if fullscreen {
+        0.0
+    } else {
+        TOP_BAR_HEIGHT + SPACE_4 + PLAYER_BOTTOM_INSET
+    };
+    let area_height = (window.viewport_size().height.as_f32() - chrome).max(120.0);
     (((area_height - 8.0) / SCROLL_LANE_HEIGHT).floor() as usize).clamp(8, MAX_SCROLL_LANES)
 }
 /// 顶部 / 底部固定弹幕各自的槽位数。
@@ -370,6 +373,11 @@ pub struct PlayerView {
     /// 正常运行时窗口失焦会主动收起控制栏；headless 截图的窗口永远拿不到
     /// 系统焦点，没有这个开关就拍不到控制栏和它上面的画质 / 倍速菜单。
     force_controls_visible: bool,
+    /// 最近一次切换全屏的时间。
+    ///
+    /// 系统全屏有几百毫秒动画，动画期间 `window.is_fullscreen()` 仍是旧值；
+    /// 用这个时间戳做短暂宽限，避免刚进入全屏就被同步逻辑改回窗口态。
+    fullscreen_changed_at: Option<std::time::Instant>,
     /// 当前 Tab：0 评论 / 1 弹幕 / 2 选集。
     tab: usize,
     /// 控制栏显隐、音量、错误统一收在视图模型里，视图与控制器共读这一份。
@@ -673,6 +681,7 @@ impl PlayerView {
             // 沉浸优先：播放浮窗默认收起信息面板（鼠标进入右侧 200 面板时展开）。
             expanded: false,
             force_controls_visible: false,
+            fullscreen_changed_at: None,
             tab: 0,
             danmaku: Vec::new(),
             danmaku_all: Vec::new(),
