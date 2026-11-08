@@ -452,7 +452,17 @@ impl PlayerView {
                 .occlude()
                 .child(header)
                 .child(divider)
-                .child(body)
+                // 列表超过一屏时在卡片内部滚动：收藏夹可能有几十个，
+                // 全量展开会把浮层撑出窗口，滚轮 / 触控板都够不到下面的项。
+                .child(
+                    div()
+                        .id("player-fav-scroll")
+                        .w_full()
+                        .max_h(px(FAV_PANEL_MAX_HEIGHT))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.fav_scroll)
+                        .child(body),
+                )
                 .into_any_element(),
         )
     }

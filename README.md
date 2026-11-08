@@ -56,6 +56,15 @@ export CARGO_HOME="$(pwd)/.cargo-home"
 cargo run --bin decode_test
 ```
 
+## 故障排查
+
+播放器报错会写入本地日志（正常运行不写）：
+
+- macOS：`~/Library/Caches/YKPili/logs/player.log`
+- Windows：`%LOCALAPPDATA%\YKPili\Cache\logs\player.log`
+
+日志在每次启动时清空，只在报错 / panic 时写入；单次运行超过 2 MB 自动截断。
+
 ## Roadmap
 
 > 接下来要做的五个方向，按顺序推进；不代表时间承诺，做完一项就把状态改掉。

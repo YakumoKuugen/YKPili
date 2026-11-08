@@ -376,7 +376,10 @@ impl MpvPlayer {
             let rc = cmd(self.ctx, args.as_ptr());
             if rc < 0 {
                 // 音轨失败不应让视频也打不开：保留无声播放，至少画面可用。
-                eprintln!("[mpv] audio-add 失败（rc={rc}），视频继续无声播放");
+                crate::error_log::error(
+                    "mpv",
+                    format!("audio-add 失败（rc={rc}），视频继续无声播放"),
+                );
             }
         }
         Ok(())

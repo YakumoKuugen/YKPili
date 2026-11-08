@@ -349,7 +349,7 @@ impl Section {
                 match result {
                     Ok(page) => view.comments().list.apply_first(page, true),
                     Err(error) => {
-                        eprintln!("[comments] 首批加载失败：{error}");
+                        yk_infra::error_log::error("comments", format!("首批加载失败：{error}"));
                         let section = view.comments();
                         section.list.load_error = Some(error);
                         section.list.is_end = true;
@@ -392,7 +392,7 @@ impl Section {
                 match result {
                     Ok(page) => view.comments().list.apply_more(page),
                     Err(error) => {
-                        eprintln!("[comments] 加载更多失败：{error}");
+                        yk_infra::error_log::error("comments", format!("加载更多失败：{error}"));
                         view.comments().list.fail_more(error);
                     }
                 }
@@ -523,7 +523,7 @@ impl Section {
                         view.comments().collapse(cx);
                     }
                     Err(error) => {
-                        eprintln!("[comments] 发送失败：{error}");
+                        yk_infra::error_log::error("comments", format!("发送失败：{error}"));
                         view.comment_notice(format!("发送失败：{error}"), true, cx);
                     }
                 }

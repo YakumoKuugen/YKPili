@@ -4047,6 +4047,30 @@ fn content_area(
             .into_any_element();
     }
 
+    // 收藏夹页同样是左右分栏：左边目录、右边视频网格各自滚动。
+    // 不能再套外层 `content-scroll`，否则滚右边会把左边的收藏夹目录一起带走。
+    if page == Some(Route::Favorites) {
+        return div()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .bg(t.surfaces.bg_base)
+            .child(favorites_view::page(
+                t,
+                favorites,
+                signed_in,
+                hovered_card,
+                leaving_card,
+                hover_generation,
+                material,
+                layout_bounds,
+                active_images,
+                window,
+                cx,
+            ))
+            .into_any_element();
+    }
+
     if let Some(kind) = page {
         // 「正在关注」是瀑布流，需要窗口宽度和 AppRoot 的加载回调；
         // 其余页面仍交给 pages 模块。
@@ -4076,20 +4100,6 @@ fn content_area(
                 hover_generation,
                 material,
                 (window.viewport_size().width.as_f32() - SPACE_6 * 2.0).max(320.0),
-                layout_bounds,
-                active_images.clone(),
-                window,
-                cx,
-            )
-        } else if kind == Route::Favorites {
-            favorites_view::page(
-                t,
-                favorites,
-                signed_in,
-                hovered_card,
-                leaving_card,
-                hover_generation,
-                material,
                 layout_bounds,
                 active_images.clone(),
                 window,

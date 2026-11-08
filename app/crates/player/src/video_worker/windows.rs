@@ -89,12 +89,12 @@ impl FrameWorker {
                 let mut player = match MpvPlayer::new_with_start(width, height, start_secs) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("[video] 渲染线程启动失败：{e}");
+                        yk_infra::error_log::error("video", format!("渲染线程启动失败：{e}"));
                         return;
                     }
                 };
                 if let Err(e) = player.load_file_with_audio(&path, audio.as_deref()) {
-                    eprintln!("[video] load_file 失败：{e}");
+                    yk_infra::error_log::error("video", format!("load_file 失败：{e}"));
                     return;
                 }
                 eprintln!(
@@ -125,27 +125,27 @@ impl FrameWorker {
                         match command {
                             WorkerCommand::Pause(paused) => {
                                 if let Err(e) = player.set_pause(paused) {
-                                    eprintln!("[video] set pause={paused} 失败：{e}");
+                                    yk_infra::error_log::error("video", format!("set pause={paused} 失败：{e}"));
                                 }
                             }
                             WorkerCommand::Seek(secs) => {
                                 if let Err(e) = player.seek(secs) {
-                                    eprintln!("[video] seek {secs:.1}s 失败：{e}");
+                                    yk_infra::error_log::error("video", format!("seek {secs:.1}s 失败：{e}"));
                                 }
                             }
                             WorkerCommand::Volume(volume) => {
                                 if let Err(e) = player.set_volume(volume) {
-                                    eprintln!("[video] 设置音量 {volume:.2} 失败：{e}");
+                                    yk_infra::error_log::error("video", format!("设置音量 {volume:.2} 失败：{e}"));
                                 }
                             }
                             WorkerCommand::Muted(muted) => {
                                 if let Err(e) = player.set_muted(muted) {
-                                    eprintln!("[video] 设置静音={muted} 失败：{e}");
+                                    yk_infra::error_log::error("video", format!("设置静音={muted} 失败：{e}"));
                                 }
                             }
                             WorkerCommand::Speed(rate) => {
                                 if let Err(e) = player.set_speed(rate) {
-                                    eprintln!("[video] 设置倍速 {rate:.2}x 失败：{e}");
+                                    yk_infra::error_log::error("video", format!("设置倍速 {rate:.2}x 失败：{e}"));
                                 }
                             }
                             WorkerCommand::RenderPaused(paused) => {
@@ -193,7 +193,7 @@ impl FrameWorker {
                                     "[video] 起播位置没生效（当前 {t:.1}s，目标 {start_secs:.1}s），补 seek"
                                 );
                                 if let Err(e) = player.seek(start_secs) {
-                                    eprintln!("[video] seek 失败：{e}");
+                                    yk_infra::error_log::error("video", format!("seek 失败：{e}"));
                                 }
                             }
                             // mpv 的 bgra 第 4 字节不保证是 255；GPUI 会按
@@ -217,8 +217,9 @@ impl FrameWorker {
                         Err(e) => {
                             if render_errors < 5 {
                                 render_errors += 1;
-                                eprintln!(
-                                    "[video] render_frame 失败（第 {render_errors} 次）：{e}"
+                                yk_infra::error_log::error(
+                                    "video",
+                                    format!("render_frame 失败（第 {render_errors} 次）：{e}"),
                                 );
                             }
                         }

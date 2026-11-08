@@ -31,13 +31,23 @@ impl PlayerView {
         };
         self.tried_worker = true;
         // 起播位置（续播）：mpv 打开文件时直接定位过去。
-        self.worker = crate::video_worker::FrameWorker::spawn_with_audio(
+        let worker = crate::video_worker::FrameWorker::spawn_with_audio(
             video,
             audio,
             1280,
             720,
             self.start_position,
         );
+        if worker.is_none() {
+            // 线程都没起来：这是明确的「无法播放」，必须落错误日志并给出界面提示。
+            // （libmpv 初始化 / 打开文件失败在线程内部记录，见 video_worker。）
+            yk_infra::error_log::error(
+                "player",
+                "视频渲染线程启动失败：无法创建解码线程（无法播放）",
+            );
+            self.model.set_error("视频渲染线程启动失败，无法播放".to_string());
+        }
+        self.worker = worker;
         // 取流期间用户可能已经按过暂停：新 worker 启动后补发一次状态。
         if let Some(w) = self.worker.as_ref() {
             w.set_paused(!self.model.state.playing);
@@ -105,6 +115,9 @@ impl PlayerView {
                         match w.latest() {
                             Some(crate::video_worker::WorkerFrame::Frame(buf, t)) => {
                                 view.current = Some(buf);
+                                // 首帧到了：本次播放在正常出画面，清掉无帧告警。
+                                view.first_frame_seen = true;
+                                view.no_frame_logged = false;
                                 // 拖动 / seek 稳定期内不要让旧帧的 time-pos 把滑块顶回去。
                                 let settling = view
                                     .seek_settle_until
@@ -153,6 +166,21 @@ impl PlayerView {
                         if idle_ticks == 125 {
                             idle_ticks = 0;
                             eprintln!("[player] 连续 2s 没有新帧");
+                            // 首帧一直没来 + 正在播放：大概率就是「无法播放」。
+                            // 只记一次，避免每 2 秒刷一条日志。
+                            if !view.first_frame_seen
+                                && !view.no_frame_logged
+                                && view.model.state.playing
+                                && !view.loading_source
+                                // 窗口不可见时本来就不出帧，不能当成播放失败。
+                                && view.visibility.is_visible()
+                            {
+                                view.no_frame_logged = true;
+                                yk_infra::error_log::error(
+                                    "player",
+                                    "连续 2 秒没有收到视频首帧：解码或片源可能不可用（无法播放）",
+                                );
+                            }
                         }
                     }
                     got

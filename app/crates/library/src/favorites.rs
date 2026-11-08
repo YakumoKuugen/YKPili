@@ -23,13 +23,16 @@ use yk_infra::interaction::fetch_fav_folders;
 use yk_infra::interaction::FavFolder;
 use yk_theme::theme::*;
 
-use crate::card::{card, CardHost};
+use crate::card::{card, card_height, CardHost};
+use crate::home::card_metrics;
 use crate::image::ImageResidency;
 
 /// 左侧收藏夹栏宽度。
 const RAIL_W: f32 = 232.0;
 /// 左栏一行的行高。
 const RAIL_ROW_H: f32 = 40.0;
+/// 右栏工具条高度（标题 + 排序胶囊）。
+const TOOLBAR_H: f32 = 30.0;
 
 /// 收藏夹内排序（本地排序，不发请求）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -66,6 +69,34 @@ pub trait FavoritesHost: CardHost {
 
     fn favorites_load_more(&mut self, cx: &mut Context<Self>) {
         self.load_more_favorites(cx);
+    }
+
+    /// 右侧网格滚动到接近底部时自动补下一页。
+    ///
+    /// `ScrollHandle` 的 `offset` 向下为负、`max_offset` 为正；统一换成
+    /// 「已滚动距离 / 最大可滚动距离」后再比较。`loading_more` 与
+    /// `has_more` 两道闸门保证不会重复拉取。
+    fn favorites_auto_load_on_scroll(&mut self, cx: &mut Context<Self>) {
+        let (has_more, loading_more, loading, scroll) = {
+            let state = self.favorites();
+            (
+                state.has_more,
+                state.loading_more,
+                state.loading,
+                state.content_scroll.clone(),
+            )
+        };
+        if !has_more || loading_more || loading {
+            return;
+        }
+        let offset = (-scroll.offset().y.as_f32()).max(0.0);
+        let max = scroll.max_offset().y.as_f32().abs();
+        let viewport = scroll.bounds().size.height.as_f32().max(1.0);
+        // 距底部半个视口内开始预取。监听在滚动写回 offset 之前触发，
+        // 留半个视口能保证大幅滚动 / 惯性滚动也不会错过。
+        if max > 0.0 && max - offset <= viewport * 0.5 {
+            self.favorites_load_more(cx);
+        }
     }
     fn favorites_select_folder(&mut self, folder_id: i64, cx: &mut Context<Self>) {
         self.select_favorites_folder(folder_id, cx);
@@ -296,6 +327,9 @@ pub trait FavoritesHost: CardHost {
         self.favorites_mut().error = None;
         self.favorites_mut().page = 0;
         self.favorites_mut().has_more = false;
+        self.favorites_mut()
+            .content_scroll
+            .set_offset(point(px(0.), px(0.)));
         self.favorites_reset_hover();
         self.load_favorites_page(false, cx);
         cx.notify();
@@ -306,6 +340,9 @@ pub trait FavoritesHost: CardHost {
             return;
         }
         self.favorites_mut().sort = sort;
+        self.favorites_mut()
+            .content_scroll
+            .set_offset(point(px(0.), px(0.)));
         self.favorites_reset_hover();
         cx.notify();
     }
@@ -334,6 +371,10 @@ pub struct FavoritesState {
     /// 请求代际：刷新 / 切夹后只接受最后一次结果。
     pub generation: u64,
     pub sort: FavSort,
+    /// 左侧收藏夹目录的滚动位置（与右侧视频列表独立）。
+    pub rail_scroll: ScrollHandle,
+    /// 右侧视频网格的滚动位置。
+    pub content_scroll: ScrollHandle,
 }
 
 impl Default for FavoritesState {
@@ -354,6 +395,8 @@ impl Default for FavoritesState {
             total: 0,
             generation: 0,
             sort: FavSort::Recent,
+            rail_scroll: ScrollHandle::new(),
+            content_scroll: ScrollHandle::new(),
         }
     }
 }
@@ -410,7 +453,16 @@ pub fn page<V: FavoritesHost>(
     cx: &mut Context<V>,
 ) -> AnyElement {
     if !signed_in {
-        return login_prompt(t, cx);
+        // 收藏页已经脱离外层 content-scroll，未登录引导要自己补回页面内边距。
+        return div()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .px(px(SPACE_6))
+            .pt(px(SPACE_4))
+            .pb(px(DOCK_RESERVED))
+            .child(login_prompt(t, cx))
+            .into_any_element();
     }
 
     // 收藏夹页没有接首页的可视范围计算，直接把这批卡片的封面 / 头像全部登记驻留；
@@ -423,42 +475,74 @@ pub fn page<V: FavoritesHost>(
         }
     }
 
-    let viewport_w = window.viewport_size().width.as_f32();
+    let viewport = window.viewport_size();
+    let viewport_w = viewport.width.as_f32();
     let content_w = (viewport_w - SPACE_6 * 2.0 - RAIL_W - SPACE_5).max(COVER_CELL_WIDTH);
-    let cols = (((content_w + SPACE_4) / (COVER_CELL_WIDTH + SPACE_4)).floor() as usize).max(1);
+    // 与首页「个性推荐」同一个栅格算法：卡片按可用宽均分、整行铺满，
+    // 不再用固定 208 宽把右侧留出一条空带。
+    let (cols, card_w) = card_metrics(content_w);
+    // 收藏夹页自己管高度：左右两栏各自 `overflow_y_scroll`，不接外层 content-scroll。
+    // 两栏都直接拉到窗口下边缘；底部留白放进滚动内容里，最后一行仍能滚到 Dock 上方。
+    let page_h = (viewport.height.as_f32() - TOP_BAR_HEIGHT).max(320.0);
+    let body_h = (page_h - SPACE_4).max(240.0);
 
     div()
         .flex()
         .flex_col()
-        .gap(px(SPACE_4))
+        .h(px(page_h))
         .w_full()
+        .flex_shrink_0()
+        .px(px(SPACE_6))
+        .pt(px(SPACE_4))
         .child(
             div()
                 .flex()
-                .items_start()
-                .gap(px(SPACE_5))
+                .h(px(body_h))
                 .w_full()
+                .min_h(px(0.))
+                .gap(px(SPACE_5))
+                // 左栏：目录自己滚。整块卡片拉到底，滚的是里面的条目。
                 .child(folder_rail(t, state, cx))
+                // 右栏：工具条固定，只有视频网格滚。
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.))
+                        .h_full()
+                        .min_h(px(0.))
                         .flex()
                         .flex_col()
                         .gap(px(SPACE_4))
                         .child(toolbar(t, state, cx))
-                        .child(content(
-                            t,
-                            state,
-                            cols,
-                            hovered_card,
-                            leaving_card,
-                            hover_generation,
-                            material,
-                            layout_bounds,
-                            active_images,
-                            cx,
-                        )),
+                        .child(
+                            div()
+                                .id("fav-content-scroll")
+                                .flex_1()
+                                .min_h(px(0.))
+                                .w_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&state.content_scroll)
+                                // 滚到接近底部自动补下一页；没有更多时列表底部显示「已经到底了」。
+                                .on_scroll_wheel(cx.listener(
+                                    |this, _: &ScrollWheelEvent, _window, cx| {
+                                        this.favorites_auto_load_on_scroll(cx);
+                                    },
+                                ))
+                                // 底部留白跟着内容滚，视口本身一直铺到窗口下边缘。
+                                .child(div().pb(px(DOCK_RESERVED)).child(content(
+                                    t,
+                                    state,
+                                    cols,
+                                    card_w,
+                                    hovered_card,
+                                    leaving_card,
+                                    hover_generation,
+                                    material,
+                                    layout_bounds,
+                                    active_images,
+                                    cx,
+                                ))),
+                        ),
                 ),
         )
         .into_any_element()
@@ -468,12 +552,19 @@ fn folder_rail<V: FavoritesHost>(t: &YkTheme, state: &FavoritesState, cx: &mut C
     let s = &t.surfaces;
     let p = &t.palette;
     let mut rail = div()
+        .id("fav-folders-scroll")
         .w(px(RAIL_W))
+        .h_full()
+        .min_h(px(0.))
         .flex_shrink_0()
         .flex()
         .flex_col()
         .gap(px(SPACE_1))
         .p(px(SPACE_2))
+        // 目录拉到窗口下边缘；底部留出 Dock 高度，最后几个收藏夹能滚到 Dock 上方。
+        .pb(px(DOCK_RESERVED))
+        .overflow_y_scroll()
+        .track_scroll(&state.rail_scroll)
         .rounded(px(CARD_RADIUS))
         .bg(s.surface_elevated)
         .border_1()
@@ -620,6 +711,7 @@ fn toolbar<V: FavoritesHost>(t: &YkTheme, state: &FavoritesState, cx: &mut Conte
         .flex()
         .items_center()
         .gap(px(SPACE_2))
+        .h(px(TOOLBAR_H))
         .w_full()
         .child(
             div()
@@ -683,6 +775,7 @@ fn content<V: FavoritesHost>(
     t: &YkTheme,
     state: &FavoritesState,
     cols: usize,
+    card_w: f32,
     hovered_card: Option<usize>,
     leaving_card: Option<usize>,
     hover_generation: u64,
@@ -692,7 +785,7 @@ fn content<V: FavoritesHost>(
     cx: &mut Context<V>,
 ) -> AnyElement {
     if state.loading && state.items.is_empty() {
-        return skeleton_grid(t, cols);
+        return skeleton_grid(t, cols, card_w);
     }
     if let Some(error) = state.error.as_ref().filter(|_| state.items.is_empty()) {
         return error_block(t, error, cx);
@@ -733,7 +826,7 @@ fn content<V: FavoritesHost>(
         let item = video.to_cover_item(index);
         grid = grid.child(card(
             t,
-            COVER_CELL_WIDTH,
+            card_w,
             &item,
             hovered_card == Some(index),
             leaving_card == Some(index),
@@ -934,9 +1027,10 @@ fn error_block<V: FavoritesHost>(t: &YkTheme, error: &str, cx: &mut Context<V>) 
         .into_any_element()
 }
 
-fn skeleton_grid(t: &YkTheme, cols: usize) -> AnyElement {
+fn skeleton_grid(t: &YkTheme, cols: usize, card_w: f32) -> AnyElement {
     let brush = t.surfaces.skeleton_brush;
     let rows = 2;
+    let card_h = card_height(card_w);
     div()
         .flex()
         .flex_col()
@@ -956,11 +1050,11 @@ fn skeleton_grid(t: &YkTheme, cols: usize) -> AnyElement {
                             .flex()
                             .gap(px(SPACE_4))
                             .w_full()
-                            .h(px(COVER_CELL_HEIGHT))
+                            .h(px(card_h))
                             .children((0..cols).map(move |_| {
                                 div()
-                                    .w(px(COVER_CELL_WIDTH))
-                                    .h(px(COVER_CELL_HEIGHT))
+                                    .w(px(card_w))
+                                    .h(px(card_h))
                                     .rounded(px(CARD_RADIUS))
                                     .bg(brush)
                                     .into_any_element()

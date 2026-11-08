@@ -53,6 +53,8 @@ impl PlayerView {
             self.needs_image_clear = true;
         }
         self.tried_worker = false;
+        self.first_frame_seen = false;
+        self.no_frame_logged = false;
         self.play_time = 0.0;
         self.model.state.position_secs = 0.0;
         self.model.state.playing = true;
@@ -105,6 +107,8 @@ impl PlayerView {
         self.speed_popover_open = false;
         self.quality_switching = false;
         self.quality_generation = self.quality_generation.wrapping_add(1);
+        self.page_switching = false;
+        self.page_generation = self.page_generation.wrapping_add(1);
         self.control_popover_bounds.set(None);
         // 换源时把可能还在播的退场动画也断掉，别让上一支视频的卡飘在新视频上。
         self.overlay_closing_kind = None;
@@ -144,7 +148,7 @@ impl PlayerView {
                                 let client = match yk_infra::api::client::ReqwestClient::new() {
                                     Ok(client) => client,
                                     Err(error) => {
-                                        eprintln!("[resume] 历史查询客户端创建失败：{error}");
+                                        yk_infra::error_log::error("resume", format!("历史查询客户端创建失败：{error}"));
                                         return None;
                                     }
                                 };
@@ -163,7 +167,7 @@ impl PlayerView {
                                         progress
                                     }
                                     Err(error) => {
-                                        eprintln!("[resume] 服务端历史查询失败：{error}");
+                                        yk_infra::error_log::error("resume", format!("服务端历史查询失败：{error}"));
                                         None
                                     }
                                 }
@@ -221,7 +225,7 @@ impl PlayerView {
                         view.spawn_follow_state(owner_mid, cx);
                     }
                     Err(e) => {
-                        eprintln!("[player] 取流失败：{e}");
+                        yk_infra::error_log::error("player", format!("取流失败：{e}"));
                         view.model.set_error(e);
                     }
                 }
@@ -269,7 +273,7 @@ impl PlayerView {
                     Ok(match yk_infra::api::client::fetch_video_tags(&client, &bvid, &cookie) {
                         Ok(tags) => tags,
                         Err(error) => {
-                            eprintln!("[player] 标签加载失败：{error}");
+                            yk_infra::error_log::error("player", format!("标签加载失败：{error}"));
                             Vec::new()
                         }
                     })
@@ -371,7 +375,7 @@ impl PlayerView {
                             Some(fans)
                         }
                         Err(error) => {
-                            eprintln!("[follow] 粉丝数读取失败：{error}");
+                            yk_infra::error_log::error("follow", format!("粉丝数读取失败：{error}"));
                             None
                         }
                     };
@@ -480,7 +484,7 @@ impl PlayerView {
                         );
                     }
                     Err(error) => {
-                        eprintln!("[interaction] 关注失败：{error}");
+                        yk_infra::error_log::error("interaction", format!("关注失败：{error}"));
                         if known {
                             // 乐观更新回滚：按钮与粉丝数都退回去。
                             view.followed = !next;
@@ -597,7 +601,7 @@ impl PlayerView {
                         );
                     }
                     Err(error) => {
-                        eprintln!("[interaction] 点赞失败：{error}");
+                        yk_infra::error_log::error("interaction", format!("点赞失败：{error}"));
                         // 乐观更新回滚：按钮状态和计数都退回去。
                         view.interaction.liked = !next;
                         if let Some(source) = view.source.as_mut() {
@@ -690,7 +694,7 @@ impl PlayerView {
                         view.show_interaction_note(format!("已投 {coins} 枚硬币"), false, cx);
                     }
                     Err(error) => {
-                        eprintln!("[interaction] 投币失败：{error}");
+                        yk_infra::error_log::error("interaction", format!("投币失败：{error}"));
                         view.show_interaction_note(error, true, cx);
                     }
                 }
@@ -714,6 +718,7 @@ impl PlayerView {
         self.coin_panel_open = false;
         self.share_panel_open = false;
         self.fav_panel_open = true;
+        self.fav_scroll.set_offset(point(px(0.), px(0.)));
         self.note_overlay_opened(cx);
         if self.fav_folders.is_empty() {
             self.load_fav_folders(cx);
@@ -751,7 +756,7 @@ impl PlayerView {
                         view.fav_error = None;
                     }
                     Err(error) => {
-                        eprintln!("[interaction] 收藏夹加载失败：{error}");
+                        yk_infra::error_log::error("interaction", format!("收藏夹加载失败：{error}"));
                         // 面板内联显示失败态 + 重试：只弹 toast 的话，
                         // 面板里只剩一片空白，用户不知道是「没有收藏夹」还是「没加载出来」。
                         view.fav_error = Some(error.clone());
@@ -830,7 +835,7 @@ impl PlayerView {
                         );
                     }
                     Err(error) => {
-                        eprintln!("[interaction] 收藏失败：{error}");
+                        yk_infra::error_log::error("interaction", format!("收藏失败：{error}"));
                         view.show_interaction_note(error, true, cx);
                     }
                 }
@@ -954,7 +959,7 @@ impl PlayerView {
                         view.show_interaction_note("已分享到哔哩哔哩动态".into(), false, cx);
                     }
                     Err(error) => {
-                        eprintln!("[interaction] 分享到动态失败：{error}");
+                        yk_infra::error_log::error("interaction", format!("分享到动态失败：{error}"));
                         view.show_interaction_note(error, true, cx);
                     }
                 }
@@ -1186,7 +1191,7 @@ impl PlayerView {
                     }
                     Err(error) => {
                         // 失败不封顶：5 秒后再试，别在计数帧里死循环。
-                        eprintln!("[danmaku] 第 {index} 段加载失败：{error}");
+                        yk_infra::error_log::error("danmaku", format!("第 {index} 段加载失败：{error}"));
                         view.danmaku_retry_at =
                             Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
                         if index == 1 {
@@ -1754,6 +1759,26 @@ impl PlayerView {
         start
     }
 
+    /// 分 P 切换的起播位置：只认 `bvid#cid` 这条精确记录。
+    ///
+    /// 不能复用 [`Self::resolve_resume_position`] —— 它会退到「只按 bvid」的
+    /// 兜底记录，而那份记录刚刚被写成了旧 P 的进度，会把新 P 直接跳到旧位置。
+    pub(crate) fn resolve_page_position(
+        &mut self,
+        src: &yk_domain::playback::PlaybackSource,
+        cid: i64,
+    ) -> f64 {
+        let key = yk_infra::resume::key(&src.bvid, cid);
+        let local = self.resume.resume_position(&key);
+        let start = yk_infra::resume::resolve_start_position(&[local], src.duration_secs as f64)
+            .unwrap_or(0.0);
+        self.resume_key = Some(key);
+        if start > 0.0 {
+            eprintln!("[page] 从 {start:.1}s 续播：{} cid={cid}", src.bvid);
+        }
+        start
+    }
+
     /// 把当前播放位置写进本地续播记录。
     ///
     /// 只在明确的节点调用（关闭 / 换源 / 播放中定期落盘），
@@ -1771,7 +1796,7 @@ impl PlayerView {
             self.resume.record(&bvid, position, duration);
         }
         if let Err(e) = self.resume.save() {
-            eprintln!("[resume] 写盘失败：{e}");
+            yk_infra::error_log::error("resume", format!("写盘失败：{e}"));
         }
     }
 
@@ -1865,7 +1890,22 @@ impl PlayerView {
         self.coin_panel_open = false;
         self.share_panel_open = false;
         self.fav_panel_open = true;
+        self.fav_scroll.set_offset(point(px(0.), px(0.)));
         self.note_overlay_opened(cx);
+    }
+
+    /// 测试入口：展开全部收藏夹，验证长列表能在卡片内部滚动。
+    #[doc(hidden)]
+    pub fn test_expand_fav_list(&mut self, cx: &mut Context<Self>) {
+        self.fav_list_expanded = true;
+        self.fav_scroll.set_offset(point(px(0.), px(0.)));
+        cx.notify();
+    }
+
+    /// 测试入口：收藏夹列表当前滚动偏移。
+    #[doc(hidden)]
+    pub fn test_fav_scroll_offset(&self) -> f32 {
+        self.fav_scroll.offset().y.as_f32()
     }
 
     /// 测试入口：读三个互动面板的展开状态（投币 / 收藏 / 分享）。
@@ -2863,13 +2903,13 @@ pub(crate) fn dispatch_history_report(report: &HistoryReport, progress: u64) {
         let client = match yk_infra::api::client::ReqwestClient::new() {
             Ok(client) => client,
             Err(error) => {
-                eprintln!("[history-report] 创建客户端失败：{error}");
+                yk_infra::error_log::error("history-report", format!("创建客户端失败：{error}"));
                 return;
             }
         };
         if let Err(error) = yk_infra::api::client::report_history(&client, &cookie, &csrf, &payload)
         {
-            eprintln!("[history-report] 上报失败：{error}");
+            yk_infra::error_log::error("history-report", format!("上报失败：{error}"));
         }
     });
 
@@ -3056,7 +3096,7 @@ impl PlayerView {
 
     /// 点选某档清晰度：按 qn 重新取流，原位换片并保留播放进度。
     pub(crate) fn select_quality(&mut self, qn: i32, cx: &mut Context<Self>) {
-        if self.quality_switching {
+        if self.quality_switching || self.page_switching {
             return;
         }
         let Some(source) = self.source.clone() else {
@@ -3118,6 +3158,8 @@ impl PlayerView {
                             view.needs_image_clear = true;
                         }
                         view.tried_worker = false;
+                        view.first_frame_seen = false;
+                        view.no_frame_logged = false;
                         view.start_position = position;
                         view.play_time = position;
                         view.model.state.position_secs = position;
@@ -3141,12 +3183,136 @@ impl PlayerView {
                         );
                     }
                     Err(error) => {
-                        eprintln!("[quality] 切换失败：{error}");
+                        yk_infra::error_log::error("quality", format!("切换失败：{error}"));
                         view.show_interaction_note(
                             format!("切换清晰度失败：{error}"),
                             true,
                             cx,
                         );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 切换分 P：同一个 bvid 换 cid 重新取流，原位换片。
+    ///
+    /// 与换视频不同：不重新拉标题 / UP 主 / 评论 / 互动状态，只换流、
+    /// 重置弹幕与续播上下文。旧 P 的进度先落盘并上报，再切新 cid。
+    pub(crate) fn switch_page(&mut self, cid: i64, cx: &mut Context<Self>) {
+        if self.page_switching || self.quality_switching {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        if source.cid == cid {
+            return;
+        }
+        let Some(page) = source.pages.iter().find(|page| page.cid == cid).cloned() else {
+            return;
+        };
+        let load_generation = self.load_generation;
+        self.page_generation = self.page_generation.wrapping_add(1);
+        let generation = self.page_generation;
+        self.page_switching = true;
+
+        // 旧 P 的进度先写进本地记录 / 观看历史，再切 cid。
+        self.save_resume_position();
+        self.flush_history_report();
+
+        let bvid = source.bvid.clone();
+        let aid = source.aid;
+        let preferred_qn = if source.quality_id > 0 {
+            source.quality_id
+        } else {
+            127
+        };
+        let page_no = page.page;
+        let part = page.part.clone();
+        let page_duration = page.duration;
+        eprintln!("[page] 切换到 P{page_no} · {part}（cid={cid}）");
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let fetch_bvid = bvid.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let cookie = current_session_cookie();
+                    let client = yk_infra::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_infra::api::client::fetch_stream_for_page(
+                        &client,
+                        &fetch_bvid,
+                        cid,
+                        preferred_qn,
+                        &cookie,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if view.load_generation != load_generation || view.page_generation != generation {
+                    return;
+                }
+                view.page_switching = false;
+                match result {
+                    Ok(stream) => {
+                        // 先停旧 worker，下一次 render 用新 cid 在原位置重建。
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
+                        {
+                            view.worker = None;
+                            view.current = None;
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            view.needs_image_clear = true;
+                        }
+                        view.tried_worker = false;
+                        view.first_frame_seen = false;
+                        view.no_frame_logged = false;
+                        view.finish_handled = false;
+                        view.seek_settle_until = None;
+                        view.resume_seed = None;
+                        if let Some(source) = view.source.as_mut() {
+                            source.cid = cid;
+                            source.current_page = page_no;
+                            source.video_url = stream.video_url;
+                            source.audio_url = stream.audio_url;
+                            source.video_width = stream.width;
+                            source.video_height = stream.height;
+                            source.quality_id = stream.quality_id;
+                            if !stream.quality_label.is_empty() {
+                                source.quality = stream.quality_label;
+                            }
+                            if page_duration > 0 {
+                                source.duration_secs = page_duration;
+                            }
+                        }
+                        view.model.state.playing = true;
+                        let mut start = 0.0;
+                        if let Some(source) = view.source.clone() {
+                            view.model.state.duration_secs = source.duration_secs as f64;
+                            // 分 P 只沿用这个 cid 自己的续播记录，避免跳到旧 P 的进度。
+                            start = view.resolve_page_position(&source, cid);
+                            view.start_position = start;
+                            view.play_time = start;
+                            view.model.state.position_secs = start;
+                            view.last_resume_save = start;
+                        }
+                        view.begin_history_report(aid, bvid, cid, start);
+                        view.spawn_danmaku(cid, aid, cx);
+                        view.show_interaction_note(
+                            format!("已切换到 P{page_no} · {part}"),
+                            false,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        yk_infra::error_log::error("page", format!("切换失败：{error}"));
+                        view.show_interaction_note(format!("切换分 P 失败：{error}"), true, cx);
                     }
                 }
                 cx.notify();
@@ -3272,7 +3438,7 @@ impl PlayerView {
                     Err(error) => {
                         // 失败不清输入框：字还在，用户改一改就能重发；
                         // 清掉反而会让人以为发出去了（这正是旧实现的毛病）。
-                        eprintln!("[danmaku] 发送失败：{error}");
+                        yk_infra::error_log::error("danmaku", format!("发送失败：{error}"));
                         view.show_interaction_note(error, true, cx);
                     }
                 }

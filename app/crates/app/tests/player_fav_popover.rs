@@ -8,8 +8,9 @@
 
 use gpui::test::TestWindowExt;
 use gpui::{
-    point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, Modifiers, TestAppContext,
-    TestDispatcher, VisualTestContext, WindowBounds, WindowOptions,
+    point, px, size, AnyWindowHandle, AppContext, Bounds, Entity, Modifiers, ScrollDelta,
+    ScrollWheelEvent, TestAppContext, TestDispatcher, TouchPhase, VisualTestContext, WindowBounds,
+    WindowOptions,
 };
 use yk_app::player::{set_test_cursor, PlayerView};
 use yk_app::AppRoot;
@@ -150,6 +151,42 @@ fn main() {
         "弹层关掉之后面板还赖着不收起"
     );
     eprintln!("[fav-popover] ③ 外点关闭 + 面板回收正常");
+
+    // ---------- ④ 收藏夹长列表可以在卡片内部滚动 ----------
+    player.update_in(&mut vcx, |view, _, cx| {
+        view.test_open_fav_overlay(cx);
+    });
+    settle(&mut vcx, panel_left);
+    player.update_in(&mut vcx, |view, _, cx| {
+        view.test_expand_fav_list(cx);
+    });
+    vcx.update(|window, cx| {
+        window.render_frame(cx);
+    });
+    let bounds = vcx
+        .update(|_, cx| player.read(cx).test_action_row_bounds())
+        .expect("互动行几何没被 prepaint 记录");
+    let card_left = bounds.origin.x.as_f32() + 16.0;
+    let card_top = bounds.origin.y.as_f32() + bounds.size.height.as_f32() + 4.0;
+    let before = player.read_with(&vcx, |view, _| view.test_fav_scroll_offset());
+    let scroll_at = point(px(card_left + 180.0), px(card_top + 300.0));
+    set_test_cursor(Some(scroll_at));
+    vcx.simulate_mouse_move(scroll_at, None, Modifiers::default());
+    vcx.simulate_event(ScrollWheelEvent {
+        position: scroll_at,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-240.0))),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::Moved,
+    });
+    vcx.update(|window, cx| {
+        window.render_frame(cx);
+    });
+    let after = player.read_with(&vcx, |view, _| view.test_fav_scroll_offset());
+    assert!(
+        (after - before).abs() > 1.0,
+        "收藏夹展开后应该能滚动（before={before}, after={after}）"
+    );
+    eprintln!("[fav-popover] ④ 收藏夹列表滚动正常（{before} -> {after}）");
 
     eprintln!("[fav-popover] 全部通过");
 }

@@ -12,7 +12,7 @@ impl PlayerView {
         match active {
             0 => self.comments_tab(t, window, cx),
             1 => self.danmaku_tab(t),
-            _ => self.pages_tab(t),
+            _ => self.pages_tab(t, cx),
         }
     }
 
@@ -240,26 +240,31 @@ impl PlayerView {
         list.into_any_element()
     }
 
-    pub(crate) fn pages_tab(&self, t: &YkTheme) -> AnyElement {
+    pub(crate) fn pages_tab(&self, t: &YkTheme, cx: &mut Context<Self>) -> AnyElement {
         let s = &t.surfaces;
         let p = &t.palette;
         let source = self.source.as_ref();
         let current = source.map(|source| source.current_page).unwrap_or(1);
         let pages = source.map(|source| source.pages.as_slice()).unwrap_or(&[]);
+        let switching = self.page_switching;
         let mut list = div()
             .w_full()
             .px(px(SPACE_4))
             .pb(px(SPACE_4))
             .flex()
             .flex_col()
-            .gap(px(4.));
+            .gap(px(4.))
+            .when(switching, |el| el.opacity(0.6));
         if pages.is_empty() {
             list = list.child(panel_empty_line(t, "暂无分 P 信息"));
         } else {
             for page in pages {
                 let on = page.page == current;
+                let cid = page.cid;
+                let page_no = page.page;
                 list = list.child(
                     div()
+                        .id(("player-page-row", page_no as u64))
                         .flex()
                         .items_center()
                         .gap(px(SPACE_2))
@@ -267,6 +272,11 @@ impl PlayerView {
                         .py(px(SPACE_2))
                         .rounded(px(RADIUS_MD))
                         .when(on, |el| el.bg(s.fill_2))
+                        .cursor_pointer()
+                        .hover(|style| style.bg(s.fill_3))
+                        .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                            view.switch_page(cid, cx);
+                        }))
                         .child(
                             div()
                                 .w(px(16.))

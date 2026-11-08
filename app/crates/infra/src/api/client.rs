@@ -556,8 +556,40 @@ pub fn fetch_stream_at<C>(
 where
     C: HttpClient<Error = String>,
 {
+    fetch_stream_impl(client, bvid, cid, qn, cookie, true)
+}
+
+/// 切分 P：同一个 bvid、换 cid 重新取流。
+///
+/// 和画质切换不同，分 P 的可用档位可能不一样（比如某一 P 没有 4K）。
+/// 这里传入上一 P 的 qn 作为**偏好**：服务端给什么档就用什么档，
+/// 不因为没拿到 4K 就整段换页失败。
+pub fn fetch_stream_for_page<C>(
+    client: &C,
+    bvid: &str,
+    cid: i64,
+    preferred_qn: i32,
+    cookie: &str,
+) -> Result<SelectedStream, String>
+where
+    C: HttpClient<Error = String>,
+{
+    fetch_stream_impl(client, bvid, cid, preferred_qn, cookie, false)
+}
+
+fn fetch_stream_impl<C>(
+    client: &C,
+    bvid: &str,
+    cid: i64,
+    qn: i32,
+    cookie: &str,
+    strict_quality: bool,
+) -> Result<SelectedStream, String>
+where
+    C: HttpClient<Error = String>,
+{
     if bvid.trim().is_empty() || cid <= 0 {
-        return Err("缺少 bvid / cid，无法切换清晰度".into());
+        return Err("缺少 bvid / cid，无法切换播放源".into());
     }
     let play = fetch_play_url_data(client, bvid, cid, qn, cookie)?;
     if !has_playable_stream(&play) {
@@ -568,8 +600,9 @@ where
     }
     let stream = select_stream(&play, Some(qn))
         .ok_or_else(|| "该清晰度没有可用的视频流".to_string())?;
-    // 服务端可能降档返回（会员过期 / 视频无该档），必须让用户知道实际没切过去。
-    if qn > 0 && stream.quality_id != qn {
+    // 画质菜单是精确点选：服务端降档返回（会员过期 / 视频无该档）要明确报错。
+    // 分 P 切换是「尽量沿用上一 P 的档位」，降档可接受。
+    if strict_quality && qn > 0 && stream.quality_id != qn {
         return Err(format!(
             "该清晰度当前不可用（请求 {qn}，返回 {}）",
             stream.quality_id
@@ -2004,6 +2037,32 @@ mod tests {
         assert_eq!(src.audio_url.as_deref(), Some("a80"));
         assert_eq!(src.duration_secs, 107);
         assert_eq!(src.owner_sign, "UP 的签名", "UP 主签名要带进信息面板");
+    }
+
+    #[test]
+    fn page_switch_tolerates_quality_downgrade() {
+        struct PageClient;
+        impl HttpClient for PageClient {
+            type Error = String;
+            fn get(&self, req: &Request) -> Result<String, String> {
+                match req.name {
+                    "user_info" => Ok(
+                        r#"{"code":0,"data":{"wbi_img":{"img_url":"a.png","sub_url":"b.png"}}}"#
+                            .into(),
+                    ),
+                    // 请求了 120（4K），但这一 P 只有 720P / 480P。
+                    "play_url" => Ok(r#"{"code":0,"data":{"dash":{"video":[{"id":64,"baseUrl":"v64","codecs":"avc1","width":1280,"height":720},{"id":32,"baseUrl":"v32","codecs":"avc1","width":640,"height":360}],"audio":[{"id":30280,"baseUrl":"a80","codecs":"mp4a"}]}}}"#.into()),
+                    other => Err(format!("未预期请求：{other}")),
+                }
+            }
+        }
+        // 分 P：降档可以接受，选到这一 P 最高的 720P。
+        let stream = fetch_stream_for_page(&PageClient, "BV1", 42, 120, "").unwrap();
+        assert_eq!(stream.quality_id, 64);
+        assert_eq!(stream.video_url, "v64");
+        // 画质菜单：精确点选必须报错，不能悄悄降档。
+        let err = fetch_stream_at(&PageClient, "BV1", 42, 120, "").unwrap_err();
+        assert!(err.contains("120"), "错误里要写清请求的档位：{err}");
     }
 
     #[test]

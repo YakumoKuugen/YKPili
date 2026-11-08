@@ -23,6 +23,10 @@ use yk_app::AppRoot;
 /// 见下方 `main` 的 iOS 分支。
 #[cfg(not(target_os = "ios"))]
 fn main() {
+    // 错误日志：启动即清空上一次会话，之后只在报错时写入。
+    // 必须在任何网络 / 播放代码之前初始化，panic hook 才能覆盖整段生命周期。
+    yk_infra::error_log::init();
+
     application()
         // 关键：GPUI 默认是 NullHttpClient（不发请求、静默失败），
         // 换成真实的客户端后 img() 才能拉到图床上的封面。

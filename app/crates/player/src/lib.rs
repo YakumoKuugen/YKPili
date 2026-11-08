@@ -140,6 +140,8 @@ const INFO_PANEL_COLLAPSED: f32 = PLAYER_INFO_PANEL_COLLAPSED_WIDTH; // 200
 /// 收藏夹面板一屏先摆几行：再长就先折叠，点「展开全部」再看。
 /// 8 × 32 + 头尾 ≈ 330，与 §13.3「容器最大高 320」同一量级。
 const FAV_PANEL_VISIBLE_ROWS: usize = 8;
+/// 收藏夹列表的最大可视高度：超出后在卡片内部滚动，不把浮层撑出窗口。
+const FAV_PANEL_MAX_HEIGHT: f32 = 360.0;
 /// 评论输入条收起态的圆形按钮直径。
 const COMMENT_COMPOSER_FAB: f32 = 40.0;
 /// 评论输入条高度：收起 / 展开同高，展开只是变宽。
@@ -398,6 +400,10 @@ pub struct PlayerView {
     quality_switching: bool,
     /// 换流代际：换视频 / 连续换档时只接受最后一次结果。
     quality_generation: u64,
+    /// 正在切分 P；期间忽略重复点击，旧结果按代际丢弃。
+    page_switching: bool,
+    /// 切 P 代际。
+    page_generation: u64,
     /// 画质 / 倍速胶囊的 bounds：点胶囊本身属于「切换菜单」，不能被外部点击关掉。
     quality_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     speed_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -435,6 +441,10 @@ pub struct PlayerView {
     submit_requested: bool,
     /// 是否已尝试启动渲染线程（换源时重置）
     tried_worker: bool,
+    /// 本次播放是否收到过首帧。没收到就说明「无法播放」或解码链路卡住。
+    first_frame_seen: bool,
+    /// 本次播放是否已经为「长时间没有首帧」写过错误日志（避免每 2 秒重复写）。
+    no_frame_logged: bool,
     /// 当前卡片的播放源；None = 还没点卡片 / 正在请求。
     source: Option<yk_domain::playback::PlaybackSource>,
     /// 正在后台取播放地址。
@@ -527,6 +537,8 @@ pub struct PlayerView {
     fav_error: Option<String>,
     /// 收藏夹超过一屏时是否已展开（默认先折叠，别把标签 / 评论顶出视野）。
     fav_list_expanded: bool,
+    /// 收藏夹列表的滚动位置。列表超过一屏时在卡片内部滚动。
+    fav_scroll: ScrollHandle,
     /// 互动行（点赞 / 投币 / 收藏 / 分享）的实际几何（窗口坐标）。
     /// 三个互动弹层按它定位，不再占文档流。
     action_row_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -664,6 +676,8 @@ impl PlayerView {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             worker: None,
             tried_worker: false,
+            first_frame_seen: false,
+            no_frame_logged: false,
             source: None,
             loading_source: false,
             history_report: None,
@@ -740,6 +754,7 @@ impl PlayerView {
             fav_loading: false,
             fav_error: None,
             fav_list_expanded: false,
+            fav_scroll: ScrollHandle::new(),
             action_row_bounds: Rc::new(Cell::new(None)),
             overlay_closing_kind: None,
             overlay_generation: 0,
@@ -777,6 +792,8 @@ impl PlayerView {
             speed_popover_open: false,
             quality_switching: false,
             quality_generation: 0,
+            page_switching: false,
+            page_generation: 0,
             quality_button_bounds: Rc::new(Cell::new(None)),
             speed_button_bounds: Rc::new(Cell::new(None)),
             control_popover_bounds: Rc::new(Cell::new(None)),

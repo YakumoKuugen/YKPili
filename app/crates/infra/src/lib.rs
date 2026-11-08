@@ -11,6 +11,7 @@ pub mod auth;
 pub mod cache;
 pub mod device;
 pub mod dynamic;
+pub mod error_log;
 pub mod favorites;
 pub mod feed;
 pub mod feed_cache;
