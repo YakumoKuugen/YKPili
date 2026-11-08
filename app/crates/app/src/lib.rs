@@ -417,6 +417,12 @@ impl AppRoot {
         self.dynamic_detail.is_some()
     }
 
+    /// 测试入口：播放浮窗是否已打开。
+    #[doc(hidden)]
+    pub fn test_player_open(&self) -> bool {
+        self.playing.is_some()
+    }
+
     /// 测试入口：图片查看器是否已打开。
     #[doc(hidden)]
     pub fn test_image_viewer_open(&self, cx: &App) -> bool {

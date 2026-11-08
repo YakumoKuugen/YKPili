@@ -94,6 +94,11 @@ path = "tests/following_card_copy.rs"
 harness = false
 
 [[test]]
+name = "following_quote_video"
+path = "tests/following_quote_video.rs"
+harness = false
+
+[[test]]
 name = "folder_icon_visual"
 path = "tests/folder_icon_visual.rs"
 harness = false

@@ -10,6 +10,7 @@ use std::rc::Rc;
 use gpui::assets::IconName;
 use gpui::component::Icon;
 use gpui::prelude::*;
+use gpui::TestSupportExt as _;
 use gpui::*;
 use yk_domain::format;
 use yk_infra::dynamic::{DynamicImage, DynamicItem, DynamicKind};
@@ -62,6 +63,15 @@ pub const HEADER_HEIGHT: f32 = 40.0;
 pub const FOOTER_HEIGHT: f32 = 38.0;
 pub const TITLE_LINE_HEIGHT: f32 = 22.0;
 pub const BODY_LINE_HEIGHT: f32 = 20.0;
+
+/// 转发卡片里「引用原动态」那一块的内边距与行尺寸。
+///
+/// 高度估算（[`card_height`]）和渲染（[`quote_block`]）共用这几个数，
+/// 引用内容是视频封面时也不会出现「算得矮、画得高」。
+pub const QUOTE_PADDING: f32 = 10.0;
+pub const QUOTE_AUTHOR_HEIGHT: f32 = 18.0;
+pub const QUOTE_TEXT_LINE: f32 = 18.0;
+pub const QUOTE_GAP: f32 = 2.0;
 
 /// 卡面文本：把换行压成空格。
 ///
@@ -120,6 +130,15 @@ pub fn image_metrics(inner: f32, images: &[DynamicImage]) -> (usize, f32, f32) {
     (cols, cell, h)
 }
 
+/// 引用块里的视频封面尺寸：宽度撑满引用块内容区，固定 16:9。
+///
+/// 返回的宽高直接落成固定盒子（不靠 `aspect_ratio` 反推），
+/// 这样估算与渲染一定是同一份几何。
+pub fn quote_cover_size(inner: f32) -> (f32, f32) {
+    let w = (inner - QUOTE_PADDING * 2.0).max(1.0);
+    (w, w * 9.0 / 16.0)
+}
+
 /// 卡片总高度。
 ///
 /// 结构：上下 padding + 头部 + 标题 + 正文 + 媒体 + 底部操作。
@@ -156,8 +175,19 @@ pub fn card_height(item: &DynamicItem, width: f32) -> f32 {
             }
         }
         DynamicKind::Forward => {
-            if item.origin.is_some() {
-                h += 10.0 + 16.0 + 2.0 * 18.0 + 10.0 + 8.0;
+            if let Some(origin) = item.origin.as_ref() {
+                // 引用块：外边距 + 内边距 + 作者行 + 内容 + 内边距。
+                h += 8.0
+                    + QUOTE_PADDING
+                    + QUOTE_AUTHOR_HEIGHT
+                    + QUOTE_GAP
+                    + QUOTE_PADDING;
+                // 原动态是视频时画一张封面，否则是两行原文摘要。
+                if origin.video.is_some() {
+                    h += quote_cover_size(inner).1;
+                } else {
+                    h += 2.0 * QUOTE_TEXT_LINE;
+                }
             }
         }
         DynamicKind::Link => {
@@ -482,13 +512,82 @@ pub fn video_block(
 // ================= 整卡 =================
 
 /// 引用原动态的引用块（转发动态）。
-fn quote_block(t: &YkTheme, origin: &DynamicItem) -> AnyElement {
+///
+/// 原动态是视频时不再只留一行「视频：标题」，而是直接画视频封面：
+/// 点引用块（封面）就进播放器，入场动画从封面位置起飞；
+/// 其余原动态仍是两行原文摘要。
+fn quote_block<V: DynamicCardHost + 'static>(
+    t: &YkTheme,
+    origin: &DynamicItem,
+    inner: f32,
+    scale_factor: f32,
+    load_image: bool,
+    active_images: Rc<RefCell<ImageResidency>>,
+    cover_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    cx: Option<&mut Context<V>>,
+) -> AnyElement {
     let s = &t.surfaces;
     let p = &t.palette;
-    let text = {
-        let raw = if let Some(video) = origin.video.as_ref() {
-            format!("视频：{}", video.title)
-        } else if !origin.text.trim().is_empty() {
+    let video = origin.video.as_ref();
+
+    let media: AnyElement = if let Some(video) = video {
+        let (cover_w, cover_h) = quote_cover_size(inner);
+        let cover_url = video.cover_url(cover_w, scale_factor);
+        if load_image && !cover_url.is_empty() {
+            active_images.borrow_mut().mark(&cover_url);
+        }
+        let art = crate::cover::cover_art(
+            &video.title,
+            if load_image { cover_url.as_str() } else { "" },
+            Some("#333333"),
+            s.fill_3,
+        )
+        .into_any_element();
+        let bounds_for_prepaint = cover_bounds.clone();
+        let root_for_prepaint = root_bounds.clone();
+        div()
+            .relative()
+            .w(px(cover_w))
+            .h(px(cover_h))
+            .flex_shrink_0()
+            .rounded(px(RADIUS_MD))
+            .overflow_hidden()
+            .bg(s.fill_3)
+            // 封面几何探针：播放浮窗的入场矩形从这张封面起飞。
+            .child(
+                canvas(
+                    move |bounds, _window, _cx| {
+                        if let Some(root) = root_for_prepaint.get() {
+                            bounds_for_prepaint.set(Some(Bounds {
+                                origin: point(
+                                    bounds.origin.x - root.origin.x,
+                                    bounds.origin.y - root.origin.y,
+                                ),
+                                size: bounds.size,
+                            }));
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(crate::cover::cover_visual(
+                t,
+                crate::cover::CoverVisual {
+                    art,
+                    views: video.play_count,
+                    danmaku: video.danmaku_count,
+                    duration_secs: yk_infra::search::parse_duration(&video.duration_text),
+                    is_live: false,
+                    show_stats: true,
+                },
+                cover_w / cover_h,
+            ))
+            .into_any_element()
+    } else {
+        let raw = if !origin.text.trim().is_empty() {
             origin.text.clone()
         } else if !origin.title.trim().is_empty() {
             origin.title.clone()
@@ -497,18 +596,37 @@ fn quote_block(t: &YkTheme, origin: &DynamicItem) -> AnyElement {
         } else {
             "原动态".to_string()
         };
-        card_text(&raw)
+        div()
+            .text_size(px(FONT_SIZE_CAPTION))
+            .line_height(px(QUOTE_TEXT_LINE))
+            .text_color(s.text_secondary)
+            .line_clamp(2)
+            .child(card_text(&raw))
+            .into_any_element()
     };
-    div()
+
+    // 引用的是视频：整块就是「点开视频」的入口。卡片本身是进详情的入口，
+    // 所以这里必须拦掉冒泡，否则同一次点击会先开播放器再叠一层详情。
+    // bvid 缺失时点不出播放器，退回卡片点击（进详情），不要变成死点击。
+    let playable = video.is_some_and(|video| !video.bvid.trim().is_empty());
+    let interactive = playable && cx.is_some();
+    // 占位卡（详情展开动画里的快照）和真实卡可能同帧共存，用不同 id 避开。
+    let quote_id = if cx.is_some() {
+        ("dynamic-quote", origin.index)
+    } else {
+        ("dynamic-quote-ghost", origin.index)
+    };
+    let mut block = div()
+        .id(quote_id)
         .mt(px(8.))
-        .p(px(10.))
+        .p(px(QUOTE_PADDING))
         .rounded(px(RADIUS_LG))
         .bg(s.fill_1)
         .border_1()
         .border_color(s.border_subtle)
         .flex()
         .flex_col()
-        .gap(px(2.))
+        .gap(px(QUOTE_GAP))
         .w_full()
         .child(
             div()
@@ -520,15 +638,39 @@ fn quote_block(t: &YkTheme, origin: &DynamicItem) -> AnyElement {
                 .child("@")
                 .child(origin.author_name().to_string()),
         )
-        .child(
-            div()
-                .text_size(px(FONT_SIZE_CAPTION))
-                .line_height(px(18.))
-                .text_color(s.text_secondary)
-                .line_clamp(2)
-                .child(text),
-        )
-        .into_any_element()
+        .child(media);
+
+    if interactive {
+        block = block
+            .cursor_pointer()
+            .hover(|style| style.bg(s.fill_2));
+        if let Some(cx) = cx {
+            let item = origin.clone();
+            let cover_for_click = cover_bounds.clone();
+            let root_for_click = root_bounds.clone();
+            block = block.on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                cx.stop_propagation();
+                let fallback = quote_cover_size(inner);
+                let bounds = cover_for_click.get().unwrap_or_else(|| Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(fallback.0), px(fallback.1)),
+                });
+                let origin = CardOrigin {
+                    bounds,
+                    cover_bounds: Some(bounds),
+                    root_size: root_for_click
+                        .get()
+                        .map(|b| b.size)
+                        .unwrap_or_else(|| size(px(1280.), px(820.))),
+                };
+                this.dynamic_open_card(&item, origin, window, cx);
+                window.refresh();
+            }));
+        }
+    }
+
+    // 测试探针：验收时按 id 取引用块的几何（正常构建里是空操作）。
+    block.test_support().into_any_element()
 }
 
 /// 外链卡：封面 + 标题 + 「查看详情 ›」。
@@ -759,7 +901,17 @@ pub fn card<V: DynamicCardHost + 'static>(
         }
         DynamicKind::Forward => {
             if let Some(origin) = item.origin.as_ref() {
-                body = body.child(quote_block(t, origin));
+                body = body.child(quote_block::<V>(
+                    t,
+                    origin,
+                    inner,
+                    scale_factor,
+                    load_images,
+                    active_images.clone(),
+                    cover_bounds.clone(),
+                    root_bounds.clone(),
+                    Some(&mut *cx),
+                ));
             }
         }
         DynamicKind::Link => {
@@ -1023,7 +1175,17 @@ pub fn card_ghost(
         }
         DynamicKind::Forward => {
             if let Some(origin) = item.origin.as_ref() {
-                body = body.child(quote_block(t, origin));
+                body = body.child(quote_block::<GhostHost>(
+                    t,
+                    origin,
+                    inner,
+                    scale_factor,
+                    true,
+                    active.clone(),
+                    Rc::new(Cell::new(None)),
+                    Rc::new(Cell::new(None)),
+                    None,
+                ));
             }
         }
         DynamicKind::Link => {
