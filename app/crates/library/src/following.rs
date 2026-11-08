@@ -41,6 +41,8 @@ pub struct FeedState<'a> {
     pub has_more: bool,
     pub loading_more: bool,
     pub signed_in: bool,
+    /// 卡片表面材质（液态玻璃 / 原有实色）。
+    pub material: SurfaceMaterial,
 }
 
 /// 关注流需要的宿主能力：状态快照 + 三个动作入口。
@@ -57,7 +59,10 @@ pub trait FollowingHost: DynamicCardHost {
     fn following_sign_in(&mut self, cx: &mut Context<Self>);
 }
 
-/// 渲染关注动态页面（含标题、四态与瀑布流）。
+/// 渲染关注动态页面（四态 + 瀑布流）。
+///
+/// 页面不再画标题 / 条数 / 刷新：这三样与底部 Dock 的导航态和「刷新」
+/// 动作重复，页面直接从内容开始。
 pub fn page<V: FollowingHost + 'static>(
     t: &YkTheme,
     state: FeedState<'_>,
@@ -70,58 +75,6 @@ pub fn page<V: FollowingHost + 'static>(
     let s = &t.surfaces;
     let scale_factor = window.scale_factor();
     let available = (window.viewport_size().width.as_f32() - SPACE_6 * 2.0).max(MIN_COLUMN_WIDTH);
-
-    let refresh = div()
-        .id("following-refresh")
-        .h(px(30.))
-        .px(px(SPACE_3))
-        .flex()
-        .items_center()
-        .gap(px(SPACE_1))
-        .rounded_full()
-        .bg(s.fill_1)
-        .text_size(px(FONT_SIZE_CAPTION))
-        .text_color(s.text_secondary)
-        .cursor_pointer()
-        .hover(|style| style.bg(s.fill_2).text_color(s.text_primary))
-        .child(Icon::new(IconName::RefreshCw).size(px(14.)))
-        .child("刷新")
-        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-            this.following_refresh(cx);
-            window.refresh();
-        }));
-
-    let header = div()
-        .flex()
-        .items_end()
-        .justify_between()
-        .w_full()
-        .child(
-            div()
-                .flex()
-                .items_baseline()
-                .gap(px(SPACE_3))
-                .child(
-                    div()
-                        .text_size(px(FONT_SIZE_HEADING))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(s.text_primary)
-                        .child("正在关注"),
-                )
-                .child(
-                    div()
-                        .text_size(px(FONT_SIZE_CAPTION))
-                        .text_color(s.text_tertiary)
-                        .child(if !state.signed_in {
-                            "登录后同步关注动态".to_string()
-                        } else if state.loaded {
-                            format!("{} 条动态 · 瀑布流", state.items.len())
-                        } else {
-                            "来自你关注的 UP 主".to_string()
-                        }),
-                ),
-        )
-        .children(state.signed_in.then_some(refresh));
 
     let body: AnyElement = if !state.signed_in {
         login_prompt(t, cx).into_any_element()
@@ -142,6 +95,7 @@ pub fn page<V: FollowingHost + 'static>(
             state.items,
             available,
             scale_factor,
+            state.material,
             visible_y,
             active_images,
             root_bounds,
@@ -154,7 +108,6 @@ pub fn page<V: FollowingHost + 'static>(
         .flex_col()
         .gap(px(SPACE_4))
         .w_full()
-        .child(header)
         .child(body)
         .when(state.has_more || state.loading_more, |el| {
             el.child(
@@ -364,6 +317,7 @@ fn waterfall<V: FollowingHost + 'static>(
     items: &[DynamicItem],
     available: f32,
     scale_factor: f32,
+    material: SurfaceMaterial,
     visible_y: std::ops::Range<f32>,
     active_images: Rc<RefCell<ImageResidency>>,
     root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
@@ -453,6 +407,7 @@ fn waterfall<V: FollowingHost + 'static>(
                         height,
                         scale_factor,
                         load_flags[i],
+                        material,
                         active_images.clone(),
                         root_bounds.clone(),
                         cx,

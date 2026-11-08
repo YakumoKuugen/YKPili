@@ -159,59 +159,10 @@ pub fn header<V: MessagesHost + 'static>(t: &YkTheme, state: &MessageState, cx: 
                 .child("消息中心"),
         );
 
-    // 四通道分段控件：按钮 + 数字角标；数字只在这里出现。
-    let mut seg = div()
-        .flex()
-        .items_center()
-        .gap(px(2.))
-        .p(px(3.))
-        .rounded_full()
-        .bg(s.fill_2);
-    for channel in MessageChannel::ALL {
-        let active = state.channel == channel;
-        let count = state.unread.channel(channel);
-        let accent = p.theme_primary;
-        let muted = s.text_tertiary;
-        let active_bg = s.surface_content_solid;
-        seg = seg.child(
-            div()
-                .id(("msg-channel", channel as usize))
-                .h(px(30.))
-                .px(px(14.))
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .rounded_full()
-                .bg(if active {
-                    active_bg
-                } else {
-                    hsla(0., 0., 0., 0.)
-                })
-                .shadow(if active {
-                    t.shadows.shadow_1.clone()
-                } else {
-                    Vec::new()
-                })
-                .text_size(px(FONT_SIZE_CONTROL))
-                .font_weight(if active {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::MEDIUM
-                })
-                .text_color(if active { accent } else { muted })
-                .cursor_pointer()
-                .hover(move |style| style.text_color(accent))
-                .child(channel.label())
-                .children((count > 0).then(|| count_badge(t, count, active)))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.messages_switch_channel(channel, cx);
-                    window.refresh();
-                })),
-        );
-    }
-
+    // 通道切换（回复 / @ / 赞 / 私信）已经搬到 Dock 的二级分页：
+    // 页头只留筛选与批量动作，避免同一组胶囊在页内和 Dock 各画一份。
     row =
-        row.child(seg)
+        row
             .child(div().flex_1())
             .children((state.channel != MessageChannel::Dm).then(|| {
                 div()
@@ -282,29 +233,7 @@ pub fn header<V: MessagesHost + 'static>(t: &YkTheme, state: &MessageState, cx: 
                         this.messages_toggle_only_mutual(cx);
                         window.refresh();
                     }))
-            }))
-            .child(
-                div()
-                    .id("msg-refresh")
-                    .w(px(30.))
-                    .h(px(30.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(s.fill_2))
-                    .child(
-                        Icon::new(IconName::RefreshCw)
-                            .size(px(15.))
-                            .text_color(s.text_secondary),
-                    )
-                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                        this.messages_refresh(cx);
-                        window.refresh();
-                    })),
-            );
-
+            }));
     // 私信通道额外的「全部已读」：只有私信有接口（update_ack），
     // 互动通道没有可清零的接口，不放假按钮。
     if state.channel == MessageChannel::Dm && !state.dm.conversations.is_empty() {

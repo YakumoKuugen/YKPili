@@ -524,12 +524,10 @@ pub fn page<V: HistoryHost>(
 
     // 显式算高度，不依赖 flex 的隐式收缩：历史页左栏是滚动容器，
     // 一旦主行拿到的是内容高度，卡片就会一直铺到 Dock 底下。
-    // 固定项：上内边距 16 + 标题 28 + 工具条上间距 16 + 工具条 38
-    // + 主行上间距 16 + 底部 Dock 占位 96。
+    // 固定项：上内边距 16 + 工具条 38 + 主行上间距 16 + 底部 Dock 占位 96。
+    // 页头（标题 / 条数 / 同步状态）已删除：这些信息与 Dock 重复。
     let page_h = (window.viewport_size().height.as_f32() - TOP_BAR_HEIGHT).max(320.0);
-    let main_h =
-        (page_h - SPACE_4 - LINE_HEIGHT_HEADING - SPACE_4 - SEARCH_H - SPACE_4 - DOCK_RESERVED)
-            .max(240.0);
+    let main_h = (page_h - SPACE_4 - SEARCH_H - SPACE_4 - DOCK_RESERVED).max(240.0);
 
     // 过滤：类型 + 搜索 + 日期。日期栏的 counts 只算类型 + 搜索，
     // 这样「今天 5 条」不会被已经选中的日期影响。
@@ -565,7 +563,6 @@ pub fn page<V: HistoryHost>(
         .flex_col()
         .px(px(SPACE_6))
         .pt(px(SPACE_4))
-        .child(header(t, state))
         .child(toolbar(t, state, window, cx))
         .child(
             div()
@@ -621,61 +618,7 @@ pub fn page<V: HistoryHost>(
     root.into_any_element()
 }
 
-// ================= 头部 / 工具条 =================
-
-fn header(t: &YkTheme, state: &HistoryState) -> AnyElement {
-    let s = &t.surfaces;
-    let total = state.entries.len();
-    let sync = state
-        .entries
-        .iter()
-        .max_by_key(|e| e.view_at)
-        .map(|e| e.watched_text())
-        .unwrap_or_default();
-    let mut title = div().flex().items_end().gap(px(SPACE_2)).child(
-        div()
-            .text_size(px(FONT_SIZE_DISPLAY))
-            .line_height(px(LINE_HEIGHT_HEADING))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(s.text_primary)
-            .child("观看历史"),
-    );
-    if total > 0 {
-        title = title.child(
-            div()
-                .pb(px(1.))
-                .text_size(px(FONT_SIZE_HEADING))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(s.text_quaternary)
-                .child(format!("({total})")),
-        );
-    }
-    div()
-        .flex()
-        .items_end()
-        .justify_between()
-        .w_full()
-        .child(title)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(SPACE_1))
-                .text_size(px(FONT_SIZE_CAPTION))
-                .text_color(s.text_tertiary)
-                .child(
-                    Icon::new(IconName::Cloud)
-                        .size(px(14.))
-                        .text_color(s.text_quaternary),
-                )
-                .child(if sync.is_empty() {
-                    "登录后与 B 站同步".to_string()
-                } else {
-                    format!("已同步 B 站 · 最近 {sync}")
-                }),
-        )
-        .into_any_element()
-}
+// ================= 工具条 =================
 
 fn toolbar<V: HistoryHost>(
     t: &YkTheme,
@@ -692,7 +635,6 @@ fn toolbar<V: HistoryHost>(
         .flex()
         .items_center()
         .gap(px(SPACE_2))
-        .mt(px(SPACE_4))
         .w_full()
         .child(
             div()

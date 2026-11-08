@@ -92,6 +92,7 @@ pub fn card<V: CardHost>(
     hovered: bool,
     leaving: bool,
     hover_generation: u64,
+    material: SurfaceMaterial,
     root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     load_cover: bool,
     active_images: Rc<RefCell<ImageResidency>>,
@@ -104,10 +105,25 @@ pub fn card<V: CardHost>(
     let title = item.title.clone();
     let bvid = item.bvid.clone();
     let idx = item.index;
-    // 与顶栏胶囊同一套「玻璃」：fill_2 底 + border_strong 边 + 带内高光的阴影。
-    let hover_shadow = t.shadows.shadow_glass_card.clone();
-    let hover_border = s.border_strong;
-    let hover_bg = s.fill_2;
+    // 选中（hover）时的表面：实色版是 fill_2 底 + border_strong 边 + 玻璃投影；
+    // 液态玻璃版换成渐变玻璃面 + 白色倒角，底子仍取 fill_2 免得比原先亮太多。
+    let glass = material.is_glass();
+    let hover_panel = GlassSurface::new(t, s.fill_2, 0.04, 0.40, 0.52);
+    let hover_shadow = if glass {
+        hover_panel.shadows.clone()
+    } else {
+        t.shadows.shadow_glass_card.clone()
+    };
+    let hover_border = if glass {
+        hover_panel.border
+    } else {
+        s.border_strong
+    };
+    let hover_bg = if glass {
+        hover_panel.fill
+    } else {
+        s.fill_2.into()
+    };
     // 当前帧封面几何：prepaint 写入，点击时读取；不 notify。
     let cover_source: Rc<RefCell<Option<CoverSource>>> = Rc::new(RefCell::new(None));
     let cover_image_url = item.cover_thumb_url();

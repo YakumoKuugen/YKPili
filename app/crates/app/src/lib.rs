@@ -87,6 +87,12 @@ enum QuitDecision {
 /// 顶栏搜索浮层的开 / 合代际：每次切换都换一个动画 id，GPUI 才会重新播。
 static SEARCH_ANIM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
+/// 首页左下角悬浮文件夹图标的总开关。
+///
+/// 关掉时不构建图标元素：GPUI 的矢量路径管线（路径中间纹理 + 每帧栅格化）
+/// 只在这个图标上用到，关掉后不再分配那套缓冲。恢复显示改成 `true` 即可。
+const SHOW_FOLDER_ICON: bool = false;
+
 /// 应用根视图。
 pub struct AppRoot {
     theme: YkTheme,
@@ -199,8 +205,19 @@ pub struct AppRoot {
     favorites: favorites_view::FavoritesState,
     /// 排行榜页状态（分区、整榜数据与请求代际）。
     rank: rank_view::RankState,
-    /// 搜索：顶栏输入、联想面板与结果页共享同一份状态。
+    /// 搜索：顶栏输入、联想面板与结果浮窗共享同一份状态。
     search: yk_library::search::SearchState,
+    /// 提交搜索后等第一页结果回来再弹浮窗。
+    search_panel_pending: bool,
+    /// 搜索结果浮窗是否在树上。
+    search_panel_open: bool,
+    /// 浮窗正在播收回动画：`open` 仍为 true，动画结束后再移除。
+    search_panel_closing: bool,
+    /// 展开 / 收回动画代际（`with_animation` 的 id，变了才重播）。
+    search_panel_open_generation: u64,
+    search_panel_close_generation: u64,
+    /// 结果面板自己的滚动句柄：打开新搜索时回到顶部。
+    search_results_scroll: ScrollHandle,
     /// 搜索浮层正在播「收回」动画：此时 `search.open` 已经是 false，
     /// 但浮层还要留在树上把动画播完。
     search_closing: bool,
@@ -212,6 +229,11 @@ pub struct AppRoot {
     search_close_generation: u64,
     /// 消息中心：四通道列表、私信会话与未读角标。
     messages: yk_library::messages::MessageState,
+    /// Dock 二级分页（消息中心的通道 / 排行榜的分区）是否展开。
+    ///
+    /// 这两组页内分支都收进了 Dock 的二级分页：只有「已经停在对应页面」时
+    /// 再点一次 Dock 上的那一项（消息 / 视频排行榜），才把胶囊浮出来。
+    dock_tabs_open: bool,
     /// 启动后是否已经自动弹过一次登录；取消后不再打扰。
     login_prompted: bool,
     /// 推荐流请求代际：登录后的带 Cookie 请求必须覆盖启动时的匿名请求。
@@ -250,6 +272,8 @@ pub struct AppRoot {
     offline: bool,
     /// 离线时展示的缓存时间（Unix 秒）；None = 没有可用缓存
     offline_updated_at: Option<u64>,
+    /// 左下角悬浮文件夹是否被 hover（纯视觉动效，不参与路由）。
+    folder_hovered: bool,
     /// 当前 hover 的卡片（CoverItem::index）
     hovered_card: Option<usize>,
     /// 刚离开的卡片：只为它播放 1→0 的收尾动画，避免所有旧卡一起重播
@@ -407,6 +431,17 @@ impl AppRoot {
         self
     }
 
+    /// 测试 / 截图入口：左下角文件夹固定在 hover 态（卡片展开）。
+    pub fn with_folder_hovered(mut self, hovered: bool) -> Self {
+        self.folder_hovered = hovered;
+        self
+    }
+
+    /// 测试入口：左下角文件夹当前是否处于 hover 态。
+    pub fn is_folder_hovered(&self) -> bool {
+        self.folder_hovered
+    }
+
     /// 测试 / 截图入口：注入历史页数据并进入批量模式，检查选中卡片的材质。
     pub fn with_history_entries(mut self, entries: Vec<yk_infra::history::HistoryEntry>) -> Self {
         self.page = Some(Route::History);
@@ -425,7 +460,10 @@ impl AppRoot {
         results: yk_infra::search::SearchResults,
         total: u64,
     ) -> Self {
-        self.page = Some(Route::Search);
+        // 结果现在落在浮窗里：页面保持不动，浮窗按静态展开态画。
+        self.search_panel_open = true;
+        self.search_panel_closing = false;
+        self.search_panel_open_generation = 0;
         self.search.query = query.to_string();
         self.search.draft = query.to_string();
         self.search.loading = false;
@@ -469,6 +507,18 @@ impl AppRoot {
         inbox.has_more = false;
         self.messages.unread = unread;
         self.messages.unread_loaded = true;
+        self
+    }
+
+    /// 测试 / 截图入口：直接打开设置浮层。
+    #[doc(hidden)]
+    pub fn open_settings_for_test(&mut self, cx: &mut Context<Self>) {
+        self.ensure_settings(cx);
+    }
+
+    /// 测试 / 截图入口：把 Dock 的二级分页固定在展开态（Dock 上方那条胶囊）。
+    pub fn with_dock_tabs(mut self, open: bool) -> Self {
+        self.dock_tabs_open = open;
         self
     }
 
@@ -573,6 +623,186 @@ impl AppRoot {
         .detach();
     }
 
+    /// 收回搜索结果浮窗：先播 260ms 的缩回动画，再把它从树上摘掉。
+    fn begin_search_panel_close(&mut self, cx: &mut Context<Self>) {
+        if !self.search_panel_open || self.search_panel_closing {
+            return;
+        }
+        self.search_panel_closing = true;
+        self.search_panel_close_generation = self.search_panel_close_generation.wrapping_add(1);
+        let generation = self.search_panel_close_generation;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(SEARCH_RESULTS_CLOSE_MS + 30))
+                .await;
+            let _ = this.update(cx, |root, cx| {
+                if !root.search_panel_closing || root.search_panel_close_generation != generation {
+                    return;
+                }
+                root.search_panel_open = false;
+                root.search_panel_closing = false;
+                root.reset_card_hover();
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 搜索结果浮窗：从搜索框矩形长成一块独立面板，内容沿用结果页的渲染。
+    fn search_results_panel(
+        &self,
+        t: &YkTheme,
+        material: SurfaceMaterial,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let vw = window.viewport_size().width.as_f32();
+        let vh = window.viewport_size().height.as_f32();
+        // 起点就是顶栏里那只搜索胶囊本身（提交后搜索浮层回收、胶囊回来）；
+        // 面板从它的矩形一路长到下面的大面板。
+        let source = yk_library::search_ui::search_collapsed_bounds(vw);
+        let target_w = (vw - SPACE_6 * 2.0).min(SEARCH_RESULTS_W);
+        let target_h = (vh - TOP_BAR_HEIGHT - SPACE_6 * 2.0 - DOCK_RESERVED)
+            .clamp(320.0, SEARCH_RESULTS_H);
+        let target = Bounds {
+            origin: point(px((vw - target_w) / 2.0), px(TOP_BAR_HEIGHT + SPACE_2)),
+            size: size(px(target_w), px(target_h)),
+        };
+        let s = &t.surfaces;
+        let query = self.search.query.clone();
+        let total = self.search.num_results;
+        let heading = if total > 0 {
+            format!("「{query}」· 共 {total} 条结果")
+        } else {
+            format!("「{query}」")
+        };
+        let close = cx.listener(|view, _: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            view.begin_search_panel_close(cx);
+        });
+        let body = yk_library::search_ui::page(
+            t,
+            &self.search,
+            self.hovered_card,
+            self.leaving_card,
+            self.hover_generation,
+            material,
+            // 面板外壳有 1px 描边：内容宽要把这 2px 扣掉，否则最后一张卡会被挤到下一行。
+            target_w - SPACE_5 * 2.0 - 2.0,
+            self.layout_bounds.clone(),
+            self.active_images.clone(),
+            window,
+            cx,
+        );
+        let content = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_3))
+                    .px(px(SPACE_5))
+                    .pt(px(SPACE_4))
+                    .pb(px(SPACE_3))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .text_size(px(FONT_SIZE_HEADING))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(s.text_primary)
+                            .child(heading),
+                    )
+                    .child(
+                        div()
+                            .id("search-results-close")
+                            .w(px(30.))
+                            .h(px(30.))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(s.fill_1)
+                            .text_size(px(18.))
+                            .text_color(s.text_secondary)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(s.fill_2).text_color(s.text_primary))
+                            .child("×")
+                            .on_click(close),
+                    ),
+            )
+            .child(
+                div()
+                    .id("search-results-scroll")
+                    .flex_1()
+                    .min_h(px(0.))
+                    .track_scroll(&self.search_results_scroll)
+                    .overflow_y_scroll()
+                    .px(px(SPACE_5))
+                    .pb(px(SPACE_5))
+                    .child(body),
+            );
+
+        let popover = SearchResultsPopover {
+            theme: t.clone(),
+            source,
+            target,
+            progress: 0.0,
+            content: content.into_any_element(),
+        };
+        // 验收注入（generation 0）直接按终点画，不播动画。
+        let animated = if self.search_panel_open_generation == 0 && !self.search_panel_closing {
+            SearchResultsPopover {
+                progress: 1.0,
+                ..popover
+            }
+            .into_any_element()
+        } else if self.search_panel_closing {
+            popover
+                .with_animation(
+                    format!("search-results-close-{}", self.search_panel_close_generation),
+                    Animation::new(std::time::Duration::from_millis(SEARCH_RESULTS_CLOSE_MS))
+                        .with_easing(|t| t),
+                    |el, p| SearchResultsPopover {
+                        progress: 1.0 - p,
+                        ..el
+                    },
+                )
+                .into_any_element()
+        } else {
+            popover
+                .with_animation(
+                    format!("search-results-open-{}", self.search_panel_open_generation),
+                    Animation::new(std::time::Duration::from_millis(SEARCH_RESULTS_OPEN_MS))
+                        .with_easing(|t| t),
+                    |el, p| SearchResultsPopover { progress: p, ..el },
+                )
+                .into_any_element()
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .child(
+                div()
+                    .id("search-results-backdrop")
+                    .absolute()
+                    .inset_0()
+                    .bg(rgba(0x00000001))
+                    .occlude()
+                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                        view.begin_search_panel_close(cx);
+                    })),
+            )
+            .child(animated)
+            .into_any_element()
+    }
+
     /// 搜索浮层：一份透明遮罩 + 展开 / 收回中的搜索框 + 联想面板。
     ///
     /// 挂在根节点 children 的**最后**，永远压在播放器 / 账号面板等所有
@@ -580,6 +810,7 @@ impl AppRoot {
     fn search_overlay(
         &self,
         t: &YkTheme,
+        material: SurfaceMaterial,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -594,6 +825,7 @@ impl AppRoot {
             window,
             cx,
             !self.search_closing,
+            material,
         );
         // 验收注入（YK_SEARCH_SUGGEST / with_search_suggestions）在第一帧就是
         // 展开态：代际为 0，直接按终点画，不播动画。
@@ -1635,12 +1867,17 @@ impl AppRoot {
         let theme = self.theme.clone();
         let settings = cx.new(|cx| settings_view::SettingsView::new(theme, cx));
         let app = cx.entity().downgrade();
+        let app_for_material = app.clone();
         let _ = settings.update(cx, |view, _| {
             view.set_close_handler(move |cx| {
                 let _ = app.update(cx, |root, cx| {
                     root.settings = None;
                     cx.notify();
                 });
+            });
+            // 材质是根节点渲染时读的全局设置：改完要让页面 / Dock / 搜索框重绘。
+            view.set_material_handler(move |cx| {
+                let _ = app_for_material.update(cx, |_root, cx| cx.notify());
             });
         });
         self.settings = Some(settings);
@@ -2196,6 +2433,10 @@ impl AppRoot {
             || self.dynamic_detail.is_some()
             || self.image_viewer.is_some()
             || self.playing.is_some()
+            // 搜索结果浮窗 / 搜索浮层自己滚：这一层不能把离散滚轮截走，
+            // 否则滚的是背后的页面，浮窗纹丝不动。
+            || self.search_panel_open
+            || self.search.open
         {
             self.cancel_smooth_scroll();
             return;
@@ -2379,11 +2620,18 @@ impl AppRoot {
             favorites: favorites_view::FavoritesState::new(),
             rank: rank_view::RankState::new(),
             search: yk_library::search::SearchState::new(),
+            search_panel_pending: false,
+            search_panel_open: false,
+            search_panel_closing: false,
+            search_panel_open_generation: 0,
+            search_panel_close_generation: 0,
+            search_results_scroll: ScrollHandle::new(),
             search_closing: false,
             search_bar_expanded: false,
             search_open_generation: 0,
             search_close_generation: 0,
             messages: yk_library::messages::MessageState::new(),
+            dock_tabs_open: false,
             login_prompted: false,
             feed_generation: 0,
             feed_page: 0,
@@ -2404,6 +2652,7 @@ impl AppRoot {
             offline: false,
             offline_updated_at: None,
             hovered_card: None,
+            folder_hovered: false,
             leaving_card: None,
             offline_retrying: false,
             offline_error: None,
@@ -2470,6 +2719,7 @@ impl yk_library::following::FollowingHost for AppRoot {
             has_more: self.following_has_more,
             loading_more: self.following_loading_more,
             signed_in: self.session.is_some(),
+            material: yk_infra::settings::current().surface_material,
         }
     }
 
@@ -2490,12 +2740,25 @@ impl yk_library::following::FollowingHost for AppRoot {
 
 impl yk_library::home::HomeHost for AppRoot {
     fn home_state(&self) -> yk_library::home::HomeState<'_> {
+        // 首页网格是虚拟列表：每一行渲染时都会回读这里，而不是用 `grid()` 的入参。
+        // 所以「结果浮窗抢占 hover」必须在这里生效，否则浮窗里点亮第 N 张，
+        // 背后首页第 N 张也会跟着亮。
+        let panel_owns_hover = self.search_panel_open;
         yk_library::home::HomeState {
             items: self.feed.items(),
             loading: self.feed_loading,
-            hovered: self.hovered_card,
-            leaving: self.leaving_card,
+            hovered: if panel_owns_hover {
+                None
+            } else {
+                self.hovered_card
+            },
+            leaving: if panel_owns_hover {
+                None
+            } else {
+                self.leaving_card
+            },
             hover_generation: self.hover_generation,
+            material: yk_infra::settings::current().surface_material,
         }
     }
 }
@@ -2555,19 +2818,36 @@ impl AppRoot {
     /// Dock 的统一入口：导航项在前、动作项在后，序号由 shell 保证稳定。
     fn dock_select(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let signed_in = self.session.is_some();
+        // 换页时搜索结果浮窗直接撤掉：它不属于任何一个页面。
+        if self.search_panel_open {
+            self.reset_card_hover();
+        }
+        self.search_panel_pending = false;
+        self.search_panel_open = false;
+        self.search_panel_closing = false;
+        // 离开页面 / 点别的入口就收起二级分页。会自己展开分页的入口
+        // （2 = 视频排行榜、5 = 消息）自己管开关；「刷新」不算离开页面。
+        if index != 2 && index != 5 && index != 6 {
+            self.dock_tabs_open = false;
+        }
         match index {
             0..=2 => {
                 let target = DOCK_ENTRIES[index].page;
                 if self.page == target {
-                    if target == Some(Route::Following) && !signed_in {
-                        self.ensure_login(cx);
-                    } else {
-                        self.refresh_page_manually(cx);
+                    // 已经在目标页：有二级分页的（排行榜分区）再点一次是展开 / 收起，
+                    // 其余页面维持原来的「再点一次刷新」。
+                    match target {
+                        Some(Route::Following) if !signed_in => self.ensure_login(cx),
+                        Some(Route::Rank) => self.dock_tabs_open = !self.dock_tabs_open,
+                        _ => {
+                            self.refresh_page_manually(cx);
+                        }
                     }
                     window.refresh();
                     cx.notify();
                     return;
                 }
+                self.dock_tabs_open = false;
                 if target == Some(Route::Following) {
                     if signed_in {
                         self.ensure_following(cx);
@@ -2627,11 +2907,21 @@ impl AppRoot {
                     return;
                 }
                 if self.page == Some(Route::Messages) {
-                    self.messages_refresh(cx);
+                    // 已经在消息页：再点一次不再刷新，而是展开 / 收起二级分页
+                    // （回复我的 / @我的 / 收到的赞 / 私信）。
+                    if self.messages.chat.is_some() {
+                        // 会话页里点「消息」先退回列表，再顺手把分页展开：
+                        // 用户要的是「回到消息列表」，不是留在会话里。
+                        self.messages_close_conversation(cx);
+                        self.dock_tabs_open = true;
+                    } else {
+                        self.dock_tabs_open = !self.dock_tabs_open;
+                    }
                     window.refresh();
                     cx.notify();
                     return;
                 }
+                self.dock_tabs_open = false;
                 self.page = Some(Route::Messages);
                 self.reset_card_hover();
                 self.top_refresh_armed = false;
@@ -2652,6 +2942,84 @@ impl AppRoot {
         window.refresh();
         cx.notify();
     }
+
+    /// Dock 二级分页的点击入口：序号按当前页面的那一组 tab 解释。
+    ///
+    /// 二级分页保持展开：它是一组 tab，不是点了就消失的动作菜单，
+    /// 连续切通道 / 分区不该每次都重新点开 Dock。
+    fn dock_tab_select(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        match self.page {
+            Some(Route::Messages) => {
+                use yk_infra::messages::MessageChannel;
+                let Some(channel) = MessageChannel::ALL.get(index).copied() else {
+                    return;
+                };
+                // 会话页里切通道：先把会话收起，否则列表换了、聊天窗还挂着。
+                if self.messages.chat.is_some() {
+                    self.messages_close_conversation(cx);
+                }
+                self.messages_switch_channel(channel, cx);
+                self.reset_card_hover();
+            }
+            Some(Route::Rank) => self.rank_select_zone(index, cx),
+            _ => return,
+        }
+        window.refresh();
+        cx.notify();
+    }
+
+    /// 消息中心的二级分页：四个通道 + 未读角标。
+    fn messages_dock_tabs(&self, t: &YkTheme, max_width: f32) -> yk_shell::dock::DockTabs {
+        use yk_infra::messages::MessageChannel;
+        let items = MessageChannel::ALL
+            .into_iter()
+            .enumerate()
+            .map(|(index, channel)| {
+                let active = self.messages.channel == channel;
+                let count = self.messages.unread.channel(channel);
+                yk_shell::dock::DockTab {
+                    index,
+                    active,
+                    content: div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(channel.label())
+                        .children((count > 0).then(|| {
+                            yk_library::messages_ui::count_badge(t, count, active)
+                                .into_any_element()
+                        }))
+                        .into_any_element(),
+                }
+            })
+            .collect();
+        yk_shell::dock::DockTabs {
+            // 会话页里不挂通道分页：那时用户在看聊天，切换通道没有意义。
+            open: self.dock_tabs_open && self.messages.chat.is_none(),
+            items,
+            max_width,
+        }
+    }
+
+    /// 排行榜的二级分页：全站 + 十九个一级分区。
+    fn rank_dock_tabs(&self, max_width: f32) -> yk_shell::dock::DockTabs {
+        let items = yk_infra::ranking::ZONES
+            .iter()
+            .enumerate()
+            .map(|(index, zone)| yk_shell::dock::DockTab {
+                index,
+                active: self.rank.zone == index,
+                content: div()
+                    .child(if zone.rid == 0 { "全站榜" } else { zone.label })
+                    .into_any_element(),
+            })
+            .collect();
+        yk_shell::dock::DockTabs {
+            open: self.dock_tabs_open,
+            items,
+            max_width,
+        }
+    }
 }
 
 
@@ -2666,10 +3034,6 @@ impl yk_library::search::SearchHost for AppRoot {
 
     fn search_cookie(&self) -> String {
         self.cookie()
-    }
-
-    fn search_request_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_search(window, cx);
     }
 
     fn search_request_close(&mut self, cx: &mut Context<Self>) {
@@ -2688,12 +3052,17 @@ impl yk_library::search::SearchHost for AppRoot {
     }
 
     fn search_route_to_results(&mut self, cx: &mut Context<Self>) {
-        self.page = Some(crate::Route::Search);
-        self.page_state = crate::pages::PageState::Ready;
-        self.reset_card_hover();
-        self.top_refresh_armed = false;
-        self.pull_refresh_triggered = false;
+        // 结果不再切页：等第一页回来后在 render 里把浮窗弹出来。
+        self.search_panel_pending = true;
         cx.notify();
+    }
+
+    fn search_request_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // 重新打开搜索时，结果浮窗先直接撤掉（要搜新词了，旧结果没有意义）。
+        self.search_panel_pending = false;
+        self.search_panel_open = false;
+        self.search_panel_closing = false;
+        self.open_search(window, cx);
     }
 
     fn search_ensure_hotwords(&mut self, cx: &mut Context<Self>) {
@@ -2837,6 +3206,11 @@ impl Render for AppRoot {
         if self.dynamic_detail_close_requested {
             self.dynamic_detail_close_requested = false;
             self.dynamic_detail = None;
+        }
+        // 离开首页时图标不在树里，不会收到 hover-leave：顺手复位，
+        // 免得下次回首页它带着上一轮的展开态直接出来。
+        if self.page.is_some() && self.folder_hovered {
+            self.folder_hovered = false;
         }
         self.prune_page_images(window, cx);
 
@@ -3066,11 +3440,46 @@ impl Render for AppRoot {
             self.messages_prepare_frame(window, cx);
         }
 
+        // 结果浮窗滚到底自动续页：面板是原生滚动，offset 变化会让本视图重绘，
+        // 在这里判定即可；请求中 / 没有下一页由 load_search_page 自己挡。
+        if self.search_panel_open
+            && !self.search.loading
+            && !self.search.loading_more
+            && self.search.has_more
+        {
+            let offset = self.search_results_scroll.offset().y.as_f32();
+            let max = self.search_results_scroll.max_offset().y.as_f32();
+            if max > 1.0 && -offset >= max - 160.0 {
+                self.load_search_page(true, cx);
+            }
+        }
+
+        // 提交搜索后先挂起；第一页回来（loading 落地）再把浮窗弹出来。
+        if self.search_panel_pending && !self.search.loading && !self.search.open {
+            self.search_panel_pending = false;
+            self.search_panel_open = true;
+            self.search_panel_closing = false;
+            self.search_panel_open_generation =
+                self.search_panel_open_generation.wrapping_add(1);
+            self.search_results_scroll.scroll_to_top_of_item(0);
+            // 浮窗接管 hover：先把页面上的选中收掉。
+            self.reset_card_hover();
+            cx.notify();
+        }
+
         let t = &self.theme;
+        // 材质设置：改完设置页会通知根节点重绘，这里读到的就是最新值。
+        let material = yk_infra::settings::current().surface_material;
 
         // 搜索浮层要挂在根层（压在内容 / Dock 之上），先在这里备好。
         let search_overlay = if self.search.open || self.search_closing {
-            Some(self.search_overlay(t, window, cx))
+            Some(self.search_overlay(t, material, window, cx))
+        } else {
+            None
+        };
+
+        let search_results = if self.search_panel_open {
+            Some(self.search_results_panel(t, material, window, cx))
         } else {
             None
         };
@@ -3098,7 +3507,15 @@ impl Render for AppRoot {
             .capture_key_down(cx.listener(
                 |view, event: &KeyDownEvent, _window, cx| {
                     let keystroke = &event.keystroke;
-                    // Esc 只关最上面一层：UP 主浮窗优先于播放器的两次 Esc 退出。
+                    // Esc 只关最上面一层：搜索结果浮窗 > UP 主浮窗 > 播放器。
+                    if keystroke.key.eq_ignore_ascii_case("escape")
+                        && view.search_panel_open
+                        && !view.search.open
+                    {
+                        view.begin_search_panel_close(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     if keystroke.key.eq_ignore_ascii_case("escape")
                         && view.up_profile.is_some()
                         && !view.player_on_top
@@ -3173,7 +3590,7 @@ impl Render for AppRoot {
                         if self.search.open || self.search_closing {
                             div().into_any_element()
                         } else {
-                            yk_library::search_ui::search_pill(t, &self.search, window, cx)
+                            yk_library::search_ui::search_pill(t, &self.search, window, cx, material)
                         },
                         window,
                         cx,
@@ -3223,13 +3640,24 @@ impl Render for AppRoot {
                             self.page,
                             self.page_state,
                             self.session.is_some(),
+                            material,
                             &self.history,
                             &self.favorites,
                             &self.rank,
                             &self.search,
                             &self.messages,
-                            self.hovered_card,
-                            self.leaving_card,
+                            // 结果浮窗打开时，hover 状态属于浮窗里的卡片：
+                            // 底下这层不跟着亮（否则同下标的首页封面会被一起选中）。
+                            if self.search_panel_open {
+                                None
+                            } else {
+                                self.hovered_card
+                            },
+                            if self.search_panel_open {
+                                None
+                            } else {
+                                self.leaving_card
+                            },
                             self.hover_generation,
                             self.scroll_settling(),
                             yk_library::following::FeedState {
@@ -3240,6 +3668,7 @@ impl Render for AppRoot {
                                 has_more: self.following_has_more,
                                 loading_more: self.following_loading_more,
                                 signed_in: self.session.is_some(),
+                                material,
                             },
                             self.layout_bounds.clone(),
                             self.active_images.clone(),
@@ -3267,9 +3696,33 @@ impl Render for AppRoot {
                 let nav: Vec<DockItem> = DOCK_ENTRIES
                     .iter()
                     .map(|entry| {
-                        DockItem::nav(entry.label, entry.label, entry.icon, self.page == entry.page)
+                        let mut item = DockItem::nav(
+                            entry.label,
+                            entry.label,
+                            entry.icon,
+                            self.page == entry.page,
+                        );
+                        // 「视频排行榜」和「消息」一样还有一层分区胶囊。
+                        if entry.page == Some(Route::Rank) {
+                            item.has_secondary = true;
+                            item.expandable = self.page == Some(Route::Rank);
+                            item.expanded = self.dock_tabs_open;
+                        }
+                        item
                     })
                     .collect();
+                // 「消息」在消息页里还能再展开一层（通道分页），箭头提示这一点。
+                let mut messages_item = DockItem::action(
+                    "dock-messages",
+                    "消息",
+                    IconName::Bell,
+                    self.page == Some(Route::Messages),
+                    true,
+                    signed_in && self.messages.unread.total() > 0,
+                );
+                messages_item.has_secondary = true;
+                messages_item.expandable = self.page == Some(Route::Messages);
+                messages_item.expanded = self.dock_tabs_open;
                 let actions = vec![
                     DockItem::action(
                         "dock-history",
@@ -3287,14 +3740,7 @@ impl Render for AppRoot {
                         true,
                         false,
                     ),
-                    DockItem::action(
-                        "dock-messages",
-                        "消息",
-                        IconName::Bell,
-                        self.page == Some(Route::Messages),
-                        true,
-                        signed_in && self.messages.unread.total() > 0,
-                    ),
+                    messages_item,
                     DockItem::action(
                         "dock-refresh",
                         "刷新",
@@ -3304,12 +3750,49 @@ impl Render for AppRoot {
                         false,
                     ),
                 ];
+                // 二级分页：一级 Dock 说明「在哪」，二级分页说明「页内哪个分支」。
+                // 目前只有消息中心（四个通道）和排行榜（二十个分区）有。
+                let tabs_width = (window.viewport_size().width.as_f32() - SPACE_4 * 2.0).max(240.0);
+                let tabs = match self.page {
+                    Some(Route::Messages) => Some(self.messages_dock_tabs(t, tabs_width)),
+                    Some(Route::Rank) => Some(self.rank_dock_tabs(tabs_width)),
+                    _ => None,
+                };
                 let on_select: DockSelect<AppRoot> =
                     Rc::new(|this, index, window, cx| this.dock_select(index, window, cx));
-                yk_shell::dock::dock(t, &nav, &actions, cx, on_select)
+                let on_tab: yk_shell::dock::DockTabSelect<AppRoot> =
+                    Rc::new(|this, index, window, cx| this.dock_tab_select(index, window, cx));
+                yk_shell::dock::dock(t, &nav, &actions, tabs, material, window, cx, on_select, on_tab)
             }).into_any_element(),
                 }
                 .render(t),
+            )
+            // 搜索结果浮窗：压在页面与 Dock 之上，但排在播放器 / 账号 / 设置
+            // 这些真正的「上层」之前 —— 点结果起播时播放器要盖住它。
+            .children(search_results)
+            // 左下角悬浮文件夹：参考 Rare UI 的 Folder，hover 掀盖露出卡片。
+            // 纯视觉元素（不接路由），只挂在首页；窗口太窄时 Dock 会挤到这边，直接不画。
+            .children(
+                (SHOW_FOLDER_ICON
+                    && self.page.is_none()
+                    && window.viewport_size().width
+                        >= px(yk_shell::folder_icon::FOLDER_ICON_MIN_VIEWPORT))
+                .then(|| {
+                    yk_shell::folder_icon::folder_icon(t, self.folder_hovered)
+                        .id("home-folder-icon")
+                        .absolute()
+                        .left(px(SPACE_6))
+                        .bottom(px(DOCK_BOTTOM_MARGIN))
+                        .cursor_default()
+                        // 图标压在封面之上：吃掉点击，免得点它把下面的视频打开。
+                        .occlude()
+                        .on_hover(cx.listener(|view, hovered: &bool, _window, cx| {
+                            if view.folder_hovered != *hovered {
+                                view.folder_hovered = *hovered;
+                                cx.notify();
+                            }
+                        }))
+                }),
             )
             // 尚未接入的动作给一个明确提示，避免「点了没反应」。
             .children(
@@ -3485,6 +3968,7 @@ fn content_area(
     page: Option<Route>,
     state: pages::PageState,
     signed_in: bool,
+    material: SurfaceMaterial,
     history: &history_view::HistoryState,
     favorites: &favorites_view::FavoritesState,
     rank: &rank_view::RankState,
@@ -3579,6 +4063,8 @@ fn content_area(
                 hovered_card,
                 leaving_card,
                 hover_generation,
+                material,
+                (window.viewport_size().width.as_f32() - SPACE_6 * 2.0).max(320.0),
                 layout_bounds,
                 active_images.clone(),
                 window,
@@ -3592,6 +4078,7 @@ fn content_area(
                 hovered_card,
                 leaving_card,
                 hover_generation,
+                material,
                 layout_bounds,
                 active_images.clone(),
                 window,
@@ -3607,6 +4094,7 @@ fn content_area(
                 layout_bounds,
                 window,
                 scroll,
+                material,
                 active_images.clone(),
                 cx,
             )
@@ -3643,6 +4131,7 @@ fn content_area(
             hovered: hovered_card,
             leaving: leaving_card,
             hover_generation,
+            material,
         },
         layout_bounds,
         active_images,
@@ -3652,10 +4141,88 @@ fn content_area(
     )
 }
 
+// ================= 搜索结果浮窗 =================
+
+/// 从搜索框矩形长成结果面板；收回时反向缩回同一处。
+///
+/// 与账号面板同一套节奏：位置 / 尺寸按 `ease_entrance` 插值，
+/// 内容在前 45% 之后淡入，收回时先缩形再消失。
+#[derive(gpui::IntoElement)]
+struct SearchResultsPopover {
+    theme: YkTheme,
+    source: Bounds<Pixels>,
+    target: Bounds<Pixels>,
+    progress: f32,
+    content: AnyElement,
+}
+
+impl RenderOnce for SearchResultsPopover {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let Self {
+            theme,
+            source,
+            target,
+            progress,
+            content,
+        } = self;
+        let progress = progress.clamp(0.0, 1.0);
+        let p = ease_entrance()(progress);
+        // 高度先长、宽度随后展开：观感是「从搜索条里抽出来」，
+        // 而不是一下子闪出一块方板。横向始终以窗口中线为轴。
+        let width_p = ease_entrance()(((progress - 0.18) / 0.82).clamp(0.0, 1.0));
+        let mix = |a: f32, b: f32, t: f32| a + (b - a) * t;
+        // 顶边钉在搜索条下方不动、往下长：结果像从搜索条里「落」出来，
+        // 而不是先在顶栏上闪一块方板再滑下去。
+        let bounds = Bounds {
+            origin: point(
+                px(mix(source.origin.x.as_f32(), target.origin.x.as_f32(), width_p)),
+                px(target.origin.y.as_f32()),
+            ),
+            size: size(
+                px(mix(source.size.width.as_f32(), target.size.width.as_f32(), width_p)),
+                px(mix(source.size.height.as_f32(), target.size.height.as_f32(), p)),
+            ),
+        };
+        let content_alpha = ((p - 0.45) / 0.55).clamp(0.0, 1.0);
+        let s = &theme.surfaces;
+        div()
+            .id("search-results-shell")
+            .absolute()
+            .left(px(bounds.origin.x.as_f32()))
+            .top(px(bounds.origin.y.as_f32()))
+            .w(px(bounds.size.width.as_f32().max(1.0)))
+            .h(px(bounds.size.height.as_f32().max(1.0)))
+            .rounded(px(MODAL_RADIUS))
+            .overflow_hidden()
+            .bg(s.surface_content_solid)
+            .border_1()
+            .border_color(s.border_popover)
+            .shadow(theme.shadows.shadow_2.clone())
+            .occlude()
+            // 面板内部的点击不能冒泡到根节点（那里会收起搜索浮层）。
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .opacity(content_alpha)
+                    .child(content),
+            )
+    }
+}
+
+
 // ================= Dock（页面场景内浮层） =================
 
 /// 底部 Dock 的几何契约：Dock 浮在页面上，内容区底部必须留出
 /// `DOCK_RESERVED`，否则最后一行封面会被压住。
+
+/// 搜索结果浮窗：从搜索框长成面板，节奏与账号 / 设置面板一致。
+const SEARCH_RESULTS_OPEN_MS: u64 = 280;
+const SEARCH_RESULTS_CLOSE_MS: u64 = 260;
+/// 结果面板的宽 / 高上限（窗口更小时按视口收缩）。
+const SEARCH_RESULTS_W: f32 = 1040.0;
+const SEARCH_RESULTS_H: f32 = 720.0;
 
 /// 播放器入场动画结束后，再延迟一点停绘背后页面。
 /// 入场动画 280ms，留 40ms 余量，避免最后一帧还在展开时页面先消失。

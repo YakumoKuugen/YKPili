@@ -641,6 +641,8 @@ pub fn card<V: DynamicCardHost + 'static>(
     height: f32,
     scale_factor: f32,
     load_images: bool,
+    // 卡片表面材质：液态玻璃 / 原有实色。
+    material: SurfaceMaterial,
     active_images: Rc<RefCell<ImageResidency>>,
     root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     cx: &mut Context<V>,
@@ -813,6 +815,41 @@ pub fn card<V: DynamicCardHost + 'static>(
 
     let card_bounds_for_prepaint = card_bounds.clone();
     let root_for_prepaint = root_bounds.clone();
+    // 玻璃版：同一张卡换成渐变玻璃面 + 白色倒角反光；实色版保留原来的
+    // surface_content + border_subtle。两套只差一组颜色 / 阴影，几何不动。
+    let glass = material.is_glass();
+    let glass_base = GlassSurface::new(t, s.surface_content, 0.03, 0.60, 0.72);
+    let glass_hover = GlassSurface::new(t, s.surface_content, 0.05, 0.74, 0.86);
+    let card_bg = if glass {
+        glass_base.fill
+    } else {
+        s.surface_content.into()
+    };
+    let card_border = if glass {
+        glass_base.border
+    } else {
+        s.border_subtle
+    };
+    let card_shadow = if glass {
+        glass_base.shadows.clone()
+    } else {
+        Vec::new()
+    };
+    let hover_bg = if glass {
+        glass_hover.fill
+    } else {
+        s.surface_content_hover.into()
+    };
+    let hover_border = if glass {
+        glass_hover.border
+    } else {
+        s.border_popover
+    };
+    let hover_shadow = if glass {
+        glass_hover.shadows.clone()
+    } else {
+        t.shadows.shadow_card_hover.clone()
+    };
     div()
         .id(("dynamic-card", idx))
         .relative()
@@ -823,15 +860,16 @@ pub fn card<V: DynamicCardHost + 'static>(
         .p(px(CARD_PADDING))
         .rounded(px(RADIUS_XL))
         .overflow_hidden()
-        .bg(s.surface_content)
+        .bg(card_bg)
         .border_1()
-        .border_color(s.border_subtle)
+        .border_color(card_border)
+        .shadow(card_shadow)
         .cursor_pointer()
         .hover(move |style| {
             style
-                .bg(s.surface_content_hover)
-                .border_color(s.border_popover)
-                .shadow(t.shadows.shadow_card_hover.clone())
+                .bg(hover_bg)
+                .border_color(hover_border)
+                .shadow(hover_shadow.clone())
         })
         // 卡片几何探针：动画起点用窗口坐标，点击时换算回页面坐标。
         .child(

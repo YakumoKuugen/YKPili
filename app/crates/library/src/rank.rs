@@ -1,17 +1,18 @@
 //! 排行榜页（设计文档 12.3）。
 //!
-//! 与首页推荐刻意做得不一样：名次徽标 + 榜单口径说明 + UP 主署名行。
+//! 与首页推荐刻意做得不一样：名次徽标 + UP 主署名行。
 //! 数据来自 `/x/web-interface/ranking/v2`，整榜一次拉取、没有分页；
 //! 切分区只是换 `rid` 重新拉同一张榜。
+//!
+//! 页内不再画标题 / 口径说明 / 分区胶囊：前两者与 Dock 的导航态重复，
+//! 分区胶囊搬进了 Dock 的二级分页（在排行榜页再点一次 Dock 入口展开）。
 //!
 //! 离线 / 错误态保留已经拉到的旧榜（不闪空），只有首次加载才整页骨架。
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gpui::assets::IconName;
 use gpui::base::ElementExt as _;
-use gpui::component::Icon;
 use gpui::prelude::*;
 use gpui::{InteractiveElement, StatefulInteractiveElement, *};
 use yk_infra::ranking::{RankItem, DEFAULT_NOTE, ZONES};
@@ -175,6 +176,7 @@ pub fn page<V: RankHost>(
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     window: &Window,
     scroll: &gpui::component::VirtualListScrollHandle,
+    material: SurfaceMaterial,
     active_images: Rc<RefCell<ImageResidency>>,
     cx: &mut Context<V>,
 ) -> AnyElement {
@@ -184,7 +186,8 @@ pub fn page<V: RankHost>(
     let pitch = ROW_HEIGHT + SPACE_2;
     let offset = scroll.base_handle().offset().y.as_f32();
     let viewport = (window.viewport_size().height.as_f32() - TOP_BAR_HEIGHT).max(ROW_HEIGHT);
-    let top_inset = 148.0;
+    // 只算内容区上内边距：页头（标题 / 分区 / 口径说明）与分区胶囊都已撤掉。
+    let top_inset = SPACE_4;
     let first = ((-offset - top_inset - 120.0).max(0.0) / pitch).floor() as usize;
     let last = (((-offset - top_inset + viewport) + 120.0).max(0.0) / pitch).ceil() as usize + 1;
     let first = first.min(state.items.len());
@@ -201,9 +204,7 @@ pub fn page<V: RankHost>(
         .flex()
         .flex_col()
         .gap(px(SPACE_3))
-        .w_full()
-        .child(header(t, state))
-        .child(zone_row(t, state, cx));
+        .w_full();
 
     if state.error.is_some() && !state.items.is_empty() {
         col = col.child(error_banner(t, state, cx));
@@ -228,6 +229,7 @@ pub fn page<V: RankHost>(
                 hover_generation,
                 layout_bounds.clone(),
                 load_images,
+                material,
                 active_images.clone(),
                 cx,
             ));
@@ -248,107 +250,6 @@ pub fn page<V: RankHost>(
     col.child(body).into_any_element()
 }
 
-fn header(t: &YkTheme, state: &RankState) -> AnyElement {
-    let s = &t.surfaces;
-    let zone = ZONES.get(state.zone).map(|z| z.label).unwrap_or("全站");
-    let note = if state.note.trim().is_empty() {
-        DEFAULT_NOTE
-    } else {
-        state.note.as_str()
-    };
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(SPACE_1))
-        .w_full()
-        .child(
-            div()
-                .flex()
-                .items_end()
-                .gap(px(SPACE_2))
-                .child(
-                    div()
-                        .text_size(px(FONT_SIZE_DISPLAY))
-                        .line_height(px(LINE_HEIGHT_HEADING))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(s.text_primary)
-                        .child("视频排行榜"),
-                )
-                .child(
-                    div()
-                        .pb(px(1.))
-                        .text_size(px(FONT_SIZE_CAPTION))
-                        .text_color(s.text_tertiary)
-                        .child(format!("{zone}榜")),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(SPACE_1))
-                .text_size(px(FONT_SIZE_CAPTION))
-                .text_color(s.text_tertiary)
-                .child(
-                    Icon::new(IconName::Trophy)
-                        .size(px(14.))
-                        .text_color(s.text_quaternary),
-                )
-                .child(note.to_string()),
-        )
-        .into_any_element()
-}
-
-fn zone_row<V: RankHost>(t: &YkTheme, state: &RankState, cx: &mut Context<V>) -> AnyElement {
-    let s = &t.surfaces;
-    let p = &t.palette;
-    let mut row = div()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap(px(SPACE_2))
-        .w_full();
-    for (index, zone) in ZONES.iter().enumerate() {
-        let active = index == state.zone;
-        let fg = if active {
-            s.text_on_accent
-        } else {
-            s.text_secondary
-        };
-        let bg = if active { p.theme_primary } else { s.fill_2 };
-        let hover = if active { p.theme_primary } else { s.fill_3 };
-        row = row.child(
-            div()
-                .id(("rank-zone", index))
-                .h(px(32.))
-                .px(px(SPACE_3))
-                .flex()
-                .items_center()
-                .rounded_full()
-                .bg(bg)
-                .text_size(px(FONT_SIZE_CAPTION))
-                .font_weight(if active {
-                    FontWeight::SEMIBOLD
-                } else {
-                    FontWeight::MEDIUM
-                })
-                .text_color(fg)
-                .cursor_pointer()
-                .hover(move |style| style.bg(hover))
-                .child(if zone.rid == 0 {
-                    "全站榜".to_string()
-                } else {
-                    zone.label.to_string()
-                })
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.rank_select_zone(index, cx);
-                    window.refresh();
-                })),
-        );
-    }
-    row.into_any_element()
-}
-
 fn row<V: RankHost>(
     t: &YkTheme,
     item: &RankItem,
@@ -358,6 +259,7 @@ fn row<V: RankHost>(
     hover_generation: u64,
     root_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     load_images: bool,
+    material: SurfaceMaterial,
     active_images: Rc<RefCell<ImageResidency>>,
     cx: &mut Context<V>,
 ) -> AnyElement {
@@ -516,6 +418,37 @@ fn row<V: RankHost>(
             });
         });
 
+    // 玻璃 / 实色两套表面，几何完全一致。
+    let glass = material.is_glass();
+    let glass_base = GlassSurface::new(t, s.surface_content, 0.03, 0.60, 0.72);
+    let glass_hover = GlassSurface::new(t, s.surface_content, 0.05, 0.74, 0.86);
+    let row_bg = if glass {
+        glass_base.fill
+    } else {
+        s.surface_content.into()
+    };
+    let row_border = if glass {
+        glass_base.border
+    } else {
+        s.border_subtle
+    };
+    let row_shadow = if glass {
+        glass_base.shadows.clone()
+    } else {
+        Vec::new()
+    };
+    let hover_bg = if glass {
+        glass_hover.fill
+    } else {
+        s.surface_content_hover.into()
+    };
+    let hover_border = if glass {
+        glass_hover.border
+    } else {
+        s.border_strong
+    };
+    let hover_shadow = glass_hover.shadows.clone();
+
     div()
         .id(("rank-row", rank))
         .flex()
@@ -524,14 +457,16 @@ fn row<V: RankHost>(
         .h(px(ROW_HEIGHT))
         .px(px(SPACE_3))
         .rounded(px(CARD_RADIUS))
-        .bg(s.surface_content)
+        .bg(row_bg)
         .border_1()
-        .border_color(s.border_subtle)
+        .border_color(row_border)
+        .shadow(row_shadow)
         .cursor_pointer()
-        .hover(|style| {
+        .hover(move |style| {
             style
-                .bg(s.surface_content_hover)
-                .border_color(s.border_strong)
+                .bg(hover_bg)
+                .border_color(hover_border)
+                .shadow(hover_shadow.clone())
         })
         // hover 状态驱动封面缓推：滚动期间不推进动画代际，
         // 避免卡片从指针下滑过时缩放反复重置。

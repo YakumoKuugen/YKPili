@@ -15,6 +15,7 @@
 //! - 字号用 `text_size(px(n))` 显式像素，不用 GPUI 的 rem 比例（见 typography 注释）。
 
 pub mod dimensions;
+pub mod material;
 pub mod motion;
 pub mod palette;
 pub mod shadows;
@@ -22,6 +23,7 @@ pub mod surfaces;
 pub mod typography;
 
 pub use dimensions::*;
+pub use material::*;
 pub use motion::*;
 pub use palette::{palette, YkPalette};
 pub use shadows::{YkShadows, dark as shadows_dark, light as shadows_light};

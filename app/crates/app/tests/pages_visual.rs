@@ -189,6 +189,21 @@ fn render_favorites() {
     );
 }
 
+/// 排行榜的分区胶囊收进了 Dock 二级分页：截图确认展开态与折行几何。
+fn render_rank_zones() {
+    let page = rank_page();
+    capture(
+        || {
+            AppRoot::new()
+                .without_login_prompt()
+                .with_rank_page(0, page)
+                .with_dock_tabs(true)
+        },
+        &temp_path("ykpili-rank-zones.ppm"),
+        1000.0,
+    );
+}
+
 fn render_quit_hint() {
     capture(
         || {
@@ -212,6 +227,7 @@ fn main() {
     {
         render_rank();
         render_favorites();
+        render_rank_zones();
         render_quit_hint();
         eprintln!("[visual] done");
     }

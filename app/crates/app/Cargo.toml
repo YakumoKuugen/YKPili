@@ -92,3 +92,13 @@ harness = false
 name = "following_card_copy"
 path = "tests/following_card_copy.rs"
 harness = false
+
+[[test]]
+name = "folder_icon_visual"
+path = "tests/folder_icon_visual.rs"
+harness = false
+
+[[test]]
+name = "folder_hover"
+path = "tests/folder_hover.rs"
+harness = false

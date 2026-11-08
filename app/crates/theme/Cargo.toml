@@ -6,3 +6,4 @@ publish = false
 
 [dependencies]
 gpui.workspace = true
+serde = { workspace = true }

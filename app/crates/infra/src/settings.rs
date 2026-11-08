@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
 use serde::{Deserialize, Serialize};
+use yk_theme::theme::SurfaceMaterial;
 
 /// 应用级设置。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,12 +28,18 @@ pub struct AppSettings {
     /// 默认开启：视频放完时浮窗已经没有继续存在的意义，收起后把页面还给用户。
     /// 想留在最后一帧（截图 / 看片尾）的用户可以在设置里关掉。
     pub close_player_on_finish: bool,
+    /// 界面材质：液态玻璃 / 原有材质。
+    ///
+    /// 影响 Dock 选中态与外壳、搜索框、正在关注卡片、排行榜条目。
+    /// 默认玻璃：这是当前设计走的材质，切回实色是留给偏好硬朗对比的用户。
+    pub surface_material: SurfaceMaterial,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             close_player_on_finish: true,
+            surface_material: SurfaceMaterial::Glass,
         }
     }
 }

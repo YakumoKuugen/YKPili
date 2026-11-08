@@ -403,6 +403,7 @@ pub fn page<V: FavoritesHost>(
     hovered_card: Option<usize>,
     leaving_card: Option<usize>,
     hover_generation: u64,
+    material: SurfaceMaterial,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
     window: &Window,
@@ -431,7 +432,6 @@ pub fn page<V: FavoritesHost>(
         .flex_col()
         .gap(px(SPACE_4))
         .w_full()
-        .child(header(t, state))
         .child(
             div()
                 .flex()
@@ -454,54 +454,12 @@ pub fn page<V: FavoritesHost>(
                             hovered_card,
                             leaving_card,
                             hover_generation,
+                            material,
                             layout_bounds,
                             active_images,
                             cx,
                         )),
                 ),
-        )
-        .into_any_element()
-}
-
-fn header(t: &YkTheme, state: &FavoritesState) -> AnyElement {
-    let s = &t.surfaces;
-    let mut title = div().flex().items_end().gap(px(SPACE_2)).child(
-        div()
-            .text_size(px(FONT_SIZE_DISPLAY))
-            .line_height(px(LINE_HEIGHT_HEADING))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(s.text_primary)
-            .child("我的收藏"),
-    );
-    if !state.folders.is_empty() {
-        title = title.child(
-            div()
-                .pb(px(1.))
-                .text_size(px(FONT_SIZE_HEADING))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(s.text_quaternary)
-                .child(format!("({})", state.folders.len())),
-        );
-    }
-    div()
-        .flex()
-        .items_end()
-        .justify_between()
-        .w_full()
-        .child(title)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(SPACE_1))
-                .text_size(px(FONT_SIZE_CAPTION))
-                .text_color(s.text_tertiary)
-                .child(
-                    Icon::new(IconName::Cloud)
-                        .size(px(14.))
-                        .text_color(s.text_quaternary),
-                )
-                .child("已同步 B 站"),
         )
         .into_any_element()
 }
@@ -728,6 +686,7 @@ fn content<V: FavoritesHost>(
     hovered_card: Option<usize>,
     leaving_card: Option<usize>,
     hover_generation: u64,
+    material: SurfaceMaterial,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
     cx: &mut Context<V>,
@@ -779,6 +738,7 @@ fn content<V: FavoritesHost>(
             hovered_card == Some(index),
             leaving_card == Some(index),
             hover_generation,
+            material,
             layout_bounds.clone(),
             true,
             active_images.clone(),

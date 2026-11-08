@@ -25,6 +25,8 @@ pub struct HomeState<'a> {
     pub leaving: Option<usize>,
     /// hover 动画代际：滚动活跃期内不推进，避免封面缩放重播。
     pub hover_generation: u64,
+    /// 封面卡被选中（hover）时的表面材质。
+    pub material: SurfaceMaterial,
 }
 
 /// 首页网格需要的宿主能力（在封面卡片能力之上）。
@@ -45,10 +47,20 @@ pub fn columns(viewport_width: f32) -> usize {
 /// 窗口越宽空得越明显。均分之后每行恰好铺满内容区，窗口变宽时卡片跟着
 /// 变大——上限由「再多一列就放不下 208」约束，最多 208 + 224/cols。
 pub fn card_width(viewport_width: f32) -> f32 {
-    let cols = columns(viewport_width);
-    let available = (viewport_width - SPACE_6 * 2.0).max(COVER_CELL_WIDTH);
+    card_metrics((viewport_width - SPACE_6 * 2.0).max(COVER_CELL_WIDTH)).1
+}
+
+/// 给定内容区可用宽，算出列数与均分后的卡片宽。
+///
+/// 首页与搜索结果共用同一套规则：卡片按可用宽均分、整行铺满，
+/// 不会因为固定 208 宽而在右侧留出一条空带。
+pub fn card_metrics(available: f32) -> (usize, f32) {
+    let available = available.max(COVER_CELL_WIDTH);
+    let cols = (((available + SPACE_4) / (COVER_CELL_WIDTH + SPACE_4)).floor() as usize).max(1);
     let gaps = SPACE_4 * cols.saturating_sub(1) as f32;
-    ((available - gaps) / cols as f32).max(COVER_CELL_WIDTH)
+    // 留 1px 余量：恰好铺满时，任何 1~2px 的描边 / 取整都可能把最后一张挤到下一行。
+    let card_w = (((available - gaps) / cols as f32) - 1.0).max(COVER_CELL_WIDTH);
+    (cols, card_w)
 }
 
 /// 首页填满一屏所需的最少卡片数：列数 ×（整行数 + 1 行）。
@@ -99,6 +111,9 @@ pub fn grid<V: HomeHost + 'static>(
             .flex_col()
             .gap(px(SPACE_4))
             .w_full()
+            // 和其他页面同一块底色：根节点的渐变 / 光晕只在没有内容铺满时露出来，
+            // 首页整屏都是卡片，留着只会让卡片之间的缝透出一层蓝绿色。
+            .bg(t.surfaces.bg_base)
             .px(px(SPACE_6))
             .pt(px(SPACE_4))
             .pb(px(DOCK_RESERVED))
@@ -154,6 +169,7 @@ pub fn grid<V: HomeHost + 'static>(
 
     let entity = cx.entity();
     let theme = t.clone();
+    let material = state.material;
     let active_images_for_grid = active_images.clone();
     let root_bounds_for_grid = root_bounds;
     v_virtual_list(
@@ -190,6 +206,7 @@ pub fn grid<V: HomeHost + 'static>(
                             hovered,
                             leaving,
                             hover_gen,
+                            material,
                             root_bounds_for_grid.clone(),
                             load_cover,
                             active_images_for_grid.clone(),
@@ -202,6 +219,7 @@ pub fn grid<V: HomeHost + 'static>(
         },
     )
     .track_scroll(scroll)
+    .bg(t.surfaces.bg_base)
     .px(px(SPACE_6))
     .pt(px(SPACE_4))
     .pb(px(DOCK_RESERVED))

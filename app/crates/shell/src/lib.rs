@@ -14,6 +14,7 @@
 
 pub mod account_view;
 pub mod dock;
+pub mod folder_icon;
 pub mod frame;
 pub mod top_bar;
 pub mod login_view;

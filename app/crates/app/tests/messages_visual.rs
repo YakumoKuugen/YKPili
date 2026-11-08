@@ -466,6 +466,28 @@ fn render_dock_unread() {
     );
 }
 
+fn render_dock_tabs() {
+    capture(
+        || {
+            AppRoot::new()
+                .without_login_prompt()
+                .with_message_inbox(
+                    MessageChannel::Reply,
+                    reply_entries(),
+                    UnreadCounts {
+                        reply: 3,
+                        mention: 1,
+                        like: 3,
+                        dm: 2,
+                    },
+                )
+                .with_dock_tabs(true)
+        },
+        "/tmp/ykpili-messages-dock-tabs.ppm",
+        900.0,
+    );
+}
+
 fn render_favorites() {
     capture(
         || {
@@ -494,6 +516,7 @@ fn main() {
         render_chat();
         render_chat_locked();
         render_dock_unread();
+        render_dock_tabs();
         render_favorites();
         eprintln!("[visual] done");
     }

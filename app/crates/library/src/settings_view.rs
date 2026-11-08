@@ -2,12 +2,18 @@
 //!
 //! 目前管理：
 //! - 播放设置：播放结束是否自动关闭播放器（存 `settings.json`，立即生效）；
+//! - 界面材质：液态玻璃 / 原有材质（存 `settings.json`，立即生效）；
 //! - 图片磁盘缓存：`~/Library/Caches/YKPili/images`，存压缩图，清掉后滚动会重新下载；
 //! - 推荐流缓存：首页离线用的 `recommend.json`。
 //!
 //! 内存中的页面图片缓存不在这里清：它只保留可视 + 一行，滚动时会自动换出，
 //! 点击清理后如果立刻清空反而会让当前屏幕的卡片重新请求网络。
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use gpui::assets::IconName;
+use gpui::component::Icon;
 use gpui::prelude::*;
 use gpui::*;
 use yk_infra::feed_cache::{self, FeedCache};
@@ -26,6 +32,14 @@ pub struct SettingsView {
     feed_stats: (u64, Option<u64>),
     /// 播放结束自动关闭播放器（镜像 `settings.json`，渲染用）。
     close_on_finish: bool,
+    /// 界面材质（镜像 `settings.json`）。
+    material: SurfaceMaterial,
+    /// 材质下拉是否展开。
+    material_menu_open: bool,
+    /// 下拉触发按钮的窗口坐标：菜单要钉在它下面，所以得先量。
+    material_anchor: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// 改完材质通知外层重绘（页面 / Dock / 搜索框都跟着换）。
+    material_handler: Option<Rc<dyn Fn(&mut App)>>,
     message: Option<(String, bool)>,
     close_handler: Option<Box<dyn Fn(&mut App)>>,
     focus_handle: FocusHandle,
@@ -41,6 +55,10 @@ impl SettingsView {
             disk_max: cache.max_bytes(),
             feed_stats: FeedCache::new().stats(),
             close_on_finish: yk_infra::settings::current().close_player_on_finish,
+            material: yk_infra::settings::current().surface_material,
+            material_menu_open: false,
+            material_anchor: Rc::new(Cell::new(None)),
+            material_handler: None,
             message: None,
             close_handler: None,
             focus_handle: cx.focus_handle().tab_stop(true),
@@ -52,6 +70,23 @@ impl SettingsView {
 
     pub fn set_close_handler(&mut self, handler: impl Fn(&mut App) + 'static) {
         self.close_handler = Some(Box::new(handler));
+    }
+
+    /// 材质变化后通知外层：页面卡片 / Dock / 搜索框都在外层渲染。
+    pub fn set_material_handler(&mut self, handler: impl Fn(&mut App) + 'static) {
+        self.material_handler = Some(Rc::new(handler));
+    }
+
+    /// 切换界面材质：立即落盘 + 立即生效。
+    fn set_material(&mut self, material: SurfaceMaterial, cx: &mut Context<Self>) {
+        yk_infra::settings::update(|settings| settings.surface_material = material);
+        self.material = material;
+        self.material_menu_open = false;
+        eprintln!("[settings] 界面材质：{}", material.label());
+        if let Some(handler) = self.material_handler.as_ref() {
+            handler(cx);
+        }
+        cx.notify();
     }
 
     fn refresh_stats(&mut self) {
@@ -152,9 +187,31 @@ impl Render for SettingsView {
         let toggle_close_on_finish = cx.listener(|view, _: &ClickEvent, _window, cx| {
             view.toggle_close_on_finish(cx);
         });
+        let toggle_material_menu = cx.listener(|view, _: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            view.material_menu_open = !view.material_menu_open;
+            cx.notify();
+        });
+        let dismiss_material_menu = cx.listener(|view, _: &ClickEvent, _window, cx| {
+            cx.stop_propagation();
+            view.material_menu_open = false;
+            cx.notify();
+        });
+        let settings_entity = cx.entity().downgrade();
+        let pick_material: Rc<dyn Fn(SurfaceMaterial, &mut App)> = {
+            let entity = settings_entity.clone();
+            Rc::new(move |material, cx| {
+                let _ = entity.update(cx, |view, cx| view.set_material(material, cx));
+            })
+        };
         let escape = cx.listener(|view, event: &KeyDownEvent, _window, cx| {
             if event.keystroke.key == "escape" {
-                view.close(cx);
+                if view.material_menu_open {
+                    view.material_menu_open = false;
+                    cx.notify();
+                } else {
+                    view.close(cx);
+                }
                 cx.stop_propagation();
             }
         });
@@ -237,6 +294,13 @@ impl Render for SettingsView {
                     "settings-close-on-finish",
                     toggle_close_on_finish,
                 ),
+            ))
+            // 界面材质：液态玻璃 / 原有材质
+            .child(setting_row(
+                &t,
+                "界面材质",
+                self.material.description(),
+                material_control(&t, self.material, &self.material_anchor, toggle_material_menu),
             ))
             // 图片缓存
             .child(cache_row(
@@ -322,7 +386,19 @@ impl Render for SettingsView {
                             .child("清理全部缓存")
                             .on_click(clear_all),
                     ),
-            );
+            )
+            // 下拉菜单最后画：压在其它设置行之上。
+            .when(self.material_menu_open, |el| {
+                el.child(material_menu(
+                    &t,
+                    self.material,
+                    self.material_anchor.get(),
+                    left,
+                    top,
+                    pick_material.clone(),
+                    dismiss_material_menu,
+                ))
+            });
 
         div()
             .absolute()
@@ -399,6 +475,142 @@ fn setting_row(
                 ),
         )
         .child(control)
+}
+
+/// 材质下拉的宽 / 选项高。
+const MATERIAL_MENU_W: f32 = 208.0;
+
+/// 材质下拉的触发按钮：当前材质 + 下箭头。
+fn material_control(
+    t: &YkTheme,
+    current: SurfaceMaterial,
+    anchor: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let s = &t.surfaces;
+    let anchor = anchor.clone();
+    div()
+        .relative()
+        // 量外层盒（无 padding），菜单据此钉在按钮下方。
+        .child(
+            canvas(
+                move |bounds, _window, _cx| anchor.set(Some(bounds)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(
+            div()
+                .id("settings-material")
+                .h(px(32.))
+                .px(px(SPACE_3))
+                .flex()
+                .items_center()
+                .gap(px(SPACE_2))
+                .rounded(px(INTERACTIVE_RADIUS))
+                .bg(s.surface_elevated)
+                .border_1()
+                .border_color(s.border_subtle)
+                .text_size(px(FONT_SIZE_CONTROL))
+                .text_color(s.text_secondary)
+                .cursor_pointer()
+                .hover(|style| style.bg(s.surface_elevated_hover).text_color(s.text_primary))
+                .child(current.label())
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(14.))
+                        .text_color(s.text_quaternary),
+                )
+                .on_click(on_click),
+        )
+}
+
+/// 材质下拉的菜单：整块面板铺一层关闭用的点击层，菜单钉在触发按钮下方。
+fn material_menu(
+    t: &YkTheme,
+    current: SurfaceMaterial,
+    anchor: Option<Bounds<Pixels>>,
+    panel_left: f32,
+    panel_top: f32,
+    pick: Rc<dyn Fn(SurfaceMaterial, &mut App)>,
+    on_dismiss: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    let (menu_left, menu_top) = match anchor {
+        Some(bounds) => (
+            bounds.origin.x.as_f32() - panel_left + bounds.size.width.as_f32() - MATERIAL_MENU_W,
+            bounds.origin.y.as_f32() - panel_top + bounds.size.height.as_f32() + 4.0,
+        ),
+        // 还没量到按钮时给一个稳定落点，避免菜单闪到左上角。
+        None => (SETTINGS_W - MATERIAL_MENU_W - SPACE_6, 120.0),
+    };
+
+    let mut menu = div()
+        .absolute()
+        .left(px(menu_left.max(SPACE_3)))
+        .top(px(menu_top))
+        .w(px(MATERIAL_MENU_W))
+        .p(px(4.))
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .rounded(px(RADIUS_MD))
+        .bg(s.surface_popover)
+        .border_1()
+        .border_color(s.border_popover)
+        .shadow(t.shadows.shadow_3.clone())
+        .occlude();
+
+    for option in SurfaceMaterial::ALL {
+        let active = option == current;
+        let pick = pick.clone();
+        menu = menu.child(
+            div()
+                .id(("settings-material-option", option as usize))
+                .h(px(32.))
+                .px(px(SPACE_2))
+                .flex()
+                .items_center()
+                .gap(px(SPACE_2))
+                .rounded(px(INTERACTIVE_RADIUS))
+                .bg(if active {
+                    p.theme_primary_10
+                } else {
+                    hsla(0., 0., 0., 0.)
+                })
+                .text_size(px(FONT_SIZE_CAPTION))
+                .text_color(if active {
+                    p.theme_primary
+                } else {
+                    s.text_secondary
+                })
+                .cursor_pointer()
+                .hover(move |style| style.bg(s.surface_elevated_hover))
+                .child(div().flex_1().child(option.label()))
+                .when(active, |el| {
+                    el.child(
+                        Icon::new(IconName::Check)
+                            .size(px(14.))
+                            .text_color(p.theme_primary),
+                    )
+                })
+                .on_click(move |_, _, cx| pick(option, cx)),
+        );
+    }
+
+    div()
+        .absolute()
+        .inset_0()
+        .child(
+            div()
+                .id("settings-material-scrim")
+                .absolute()
+                .inset_0()
+                .on_click(on_dismiss),
+        )
+        .child(menu)
 }
 
 /// 自绘开关：42×24 轨道 + 18 圆点，开 = 品牌蓝、点靠右；关 = 灰底、点靠左。

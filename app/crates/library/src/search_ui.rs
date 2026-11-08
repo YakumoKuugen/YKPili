@@ -171,26 +171,42 @@ pub fn search_bar<V: SearchHost + 'static>(
     // 是否画聚焦环。收回动画里由浮层另画一枚随进度渐隐的环，
     // 这里先关掉，避免结束时「啪」一下消失。
     show_ring: bool,
+    material: SurfaceMaterial,
 ) -> AnyElement {
     let s = &t.surfaces;
     let p = &t.palette;
+    let glass = material.is_glass();
+    let panel = GlassSurface::new(t, s.surface_elevated_solid, 0.05, 0.78, 0.90);
     let Some(input) = state.input.as_ref() else {
         return div()
             .w_full()
             .max_w(px(SEARCH_BAR_WIDTH))
             .h_full()
             .rounded_full()
-            .bg(s.surface_elevated_solid)
+            .bg(if glass {
+                panel.fill
+            } else {
+                s.surface_elevated_solid.into()
+            })
             .border_1()
-            .border_color(s.border_popover)
+            .border_color(if glass {
+                panel.border
+            } else {
+                s.border_popover
+            })
             .into_any_element();
     };
     let handle = input.read(cx).focus_handle(cx);
     let focused = handle.is_focused(window) || state.open;
     let ringed = focused && show_ring;
 
-    let mut shadow = t.shadows.shadow_1.clone();
-    shadow.extend(t.shadows.edge_glow_1.clone());
+    let mut shadow = if glass {
+        panel.shadows.clone()
+    } else {
+        let mut base = t.shadows.shadow_1.clone();
+        base.extend(t.shadows.edge_glow_1.clone());
+        base
+    };
     if ringed {
         // 聚焦态：参考稿的「亮蓝色粗环 + 外圈柔光」。
         // 边框只有 1px，靠两段 BoxShadow 把环撑到约 2.5px：
@@ -216,12 +232,18 @@ pub fn search_bar<V: SearchHost + 'static>(
         // 搜索框是顶栏唯一的大件：用语义上的「抬升实心面」，比工具栏底色亮一档。
         // 不借用 hover 色 —— 亮色主题下 hover 是 #D9D9D9，会让输入框发灰。
         // 聚焦时不再换底色（换色会让整块「跳」一下），只加主题色粗环 + 外圈柔光。
-        .bg(s.surface_elevated_solid)
+        .bg(if glass {
+            panel.fill
+        } else {
+            s.surface_elevated_solid.into()
+        })
         .border_1()
         // 未聚焦时保留一圈很浅的高光边（不能像白色贴片，但要在深色工具栏上
         // 看得出这是可输入的控件）；聚焦时交给主题色粗环去抢注意力。
         .border_color(if ringed {
             p.theme_primary
+        } else if glass {
+            panel.border
         } else {
             s.border_popover
         })
@@ -416,6 +438,7 @@ pub fn search_pill<V: SearchHost + 'static>(
     state: &SearchState,
     _window: &Window,
     cx: &mut Context<V>,
+    material: SurfaceMaterial,
 ) -> AnyElement {
     let s = &t.surfaces;
     let draft = state.draft.trim().to_string();
@@ -425,10 +448,17 @@ pub fn search_pill<V: SearchHost + 'static>(
     } else {
         draft
     };
-    let hover_border = s.border_strong;
+    let glass = material.is_glass();
+    let panel = GlassSurface::new(t, s.surface_elevated_solid, 0.05, 0.78, 0.90);
+    let hover_border = if glass { panel.border } else { s.border_strong };
     // 和展开态未聚焦时同一套底影：收起动画最后一帧与胶囊重合，不留接缝。
-    let mut shadow = t.shadows.shadow_1.clone();
-    shadow.extend(t.shadows.edge_glow_1.clone());
+    let mut shadow = if glass {
+        panel.shadows.clone()
+    } else {
+        let mut base = t.shadows.shadow_1.clone();
+        base.extend(t.shadows.edge_glow_1.clone());
+        base
+    };
     div()
         .id("topbar-search-pill")
         .w(px(TOP_BAR_SEARCH_COLLAPSED_WIDTH))
@@ -441,9 +471,17 @@ pub fn search_pill<V: SearchHost + 'static>(
         .rounded_full()
         // 与展开态搜索框同一套材质 / 内边距 / 图标位置：
         // 展开动画从胶囊矩形长到 600×46 时，内容不会“跳”一下。
-        .bg(s.surface_elevated_solid)
+        .bg(if glass {
+            panel.fill
+        } else {
+            s.surface_elevated_solid.into()
+        })
         .border_1()
-        .border_color(s.border_popover)
+        .border_color(if glass {
+            panel.border
+        } else {
+            s.border_popover
+        })
         .shadow(shadow)
         .cursor_pointer()
         .occlude()
@@ -1035,6 +1073,9 @@ pub fn page<V: SearchHost + 'static>(
     hovered: Option<usize>,
     leaving: Option<usize>,
     hover_generation: u64,
+    material: SurfaceMaterial,
+    // 结果内容区的可用宽度（面板里是面板内宽，页面上是内容区宽）。
+    available_width: f32,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
     window: &Window,
@@ -1090,6 +1131,8 @@ pub fn page<V: SearchHost + 'static>(
                         hovered,
                         leaving,
                         hover_generation,
+                        material,
+                        available_width,
                         layout_bounds,
                         active_images.clone(),
                         window,
@@ -1105,6 +1148,8 @@ pub fn page<V: SearchHost + 'static>(
                     hovered,
                     leaving,
                     hover_generation,
+                    material,
+                    available_width,
                     layout_bounds,
                     active_images.clone(),
                     window,
@@ -1401,12 +1446,16 @@ pub fn video_grid<V: SearchHost + 'static>(
     hovered: Option<usize>,
     leaving: Option<usize>,
     hover_generation: u64,
+    material: SurfaceMaterial,
+    available_width: f32,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
     window: &Window,
     cx: &mut Context<V>,
 ) -> AnyElement {
     let _ = window;
+    // 与首页同一套均分规则：整行铺满，不在右侧留空带。
+    let (_, card_w) = crate::home::card_metrics(available_width);
     let mut grid = div().flex().flex_wrap().gap(px(SPACE_4)).w_full();
     for (index, video) in videos.iter().enumerate() {
         let item = video.to_cover_item(index);
@@ -1415,11 +1464,12 @@ pub fn video_grid<V: SearchHost + 'static>(
         }
         grid = grid.child(card(
             t,
-            COVER_CELL_WIDTH,
+            card_w,
             &item,
             hovered == Some(index),
             leaving == Some(index),
             hover_generation,
+            material,
             layout_bounds.clone(),
             true,
             active_images.clone(),
@@ -1796,11 +1846,13 @@ pub fn user_card<V: SearchHost + 'static>(
     let follow_busy = state.follow_busy.contains(&user.mid);
 
     let avatar = {
-        if !user.avatar_url.is_empty() {
-            active_images.borrow_mut().mark(&user.avatar_url);
+        // 56pt 头像用缩略图；mark 与渲染必须是同一个 URL，否则每帧都会被回收重载。
+        let avatar_url = yk_domain::models::face_thumb_url(&user.avatar_url);
+        if !avatar_url.is_empty() {
+            active_images.borrow_mut().mark(&avatar_url);
         }
         yk_components::avatar::Avatar::new(56.0)
-            .url(user.avatar_url.clone())
+            .url(avatar_url)
             .initial(user.name.chars().next().map(|c| c.to_string()).unwrap_or_default())
             .background(p.theme_primary_20.into())
             .text_color(p.theme_primary)

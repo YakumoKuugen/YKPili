@@ -8932,6 +8932,7 @@ dependencies = [
  "serde",
  "serde_json",
  "yk-domain",
+ "yk-theme",
 ]
 
 [[package]]
@@ -8977,6 +8978,7 @@ name = "yk-theme"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "serde",
 ]
 
 [[package]]
