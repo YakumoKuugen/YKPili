@@ -365,6 +365,11 @@ pub struct PlayerView {
     loop_started: bool,
     /// 面板是否展开（hover 唤起）。
     expanded: bool,
+    /// 截图 / 测试：即使窗口未激活也保持控制栏可见。
+    ///
+    /// 正常运行时窗口失焦会主动收起控制栏；headless 截图的窗口永远拿不到
+    /// 系统焦点，没有这个开关就拍不到控制栏和它上面的画质 / 倍速菜单。
+    force_controls_visible: bool,
     /// 当前 Tab：0 评论 / 1 弹幕 / 2 选集。
     tab: usize,
     /// 控制栏显隐、音量、错误统一收在视图模型里，视图与控制器共读这一份。
@@ -377,6 +382,19 @@ pub struct PlayerView {
     volume_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// 音量弹出条的 bounds：点它外部才收起。
     volume_popover_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// 画质菜单是否展开。
+    quality_popover_open: bool,
+    /// 倍速菜单是否展开。
+    speed_popover_open: bool,
+    /// 正在按新清晰度换流；期间菜单置灰，避免连续点不同档位。
+    quality_switching: bool,
+    /// 换流代际：换视频 / 连续换档时只接受最后一次结果。
+    quality_generation: u64,
+    /// 画质 / 倍速胶囊的 bounds：点胶囊本身属于「切换菜单」，不能被外部点击关掉。
+    quality_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    speed_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// 当前展开的画质 / 倍速菜单 bounds（两个菜单同时只会开一个）。
+    control_popover_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// 弹幕：屏幕上已排好位置的滚动 / 顶部 / 底部弹幕。
     danmaku: Vec<PlacedDanmaku>,
     /// 当前视频的全部弹幕（按时间排序），信息面板「弹幕」Tab 用它。
@@ -654,6 +672,7 @@ impl PlayerView {
             loop_started: false,
             // 沉浸优先：播放浮窗默认收起信息面板（鼠标进入右侧 200 面板时展开）。
             expanded: false,
+            force_controls_visible: false,
             tab: 0,
             danmaku: Vec::new(),
             danmaku_all: Vec::new(),
@@ -745,6 +764,13 @@ impl PlayerView {
             volume_panel,
             volume_button_bounds: Rc::new(Cell::new(None)),
             volume_popover_bounds,
+            quality_popover_open: false,
+            speed_popover_open: false,
+            quality_switching: false,
+            quality_generation: 0,
+            quality_button_bounds: Rc::new(Cell::new(None)),
+            speed_button_bounds: Rc::new(Cell::new(None)),
+            control_popover_bounds: Rc::new(Cell::new(None)),
         }
     }
 }

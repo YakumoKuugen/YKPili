@@ -128,7 +128,10 @@ impl Render for PlayerView {
                     }));
             });
         }
-        if !window.is_window_active() && self.model.controls_visible {
+        if !window.is_window_active()
+            && self.model.controls_visible
+            && !self.force_controls_visible
+        {
             self.model.controls_visible = false;
             self.model.controls_timer_generation = self.model.controls_timer_generation.wrapping_add(1);
             self.model.controls_timer_running = false;
@@ -160,16 +163,19 @@ impl Render for PlayerView {
                     &self.model.state,
                     self.danmaku_input.as_ref(),
                     self.danmaku_sending,
-                    self.source
-                        .as_ref()
-                        .map(|source| source.quality.as_str())
-                        .unwrap_or(""),
+                    self.source.as_ref(),
+                    self.quality_switching,
+                    self.quality_popover_open,
+                    self.speed_popover_open,
                     video_left,
                     video_width,
                     &self.progress_track_bounds,
                     self.volume_popover_open,
                     &self.volume_panel,
                     &self.volume_button_bounds,
+                    &self.quality_button_bounds,
+                    &self.speed_button_bounds,
+                    &self.control_popover_bounds,
                     cx,
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_play(window, cx);

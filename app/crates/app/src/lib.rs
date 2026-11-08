@@ -1515,6 +1515,8 @@ impl AppRoot {
     /// 退出账号：清 session.json / 内存会话，回到匿名推荐并打开登录卡片。
     fn logout(&mut self, cx: &mut Context<Self>) {
         self.session = None;
+        // 会员状态跟着会话走：清掉缓存，否则退出后画质菜单还按大会员列档。
+        yk_infra::api::client::clear_membership();
         self.account = None;
         self.settings = None;
         self.playing = None;

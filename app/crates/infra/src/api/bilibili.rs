@@ -88,10 +88,11 @@ pub fn video_tags(bvid: &str, cookie: &str) -> Request {
 
 /// 播放地址（需要 WBI 签名）。
 ///
-/// `qn=127` 请求最高画质；`fnval=4048` 打开 DASH（含 4K/HDR/杜比等位域）。
+/// `qn` 指定画质 id（127 = 最高档）；`fnval=4048` 打开 DASH（含 4K/HDR/杜比等位域）。
 pub fn play_url(
     bvid: &str,
     cid: i64,
+    qn: i32,
     img_key: &str,
     sub_key: &str,
     cookie: &str,
@@ -100,7 +101,7 @@ pub fn play_url(
     let params = vec![
         ("bvid".to_string(), bvid.to_string()),
         ("cid".to_string(), cid.to_string()),
-        ("qn".to_string(), "127".to_string()),
+        ("qn".to_string(), qn.to_string()),
         ("fnval".to_string(), "4048".to_string()),
         ("fnver".to_string(), "0".to_string()),
     ];
@@ -122,10 +123,11 @@ pub fn play_url(
 /// **风控兜底**：同一账号、同一视频，WBI 端点可能返回
 /// `code=0 + data.v_voucher` 的空响应，而旧端点仍能正常返回 DASH。
 /// 实测 rustls 客户端在 WBI 端点稳定拿到 voucher、旧端点稳定成功。
-/// 画质用 1080P + DASH（qn=80 / fnval=4048），覆盖绝大多数视频。
-pub fn play_url_legacy(bvid: &str, cid: i64, cookie: &str) -> Request {
+pub fn play_url_legacy(bvid: &str, cid: i64, qn: i32, cookie: &str) -> Request {
     Request {
-        url: format!("{API_BASE}/x/player/playurl?bvid={bvid}&cid={cid}&qn=80&fnval=4048&fnver=0"),
+        url: format!(
+            "{API_BASE}/x/player/playurl?bvid={bvid}&cid={cid}&qn={qn}&fnval=4048&fnver=0"
+        ),
         cookie: cookie.to_string(),
         name: "play_url_legacy",
     }
@@ -644,13 +646,13 @@ mod tests {
     fn video_endpoints_carry_bvid() {
         let v = video_info("BV1xx411c7mD", IMG, SUB, "", WTS);
         assert!(v.url.contains("bvid=BV1xx411c7mD"));
-        let p = play_url("BV1xx411c7mD", 12345, IMG, SUB, "", WTS);
+        let p = play_url("BV1xx411c7mD", 12345, 127, IMG, SUB, "", WTS);
         assert!(p.url.contains("cid=12345"));
         assert!(p.url.contains("fnval=4048"));
         assert!(p.url.contains("qn=127"));
 
         // 风控兜底：不带 w_rid 的旧端点，参数与主请求不同。
-        let f = play_url_legacy("BV1xx411c7mD", 12345, "");
+        let f = play_url_legacy("BV1xx411c7mD", 12345, 80, "");
         assert!(!f.url.contains("w_rid"));
         assert!(f.url.contains("/x/player/playurl?"));
         assert!(f.url.contains("fnval=4048"));

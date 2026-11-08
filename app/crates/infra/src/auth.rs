@@ -430,6 +430,8 @@ pub fn finish_session(cookie: &str) -> Result<UserSession, String> {
     let parsed: UserInfoResponse =
         serde_json::from_str(&body).map_err(|e| format!("nav 解析失败：{e}"))?;
     let data = parsed.data.unwrap_or_default();
+    // 登录成功立刻刷新会员状态：画质菜单下一次打开就按大会员档位展示。
+    crate::api::client::note_membership(data.vip.as_ref().is_some_and(|vip| vip.is_active()));
     let session = UserSession {
         is_logged_in: true,
         sess_data: cookie_value(cookie, "SESSDATA").unwrap_or_default(),
@@ -640,6 +642,7 @@ pub fn fetch_account(cookie: &str) -> Result<AccountInfo, String> {
     if !data.is_login {
         return Err("登录态已失效".into());
     }
+    crate::api::client::note_membership(data.vip.as_ref().is_some_and(|vip| vip.is_active()));
     let mut info = AccountInfo {
         mid: data.mid,
         name: data.uname,

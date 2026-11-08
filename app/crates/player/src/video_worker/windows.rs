@@ -39,6 +39,8 @@ enum WorkerCommand {
     /// 音量（0.0..=1.0）与静音；解码线程负责下发到 mpv。
     Volume(f64),
     Muted(bool),
+    /// 播放倍速（0.1x–10x）。
+    Speed(f64),
     /// 窗口不可见（最小化 / 被完全遮挡）时停帧：mpv 继续播放音频，
     /// 只是不再「渲染 → BGRA 拷贝 → 新建贴图」每一帧，改为只报播放位置。
     RenderPaused(bool),
@@ -139,6 +141,11 @@ impl FrameWorker {
                             WorkerCommand::Muted(muted) => {
                                 if let Err(e) = player.set_muted(muted) {
                                     eprintln!("[video] 设置静音={muted} 失败：{e}");
+                                }
+                            }
+                            WorkerCommand::Speed(rate) => {
+                                if let Err(e) = player.set_speed(rate) {
+                                    eprintln!("[video] 设置倍速 {rate:.2}x 失败：{e}");
                                 }
                             }
                             WorkerCommand::RenderPaused(paused) => {
@@ -251,6 +258,11 @@ impl FrameWorker {
     /// 静音开关，解码线程下发到 mpv。
     pub fn set_muted(&self, muted: bool) {
         let _ = self.commands.send(WorkerCommand::Muted(muted));
+    }
+
+    /// 播放倍速（0.1x–10x），解码线程下发到 mpv 的 `speed` 属性。
+    pub fn set_rate(&self, rate: f64) {
+        let _ = self.commands.send(WorkerCommand::Speed(rate));
     }
 
     /// 窗口不可见（最小化 / 被完全遮挡）时暂停出帧；audio 不受影响。

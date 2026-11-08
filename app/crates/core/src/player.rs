@@ -12,8 +12,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::format;
 
-/// 可选倍速档位，由快到慢。与 B 站播放器一致。
-pub const RATE_OPTIONS: [f64; 6] = [2.0, 1.5, 1.25, 1.0, 0.75, 0.5];
+/// 可选倍速档位（菜单预设，由慢到快）。
+///
+/// 需求把倍速范围放宽到 **0.1x–10x**，这里只列常用档位；
+/// 用户仍可通过菜单里的 ±0.1 步进停在任何 0.1 的倍数上。
+pub const RATE_OPTIONS: [f64; 12] = [
+    0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 5.0, 8.0, 10.0,
+];
+
+/// 倍速下限。
+pub const RATE_MIN: f64 = 0.1;
+/// 倍速上限。
+pub const RATE_MAX: f64 = 10.0;
+/// 微调步进（菜单 ± 按钮 / 方向键）。
+pub const RATE_STEP: f64 = 0.1;
 
 /// 默认倍速。
 pub const DEFAULT_RATE: f64 = 1.0;
@@ -30,7 +42,7 @@ pub struct PlayerState {
     pub playing: bool,
     pub volume: f64,
     pub muted: bool,
-    /// 倍速。恒在 `RATE_OPTIONS` 内，除非从偏好文件读到异常值。
+    /// 倍速。恒在 `RATE_MIN..=RATE_MAX`（0.1x–10x）内。
     pub rate: f64,
     pub fullscreen: bool,
     /// 已播放秒数。
@@ -133,19 +145,27 @@ impl PlayerState {
         };
     }
 
-    /// 直接设置档位；不在 `RATE_OPTIONS` 内的值会被夹到最近的档位。
+    /// 直接设置倍速。
+    ///
+    /// 只做区间夹紧（0.1x–10x），不再吸附到固定档位 —— 新需求允许 0.1 的
+    /// 任意倍数（0.1 / 0.2 / … / 9.9 / 10），吸附会把 0.1x 直接改成 0.5x。
     pub fn set_rate(&mut self, rate: f64) {
-        let nearest = RATE_OPTIONS
-            .iter()
-            .copied()
-            .min_by(|a, b| {
-                (a - rate)
-                    .abs()
-                    .partial_cmp(&(b - rate).abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or(DEFAULT_RATE);
-        self.rate = nearest;
+        if !rate.is_finite() {
+            self.rate = DEFAULT_RATE;
+            return;
+        }
+        // 保留两位小数：避免 0.1 + 0.1 + 0.1 = 0.30000000000000004 这类浮点尾巴。
+        self.rate = (rate.clamp(RATE_MIN, RATE_MAX) * 100.0).round() / 100.0;
+    }
+
+    /// 在当前倍速上加减 `delta`，结果同样夹在 0.1x–10x。
+    pub fn adjust_rate(&mut self, delta: f64) {
+        self.set_rate(self.rate + delta);
+    }
+
+    /// 倍速是否处于默认值。
+    pub fn is_normal_rate(&self) -> bool {
+        (self.rate - DEFAULT_RATE).abs() < 1e-9
     }
 
     pub fn rate_text(&self) -> String {
@@ -224,8 +244,8 @@ impl PlayerPrefs {
         Self { volume: s.volume, muted: s.muted, rate: s.rate }
     }
 
-    /// 应用到状态。数值会被夹紧，倍速会被对齐到最近档位 ——
-    /// 防止手改配置文件写进 `8.0` 这种值。
+    /// 应用到状态。数值会被夹紧，倍速夹到 0.1x–10x ——
+    /// 防止手改配置文件写进 `0.01` / `99` 这种值。
     pub fn apply_to(&self, s: &mut PlayerState) {
         s.volume = self.volume.clamp(0.0, 1.0);
         s.muted = self.muted;
@@ -334,12 +354,13 @@ mod tests {
     fn rate_cycles_through_options() {
         let mut s = PlayerState::new();
         assert_eq!(s.rate, 1.0);
-        s.cycle_rate(); // 1.0 -> 0.75
-        assert_eq!(s.rate, 0.75);
-        s.cycle_rate(); // 0.75 -> 0.5
-        assert_eq!(s.rate, 0.5);
-        s.cycle_rate(); // 0.5 -> 2.0（回绕）
-        assert_eq!(s.rate, 2.0);
+        s.cycle_rate(); // 1.0 -> 1.25
+        assert_eq!(s.rate, 1.25);
+        s.cycle_rate(); // 1.25 -> 1.5
+        assert_eq!(s.rate, 1.5);
+        s.rate = 10.0;
+        s.cycle_rate(); // 10.0 -> 0.1（回绕）
+        assert_eq!(s.rate, 0.1);
     }
 
     #[test]
@@ -351,12 +372,33 @@ mod tests {
     }
 
     #[test]
-    fn set_rate_snaps_to_nearest() {
+    fn set_rate_clamps_to_supported_range() {
         let mut s = PlayerState::new();
         s.set_rate(1.4);
-        assert_eq!(s.rate, 1.5);
-        s.set_rate(0.1);
-        assert_eq!(s.rate, 0.5);
+        assert_eq!(s.rate, 1.4, "0.1x–10x 之间应原样保留");
+        s.set_rate(0.05);
+        assert_eq!(s.rate, RATE_MIN, "低于下限夹到 0.1x");
+        s.set_rate(99.0);
+        assert_eq!(s.rate, RATE_MAX, "高于上限夹到 10x");
+        s.set_rate(f64::NAN);
+        assert_eq!(s.rate, DEFAULT_RATE, "非法值回到 1.0x");
+    }
+
+    #[test]
+    fn adjust_rate_steps_by_tenth_and_stops_at_bounds() {
+        let mut s = PlayerState::new();
+        s.adjust_rate(0.2);
+        assert_eq!(s.rate, 1.2);
+        s.adjust_rate(-0.1);
+        assert!((s.rate - 1.1).abs() < 1e-9, "0.1 步进不能留下浮点尾巴");
+        for _ in 0..200 {
+            s.adjust_rate(-RATE_STEP);
+        }
+        assert_eq!(s.rate, RATE_MIN);
+        for _ in 0..200 {
+            s.adjust_rate(RATE_STEP);
+        }
+        assert_eq!(s.rate, RATE_MAX);
     }
 
     #[test]
@@ -415,10 +457,10 @@ mod tests {
         assert_eq!(s2.rate, 2.0);
 
         // 手改配置成越界值也不能把状态弄坏
-        let bad = PlayerPrefs { volume: 9.0, muted: false, rate: 8.0 };
+        let bad = PlayerPrefs { volume: 9.0, muted: false, rate: 99.0 };
         bad.apply_to(&mut s2);
         assert_eq!(s2.volume, 1.0);
-        assert_eq!(s2.rate, 2.0, "8.0 应对齐到最近的档位");
+        assert_eq!(s2.rate, RATE_MAX, "99 应被夹到 10x");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

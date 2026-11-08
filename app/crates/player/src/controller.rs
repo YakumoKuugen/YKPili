@@ -100,6 +100,12 @@ impl PlayerView {
         self.coin_also_like = false;
         self.fav_panel_open = false;
         self.share_panel_open = false;
+        // 画质 / 倍速菜单跟着换源收起；未完成的换流结果直接作废。
+        self.quality_popover_open = false;
+        self.speed_popover_open = false;
+        self.quality_switching = false;
+        self.quality_generation = self.quality_generation.wrapping_add(1);
+        self.control_popover_bounds.set(None);
         // 换源时把可能还在播的退场动画也断掉，别让上一支视频的卡飘在新视频上。
         self.overlay_closing_kind = None;
         self.overlay_generation = self.overlay_generation.wrapping_add(1);
@@ -839,6 +845,11 @@ impl PlayerView {
     /// Esc 和「面板收起」都走这里：弹层是浮在内容上的一次性操作，
     /// 关掉它不应该带动其它状态（不退出播放器、不重置互动）。
     pub(crate) fn close_action_overlays(&mut self, cx: &mut Context<Self>) -> bool {
+        // 画质 / 倍速是控制栏里的轻量菜单：Esc 先关它，不进入「再按一次退出播放器」。
+        if self.quality_popover_open || self.speed_popover_open {
+            self.close_control_popovers(cx);
+            return true;
+        }
         let kind = if self.fav_panel_open {
             ActionOverlay::Fav
         } else if self.coin_panel_open {
@@ -1467,6 +1478,24 @@ impl PlayerView {
                                 view.close_volume_popover(cx);
                             }
                         }
+                        // 画质 / 倍速菜单同理：点菜单外收起；点胶囊本身留给 on_click 切换。
+                        if view.quality_popover_open || view.speed_popover_open {
+                            let inside_popover = view
+                                .control_popover_bounds
+                                .get()
+                                .is_some_and(|bounds| bounds.contains(&event.position));
+                            let on_quality_button = view
+                                .quality_button_bounds
+                                .get()
+                                .is_some_and(|bounds| bounds.contains(&event.position));
+                            let on_speed_button = view
+                                .speed_button_bounds
+                                .get()
+                                .is_some_and(|bounds| bounds.contains(&event.position));
+                            if !inside_popover && !on_quality_button && !on_speed_button {
+                                view.close_control_popovers(cx);
+                            }
+                        }
                         // 展开的面板盖在控制条右侧之上，点面板不能误触进度条。
                         let panel_covers =
                             view.expanded && view.pointer_in_panel_zone(event.position, window);
@@ -1564,8 +1593,13 @@ impl PlayerView {
                     if !view.model.controls_visible {
                         return false;
                     }
-                    // 正在输入弹幕 / 拖动进度条 / 调音量时不自动隐藏。
-                    if view.input_focused || view.scrubbing || view.volume_popover_open {
+                    // 正在输入弹幕 / 拖动进度条 / 调音量 / 开着画质或倍速菜单时不自动隐藏。
+                    if view.input_focused
+                        || view.scrubbing
+                        || view.volume_popover_open
+                        || view.quality_popover_open
+                        || view.speed_popover_open
+                    {
                         view.last_activity = std::time::Instant::now();
                         return true;
                     }
@@ -1598,6 +1632,10 @@ impl PlayerView {
             self.volume_popover_open = false;
             self.volume_popover_bounds.set(None);
         }
+        // 画质 / 倍速菜单同样挂在控制条里。
+        self.quality_popover_open = false;
+        self.speed_popover_open = false;
+        self.control_popover_bounds.set(None);
         // 正在输入弹幕时不能把输入框从树里拿掉，等失焦后再走自动隐藏。
         if self.input_focused {
             return;
@@ -1817,6 +1855,39 @@ impl PlayerView {
     /// 测试 / 截图入口：把侧栏切到展开态（400 宽）。
     pub fn with_expanded(mut self, expanded: bool) -> Self {
         self.expanded = expanded;
+        self
+    }
+
+    /// 测试 / 截图入口：预先展开倍速菜单。
+    pub fn with_speed_menu(mut self) -> Self {
+        self.force_controls_visible = true;
+        self.speed_popover_open = true;
+        self
+    }
+
+    /// 测试 / 截图入口：塞一份「大会员 + 非大会员」画质清单并展开菜单。
+    pub fn with_quality_menu(mut self) -> Self {
+        use yk_domain::playback::{PlaybackQuality, PlaybackSource};
+        self.force_controls_visible = true;
+        self.source = Some(PlaybackSource {
+            title: "测试视频".into(),
+            quality: "1080P 高清".into(),
+            quality_id: 80,
+            duration_secs: 754,
+            qualities: vec![
+                PlaybackQuality { id: 127, label: "8K 超高清".into(), vip_only: true },
+                PlaybackQuality { id: 120, label: "4K 超清".into(), vip_only: true },
+                PlaybackQuality { id: 116, label: "1080P 60帧".into(), vip_only: true },
+                PlaybackQuality { id: 80, label: "1080P 高清".into(), vip_only: false },
+                PlaybackQuality { id: 64, label: "720P 高清".into(), vip_only: false },
+                PlaybackQuality { id: 32, label: "480P 清晰".into(), vip_only: false },
+                PlaybackQuality { id: 16, label: "360P 流畅".into(), vip_only: false },
+            ],
+            ..Default::default()
+        });
+        // 截图不启动解码线程：空 URL 交给 mpv 只会刷错误日志。
+        self.tried_worker = true;
+        self.quality_popover_open = true;
         self
     }
 
@@ -2779,6 +2850,176 @@ impl PlayerView {
         self.sync_audio_to_worker();
         cx.notify();
         self.model.state.muted
+    }
+
+    // ================= 画质 / 倍速菜单 =================
+
+    /// 画质胶囊：展开 / 收起画质菜单（两个菜单互斥）。
+    pub(crate) fn toggle_quality_popover(&mut self, cx: &mut Context<Self>) {
+        if self.source.is_none() {
+            return;
+        }
+        let open = !self.quality_popover_open;
+        self.quality_popover_open = open && !self.quality_switching;
+        self.speed_popover_open = false;
+        if !self.quality_popover_open {
+            self.control_popover_bounds.set(None);
+        }
+        cx.notify();
+    }
+
+    /// 倍速胶囊：展开 / 收起倍速菜单（两个菜单互斥）。
+    pub(crate) fn toggle_speed_popover(&mut self, cx: &mut Context<Self>) {
+        let open = !self.speed_popover_open;
+        self.speed_popover_open = open;
+        self.quality_popover_open = false;
+        if !self.speed_popover_open {
+            self.control_popover_bounds.set(None);
+        }
+        cx.notify();
+    }
+
+    /// 收起画质 / 倍速菜单（点外部、Esc、控制栏隐藏时用）。
+    pub(crate) fn close_control_popovers(&mut self, cx: &mut Context<Self>) {
+        if !self.quality_popover_open && !self.speed_popover_open {
+            return;
+        }
+        self.quality_popover_open = false;
+        self.speed_popover_open = false;
+        self.control_popover_bounds.set(None);
+        cx.notify();
+    }
+
+    /// 设置播放倍速（0.1x–10x），同步到 mpv 并重绘胶囊文案。
+    pub(crate) fn set_rate(
+        &mut self,
+        rate: f64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.state.set_rate(rate);
+        self.sync_rate_to_worker();
+        self.note_activity(window, cx);
+        cx.notify();
+    }
+
+    /// 倍速微调 ±0.1（菜单里的 − / ＋ 按钮）。
+    pub(crate) fn adjust_rate(
+        &mut self,
+        delta: f64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_rate(self.model.state.rate + delta, window, cx);
+    }
+
+    /// 点选某档清晰度：按 qn 重新取流，原位换片并保留播放进度。
+    pub(crate) fn select_quality(&mut self, qn: i32, cx: &mut Context<Self>) {
+        if self.quality_switching {
+            return;
+        }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        // 点的就是当前档：只收菜单，不发请求。
+        if source.quality_id == qn {
+            self.close_control_popovers(cx);
+            return;
+        }
+        let Some(label) = source
+            .qualities
+            .iter()
+            .find(|quality| quality.id == qn)
+            .map(|quality| quality.label.clone())
+        else {
+            return;
+        };
+        let position = self.play_time.max(self.model.state.position_secs).max(0.0);
+        let load_generation = self.load_generation;
+        self.quality_generation = self.quality_generation.wrapping_add(1);
+        let generation = self.quality_generation;
+        self.quality_switching = true;
+        self.quality_popover_open = false;
+        self.control_popover_bounds.set(None);
+        eprintln!("[quality] 切换到 {label}（qn={qn}），保留进度 {position:.1}s");
+        cx.notify();
+
+        let bvid = source.bvid.clone();
+        let cid = source.cid;
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let cookie = current_session_cookie();
+                    let client = yk_infra::api::client::ReqwestClient::new()
+                        .map_err(|error| error.to_string())?;
+                    yk_infra::api::client::fetch_stream_at(&client, &bvid, cid, qn, &cookie)
+                })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                // 换过视频 / 又点了别的档：旧结果直接丢。
+                if view.load_generation != load_generation
+                    || view.quality_generation != generation
+                {
+                    return;
+                }
+                view.quality_switching = false;
+                match result {
+                    Ok(stream) => {
+                        // 先停旧 worker，下一次 render 用新源在原位置重建。
+                        #[cfg(any(target_os = "macos", target_os = "windows"))]
+                        {
+                            view.worker = None;
+                            view.current = None;
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            view.needs_image_clear = true;
+                        }
+                        view.tried_worker = false;
+                        view.start_position = position;
+                        view.play_time = position;
+                        view.model.state.position_secs = position;
+                        view.seek_settle_until = None;
+                        let mut switched = label;
+                        if let Some(source) = view.source.as_mut() {
+                            source.video_url = stream.video_url;
+                            source.audio_url = stream.audio_url;
+                            source.video_width = stream.width;
+                            source.video_height = stream.height;
+                            source.quality_id = stream.quality_id;
+                            if !stream.quality_label.is_empty() {
+                                source.quality = stream.quality_label.clone();
+                            }
+                            switched = source.quality.clone();
+                        }
+                        view.show_interaction_note(
+                            format!("已切换到 {switched}"),
+                            false,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        eprintln!("[quality] 切换失败：{error}");
+                        view.show_interaction_note(
+                            format!("切换清晰度失败：{error}"),
+                            true,
+                            cx,
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 把视图模型里的倍速下发给解码线程。没有 worker 时是空操作。
+    fn sync_rate_to_worker(&self) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(worker) = self.worker.as_ref() {
+            worker.set_rate(self.model.state.rate);
+        }
     }
 
     /// 把视图模型里的音量 / 静音状态下发给解码线程。没有 worker 时是空操作。

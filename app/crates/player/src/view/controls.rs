@@ -12,13 +12,19 @@ pub(crate) fn control_bar(
     state: &PlayerState,
     danmaku_input: Option<&Entity<InputState>>,
     danmaku_sending: bool,
-    quality: &str,
+    source: Option<&yk_domain::playback::PlaybackSource>,
+    quality_switching: bool,
+    quality_popover_open: bool,
+    speed_popover_open: bool,
     video_left: f32,
     video_width: f32,
     progress_track_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
     volume_popover_open: bool,
     volume_panel: &Entity<VolumePanelView>,
     volume_button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    quality_button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    speed_button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    control_popover_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
     cx: &mut Context<PlayerView>,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -33,10 +39,14 @@ pub(crate) fn control_bar(
     } else {
         IconName::Volume2
     };
-    let quality_text = if quality.is_empty() {
-        "画质".to_string()
+    let quality_text = if quality_switching {
+        "切换中…".to_string()
     } else {
-        quality.to_string()
+        source
+            .map(|source| source.quality.trim())
+            .filter(|quality| !quality.is_empty())
+            .map(|quality| quality.to_string())
+            .unwrap_or_else(|| "画质".to_string())
     };
 
     div()
@@ -242,8 +252,25 @@ pub(crate) fn control_bar(
                             .inset_0(),
                         )
                 })
-                .child(ctrl_pill(quality_text))
-                .child(ctrl_pill(rate_text))
+                .child(quality_control(
+                    t,
+                    source,
+                    quality_text,
+                    quality_switching,
+                    quality_popover_open,
+                    quality_button_bounds,
+                    control_popover_bounds,
+                    cx,
+                ))
+                .child(speed_control(
+                    t,
+                    state.rate,
+                    rate_text,
+                    speed_popover_open,
+                    speed_button_bounds,
+                    control_popover_bounds,
+                    cx,
+                ))
                 .child(volume_control(
                     volume_panel,
                     volume_icon,
@@ -269,21 +296,349 @@ pub(crate) fn trim_rate(rate: f64) -> String {
     }
 }
 
-/// 控制栏右侧胶囊（画质 / 倍速）。
-pub(crate) fn ctrl_pill(label: String) -> impl IntoElement {
-    div()
+/// 控制栏右侧胶囊（画质 / 倍速）的外壳：点击展开菜单，菜单向上浮出。
+///
+/// 胶囊本身要留在 `relative` 容器里：GPUI 没有 z-index，菜单作为胶囊的
+/// 兄弟节点挂在后面，才能压在控制栏之上。
+fn ctrl_pill_shell(
+    id: &'static str,
+    label: String,
+    open: bool,
+    opacity: f32,
+    button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    popover: Option<AnyElement>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let bounds = button_bounds.clone();
+    let mut root = div()
+        .relative()
         .flex_shrink_0()
-        .h(px(28.))
-        .px(px(SPACE_2))
+        .opacity(opacity)
+        .child(
+            div()
+                .id(id)
+                .h(px(28.))
+                .px(px(SPACE_2))
+                .flex()
+                .items_center()
+                .rounded(px(RADIUS_HALF))
+                .bg(if open {
+                    rgba(0xFFFFFF38)
+                } else {
+                    rgba(0xFFFFFF1F)
+                })
+                .cursor_pointer()
+                .hover(|style| style.bg(rgba(0xFFFFFF33)))
+                .on_click(on_click)
+                // bounds 探针放最前：点胶囊本身属于「切换菜单」，不能被外部点击逻辑关掉。
+                .child(
+                    canvas(
+                        move |probe, _, _| bounds.set(Some(probe)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_CAPTION))
+                        .text_color(hsla(0.0, 0.0, 1.0, 0.90))
+                        .child(label),
+                ),
+        );
+    if let Some(popover) = popover {
+        root = root.child(popover);
+    }
+    root.into_any_element()
+}
+
+/// 画质胶囊 + 清晰度菜单。
+fn quality_control(
+    t: &YkTheme,
+    source: Option<&yk_domain::playback::PlaybackSource>,
+    label: String,
+    switching: bool,
+    open: bool,
+    button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    popover_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    cx: &mut Context<PlayerView>,
+) -> AnyElement {
+    let popover = open.then(|| quality_menu(t, source, switching, popover_bounds, cx));
+    ctrl_pill_shell(
+        "player-quality-pill",
+        label,
+        open,
+        if switching { 0.6 } else { 1.0 },
+        button_bounds,
+        popover,
+        cx.listener(move |view, _: &ClickEvent, _window, cx| {
+            view.toggle_quality_popover(cx);
+        }),
+    )
+}
+
+/// 清晰度菜单：按大会员状态生成的可选档位，当前档带对勾。
+fn quality_menu(
+    t: &YkTheme,
+    source: Option<&yk_domain::playback::PlaybackSource>,
+    switching: bool,
+    popover_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    cx: &mut Context<PlayerView>,
+) -> AnyElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    let current = source.map(|source| source.quality_id).unwrap_or(0);
+    let qualities = source.map(|source| source.qualities.as_slice()).unwrap_or(&[]);
+    let bounds = popover_bounds.clone();
+
+    let mut list = div().flex().flex_col().gap(px(SPACE_0_5));
+    if qualities.is_empty() {
+        list = list.child(
+            div()
+                .px(px(SPACE_2))
+                .py(px(SPACE_2))
+                .text_size(px(FONT_SIZE_CAPTION))
+                .text_color(hsla(0.0, 0.0, 1.0, 0.55))
+                .child("正在获取清晰度…"),
+        );
+    } else {
+        for quality in qualities {
+            let id = quality.id;
+            let selected = id == current;
+            let label = quality.label.clone();
+            let vip_only = quality.vip_only;
+            list = list.child(
+                div()
+                    .id(("player-quality-option", id as u64))
+                    .h(px(32.))
+                    .px(px(SPACE_2))
+                    .flex()
+                    .items_center()
+                    .gap(px(SPACE_2))
+                    .rounded(px(RADIUS_SM))
+                    .cursor_pointer()
+                    .when(selected, |el| el.bg(rgba(0xFFFFFF1A)))
+                    .hover(|style| style.bg(rgba(0xFFFFFF1F)))
+                    .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                        view.select_quality(id, cx);
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(FONT_SIZE_CAPTION))
+                            .text_color(if selected {
+                                p.theme_primary
+                            } else {
+                                hsla(0.0, 0.0, 1.0, 0.90)
+                            })
+                            .child(label),
+                    )
+                    .when(vip_only, |el| {
+                        el.child(
+                            div()
+                                .px(px(SPACE_1))
+                                .h(px(16.))
+                                .flex()
+                                .items_center()
+                                .rounded(px(RADIUS_SM))
+                                .bg(rgba(0xF7BA2AA6))
+                                .text_size(px(FONT_SIZE_MICRO))
+                                .text_color(rgb(0x1A1206))
+                                .child("大会员"),
+                        )
+                    })
+                    .when(selected, |el| {
+                        el.child(
+                            Icon::new(IconName::Check)
+                                .size(px(14.))
+                                .text_color(p.theme_primary),
+                        )
+                    }),
+            );
+        }
+    }
+
+    div()
+        .id("player-quality-menu")
+        .absolute()
+        .right_0()
+        .bottom(px(34.))
+        .w(px(176.))
+        .p(px(SPACE_2))
+        .rounded(px(RADIUS_LG))
+        .bg(rgba(0x0B0F14F5))
+        .border_1()
+        .border_color(s.border_popover)
+        .shadow(t.shadows.shadow_glass_elevated.clone())
+        .occlude()
+        // bounds 探针放最前：菜单行画在它上面，点击优先给行。
+        .child(
+            canvas(
+                move |probe, _, _| bounds.set(Some(probe)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(
+            div()
+                .px(px(SPACE_2))
+                .pb(px(SPACE_1))
+                .text_size(px(FONT_SIZE_MICRO))
+                .text_color(hsla(0.0, 0.0, 1.0, 0.50))
+                .child(if switching { "正在切换…" } else { "清晰度" }),
+        )
+        .child(list)
+        .into_any_element()
+}
+
+/// 倍速胶囊 + 速度菜单。
+fn speed_control(
+    t: &YkTheme,
+    rate: f64,
+    label: String,
+    open: bool,
+    button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    popover_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    cx: &mut Context<PlayerView>,
+) -> AnyElement {
+    let popover = open.then(|| speed_menu(t, rate, popover_bounds, cx));
+    ctrl_pill_shell(
+        "player-speed-pill",
+        label,
+        open,
+        1.0,
+        button_bounds,
+        popover,
+        cx.listener(move |view, _: &ClickEvent, _window, cx| {
+            view.toggle_speed_popover(cx);
+        }),
+    )
+}
+
+/// 倍速菜单：预设档位 + 0.1 步进微调，范围 0.1x–10x。
+fn speed_menu(
+    t: &YkTheme,
+    rate: f64,
+    popover_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    cx: &mut Context<PlayerView>,
+) -> AnyElement {
+    let s = &t.surfaces;
+    let p = &t.palette;
+    let bounds = popover_bounds.clone();
+    let value = format!("{}x", trim_rate(rate));
+
+    let step_button = |id: &'static str, text: &'static str, delta: f64| {
+        div()
+            .id(id)
+            .w(px(30.))
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(RADIUS_SM))
+            .bg(s.fill_3)
+            .cursor_pointer()
+            .hover(|style| style.bg(rgba(0xFFFFFF2E)))
+            .text_size(px(FONT_SIZE_CONTROL))
+            .text_color(s.text_primary)
+            .child(text)
+            .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                view.adjust_rate(delta, window, cx);
+            }))
+    };
+
+    let stepper = div()
         .flex()
         .items_center()
-        .rounded(px(RADIUS_HALF))
-        .bg(rgba(0xFFFFFF1F))
-        .cursor_pointer()
-        .hover(|style| style.bg(rgba(0xFFFFFF33)))
-        .text_size(px(FONT_SIZE_CAPTION))
-        .text_color(hsla(0.0, 0.0, 1.0, 0.90))
-        .child(label)
+        .justify_between()
+        .child(step_button("player-speed-minus", "−", -yk_domain::player::RATE_STEP))
+        .child(
+            div()
+                .text_size(px(FONT_SIZE_TITLE))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.theme_primary)
+                .child(value),
+        )
+        .child(step_button("player-speed-plus", "+", yk_domain::player::RATE_STEP));
+
+    let mut presets = div().flex().flex_wrap().gap(px(6.));
+    for preset in [
+        0.1_f64, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 5.0, 8.0, 10.0,
+    ] {
+        let active = (rate - preset).abs() < 1e-9;
+        let text = format!("{}x", trim_rate(preset));
+        presets = presets.child(
+            div()
+                .id(("player-speed-preset", (preset * 100.0) as u64))
+                .w(px(46.))
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_SM))
+                .bg(if active {
+                    p.theme_primary
+                } else {
+                    hsla(0.0, 0.0, 1.0, 0.08)
+                })
+                .cursor_pointer()
+                .hover(|style| style.bg(rgba(0xFFFFFF2E)))
+                .text_size(px(FONT_SIZE_MICRO))
+                .text_color(if active {
+                    hsla(0.0, 0.0, 1.0, 1.0)
+                } else {
+                    hsla(0.0, 0.0, 1.0, 0.86)
+                })
+                .child(text)
+                .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                    view.set_rate(preset, window, cx);
+                    view.close_control_popovers(cx);
+                })),
+        );
+    }
+
+    div()
+        .id("player-speed-menu")
+        .absolute()
+        .right_0()
+        .bottom(px(34.))
+        .w(px(176.))
+        .p(px(SPACE_2))
+        .flex()
+        .flex_col()
+        .gap(px(SPACE_2))
+        .rounded(px(RADIUS_LG))
+        .bg(rgba(0x0B0F14F5))
+        .border_1()
+        .border_color(s.border_popover)
+        .shadow(t.shadows.shadow_glass_elevated.clone())
+        .occlude()
+        .child(
+            canvas(
+                move |probe, _, _| bounds.set(Some(probe)),
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(
+            div()
+                .px(px(SPACE_2))
+                .text_size(px(FONT_SIZE_MICRO))
+                .text_color(hsla(0.0, 0.0, 1.0, 0.50))
+                .child("播放速度"),
+        )
+        .child(stepper)
+        .child(presets)
+        .child(
+            div()
+                .px(px(SPACE_2))
+                .text_size(px(FONT_SIZE_MICRO))
+                .text_color(hsla(0.0, 0.0, 1.0, 0.42))
+                .child("范围 0.1x – 10x"),
+        )
+        .into_any_element()
 }
 
 /// 音量图标 + 可拖动的音量弹出条。

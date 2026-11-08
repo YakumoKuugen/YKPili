@@ -452,6 +452,18 @@ impl MpvPlayer {
         self.set_property_string("mute", if muted { "yes" } else { "no" })
     }
 
+    /// 设置播放倍速（0.1x–10x）。
+    ///
+    /// mpv 的 `speed` 属性同时作用于音视频；默认开启 `audio-pitch-correction`，
+    /// 加速时不会变成尖细的“快放”。非法值直接拒绝，别把 mpv 设成 0 速卡死。
+    pub fn set_speed(&mut self, rate: f64) -> Result<(), MpvError> {
+        if !rate.is_finite() {
+            return Err(MpvError::Command(-1));
+        }
+        let rate = rate.clamp(0.1, 10.0);
+        self.set_property_string("speed", &format!("{rate:.2}"))
+    }
+
     /// `mpv_command("set", <name>, <value>)` 的公共封装。
     fn set_property_string(&mut self, name: &str, value: &str) -> Result<(), MpvError> {
         unsafe {

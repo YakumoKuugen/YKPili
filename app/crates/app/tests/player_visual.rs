@@ -35,6 +35,7 @@ fn capture(
     open_coin: bool,
     open_fav: bool,
     expanded: bool,
+    menu: u8,
 ) {
     let mut cx = context();
     let theme = yk_theme::theme::YkTheme::dark();
@@ -46,7 +47,7 @@ fn capture(
                         origin: Default::default(),
                         size: size(px(width), px(height)),
                     })),
-                    focus: false,
+                    focus: true,
                     show: false,
                     ..Default::default()
                 },
@@ -55,17 +56,25 @@ fn capture(
                     gpui::component::Theme::change(ThemeMode::Dark, Some(window), cx);
                     yk_theme::gpui_theme::apply(cx, &theme);
                     let player = cx.new(|cx| {
-                        PlayerView::new(theme.clone(), cx)
+                        let mut player = PlayerView::new(theme.clone(), cx)
                             .with_open_panels(open_share, open_coin, open_fav)
-                            .with_expanded(expanded)
+                            .with_expanded(expanded);
+                        match menu {
+                            1 => player = player.with_quality_menu(),
+                            2 => player = player.with_speed_menu(),
+                            _ => {}
+                        }
+                        player
                     });
-                    let app = AppRoot::new().with_player(player);
+                    let app = AppRoot::new().without_login_prompt().with_player(player);
                     cx.new(|_| app)
                 },
             )
         })
         .unwrap();
     cx.update_window(handle, |_, window, cx| {
+        // 控制栏在失焦窗口里会被主动隐藏；截图验收需要它可见，先把窗口激活。
+        window.activate_window();
         window.render_frame(cx);
     })
     .unwrap();
@@ -97,6 +106,7 @@ fn main() {
         false,
         false,
         false,
+        0,
     );
     capture(
         "ykpili-player-coin.ppm",
@@ -106,6 +116,7 @@ fn main() {
         true,
         false,
         false,
+        0,
     );
     capture(
         "ykpili-player-fav.ppm",
@@ -116,6 +127,7 @@ fn main() {
         true,
         // 展开态截图：368 宽的收藏夹卡片要按 400 侧栏排版才完整。
         true,
+        0,
     );
     capture(
         "ykpili-player-expanded.ppm",
@@ -125,5 +137,26 @@ fn main() {
         false,
         false,
         true,
+        0,
+    );
+    capture(
+        "ykpili-player-quality-menu.ppm",
+        1280.0,
+        820.0,
+        false,
+        false,
+        false,
+        false,
+        1,
+    );
+    capture(
+        "ykpili-player-speed-menu.ppm",
+        1280.0,
+        820.0,
+        false,
+        false,
+        false,
+        false,
+        2,
     );
 }

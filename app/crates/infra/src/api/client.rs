@@ -31,7 +31,7 @@ use crate::messages::{
     aggregate_likes, ChatMessage, Conversation, InboxCursor, MessageChannel, MessageEntry,
     MessageUser, UnreadCounts,
 };
-use crate::playback::{select_playback, PlaybackSource};
+use crate::playback::{select_playback, select_stream, PlaybackSource, SelectedStream};
 
 /// 伪装成桌面浏览器 —— 与旧实现的 UA 策略一致。
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
@@ -295,6 +295,48 @@ fn store_wbi_keys(img: &str, sub: &str) {
     *guard = Some((img.to_string(), sub.to_string(), std::time::Instant::now()));
 }
 
+/// 当前账号是否大会员的进程内缓存。
+///
+/// `nav` 是 playurl / 详情 / 推荐共用的 WBI 入口，顺手就能读到 `vip.status`，
+/// 不必为了画质菜单再单独打一次 `/x/web-interface/nav`。
+static MEMBERSHIP: std::sync::OnceLock<std::sync::Mutex<Option<(bool, std::time::Instant)>>> =
+    std::sync::OnceLock::new();
+
+/// 会员状态缓存有效期：和 WBI keys 同寿命 —— 两者都由同一次 `nav` 写入，
+/// 一起过期才能保证「下一次取 keys 一定会重新读会员状态」。
+const MEMBERSHIP_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// 记下刚读到的会员状态（登录成功 / nav 返回时调用）。
+pub fn note_membership(is_vip: bool) {
+    let cache = MEMBERSHIP.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = Some((is_vip, std::time::Instant::now()));
+}
+
+/// 退出登录 / 切换账号时清掉旧账号的会员状态。
+pub fn clear_membership() {
+    let cache = MEMBERSHIP.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = None;
+}
+
+/// 当前账号是否大会员。没读到过时返回 `false`（按非大会员处理，宁可少列不误暴露）。
+pub fn is_vip_member() -> bool {
+    let cache = MEMBERSHIP.get_or_init(|| std::sync::Mutex::new(None));
+    let guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .as_ref()
+        .filter(|(_, at)| at.elapsed() < MEMBERSHIP_TTL)
+        .map(|(vip, _)| *vip)
+        .unwrap_or(false)
+}
+
 /// 取 WBI keys（`img_key` / `sub_key`）。
 ///
 /// **不需要登录**：`nav` 在未登录时也会返回 `wbi_img`，只是 `isLogin=false`。
@@ -313,6 +355,8 @@ where
     let parsed: UserInfoResponse =
         serde_json::from_str(&body).map_err(|e| format!("nav 响应解析失败：{e}"))?;
     let data = parsed.data.ok_or_else(|| "nav 响应缺少 data".to_string())?;
+    // 借 nav 顺手刷新会员状态：画质菜单按它决定列「非大会员档」还是「大会员 + 非大会员档」。
+    note_membership(data.vip.as_ref().is_some_and(|vip| vip.is_active()));
     let wbi = data
         .wbi_img
         .ok_or_else(|| "nav 响应缺少 wbi_img".to_string())?;
@@ -438,6 +482,7 @@ fn fetch_play_url_with_keys<C>(
     client: &C,
     bvid: &str,
     cid: i64,
+    qn: i32,
     cookie: &str,
     img: &str,
     sub: &str,
@@ -445,7 +490,7 @@ fn fetch_play_url_with_keys<C>(
 where
     C: HttpClient<Error = String>,
 {
-    let req = bilibili::play_url(bvid, cid, img, sub, cookie, now_wts());
+    let req = bilibili::play_url(bvid, cid, qn, img, sub, cookie, now_wts());
     let body = client.get(&req)?;
     parse_play_url_response(&body)
 }
@@ -455,14 +500,82 @@ fn fetch_legacy_play_url<C>(
     client: &C,
     bvid: &str,
     cid: i64,
+    qn: i32,
     cookie: &str,
 ) -> Result<PlayUrlData, String>
 where
     C: HttpClient<Error = String>,
 {
-    let req = bilibili::play_url_legacy(bvid, cid, cookie);
+    let req = bilibili::play_url_legacy(bvid, cid, qn, cookie);
     let body = client.get(&req)?;
     parse_play_url_response(&body)
+}
+
+/// 取 playurl；WBI 端点被风控（`v_voucher`）时自动切旧端点兜底。
+fn fetch_play_url_data<C>(
+    client: &C,
+    bvid: &str,
+    cid: i64,
+    qn: i32,
+    cookie: &str,
+) -> Result<PlayUrlData, String>
+where
+    C: HttpClient<Error = String>,
+{
+    let (img, sub) = fetch_wbi_keys(client, cookie)?;
+    let play = fetch_play_url_with_keys(client, bvid, cid, qn, cookie, &img, &sub)?;
+    if has_playable_stream(&play) {
+        return Ok(play);
+    }
+    // 典型场景：B 站风控对 WBI 端点返回 `code=0 + v_voucher`，
+    // data 里没有 dash/durl。旧端点不带 WBI、风控策略不同，实测仍能出流。
+    eprintln!(
+        "[playurl] WBI 端点没有可播放流（v_voucher={}），改用旧端点兜底",
+        play.v_voucher.is_some()
+    );
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    match fetch_legacy_play_url(client, bvid, cid, qn, cookie) {
+        Ok(legacy) => Ok(legacy),
+        Err(e) => {
+            eprintln!("[playurl] 旧端点兜底失败：{e}");
+            Ok(play)
+        }
+    }
+}
+
+/// 按指定清晰度（qn）重新取一条视频流，供播放器「画质菜单」原位换流。
+///
+/// 和 [`fetch_playback`] 的区别：不重复拉详情 / 评论 / UP 主名片，只换流。
+pub fn fetch_stream_at<C>(
+    client: &C,
+    bvid: &str,
+    cid: i64,
+    qn: i32,
+    cookie: &str,
+) -> Result<SelectedStream, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if bvid.trim().is_empty() || cid <= 0 {
+        return Err("缺少 bvid / cid，无法切换清晰度".into());
+    }
+    let play = fetch_play_url_data(client, bvid, cid, qn, cookie)?;
+    if !has_playable_stream(&play) {
+        if play.v_voucher.is_some() {
+            return Err("播放地址被 B 站风控拦截（v_voucher），请稍后重试".into());
+        }
+        return Err("该清晰度没有可用的视频流".into());
+    }
+    let stream = select_stream(&play, Some(qn))
+        .ok_or_else(|| "该清晰度没有可用的视频流".to_string())?;
+    // 服务端可能降档返回（会员过期 / 视频无该档），必须让用户知道实际没切过去。
+    if qn > 0 && stream.quality_id != qn {
+        return Err(format!(
+            "该清晰度当前不可用（请求 {qn}，返回 {}）",
+            stream.quality_id
+        ));
+    }
+    Ok(stream)
 }
 
 /// 点击卡片后的完整取流：详情取 cid → playurl → 选一条视频 + 可选音频。
@@ -513,29 +626,14 @@ where
     if cid == 0 {
         return Err("视频详情没有 cid，无法取播放地址".into());
     }
-    let play = fetch_play_url_with_keys(client, bvid, cid, cookie, &img, &sub)?;
-    let play = if has_playable_stream(&play) {
-        play
-    } else {
-        // 典型场景：B 站风控对 WBI 端点返回 `code=0 + v_voucher`，
-        // data 里没有 dash/durl。旧端点不带 WBI、风控策略不同，实测仍能出流。
-        eprintln!(
-            "[playurl] WBI 端点没有可播放流（v_voucher={}），改用旧端点兜底",
-            play.v_voucher.is_some()
-        );
-        std::thread::sleep(std::time::Duration::from_millis(150));
-        match fetch_legacy_play_url(client, bvid, cid, cookie) {
-            Ok(legacy) => legacy,
-            Err(e) => {
-                eprintln!("[playurl] 旧端点兜底失败：{e}");
-                play
-            }
-        }
-    };
+    // 画质菜单按会员状态列档位：大会员 = 大会员 + 非大会员，否则只列非大会员档。
+    // `fetch_wbi_keys` 刚刚读过 nav，这里的缓存一定是最新的（同一次调用链）。
+    let is_vip = is_vip_member();
+    let play = fetch_play_url_data(client, bvid, cid, 127, cookie)?;
     if !has_playable_stream(&play) && play.v_voucher.is_some() {
         return Err("播放地址被 B 站风控拦截（v_voucher），请稍后重试".into());
     }
-    let mut source = select_playback(&info, &play)?;
+    let mut source = select_playback(&info, &play, is_vip)?;
     // UP 主签名不在视频详情里，单独拉一次名片；失败不影响播放。
     source.owner_sign = fetch_user_sign(
         client,

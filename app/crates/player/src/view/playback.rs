@@ -45,6 +45,9 @@ impl PlayerView {
             // 用户上一部片调过的音量在新片里丢失。
             w.set_volume(self.model.state.volume);
             w.set_muted(self.model.state.muted);
+            // 倍速跟着视图模型走：换视频 / 换清晰度后新的 mpv 实例默认 1.0x，
+            // 用户上一段调过的 1.5x 不能被重置。
+            w.set_rate(self.model.state.rate);
             // 窗口当前不可见（最小化 / 被完全遮挡）：新 worker 直接停帧，
             // 别先解码几帧再停。
             w.set_render_paused(self.visibility.render_paused());

@@ -165,12 +165,52 @@ pub struct PlayUrlData {
     pub dash: Option<DashData>,
     #[serde(default)]
     pub durl: Vec<DurlItem>,
+    /// 当前账号（及当前视频）实际允许请求的画质 id 列表。
+    ///
+    /// 非大会员通常是 `[16, 32, 64, 80]`，大会员会多出 74/112/116/120/125/126/127。
+    /// 画质菜单用它和 [`SupportFormat`] 做交集，避免列出点了也播不了的档位。
+    #[serde(default)]
+    pub accept_quality: Vec<i32>,
+    /// 与 `accept_quality` 一一对应的展示文案（老接口兜底）。
+    #[serde(default)]
+    pub accept_description: Vec<String>,
+    /// 视频本身支持的画质格式：带 `need_vip` / `need_login`，是画质菜单的首选数据源。
+    #[serde(default)]
+    pub support_formats: Vec<SupportFormat>,
     /// 风控凭证：`code=0` 但没有 dash/durl 时，B 站用它要求先过验证。
     ///
     /// 典型响应：`{"code":0,"data":{"v_voucher":"voucher_..."}}`。
     /// 这不是「视频不可播」：改用不带 WBI 的旧 playurl 端点通常仍能出流。
     #[serde(default)]
     pub v_voucher: Option<String>,
+}
+
+/// `data.support_formats[]`：某种画质在当前视频里的可用性与展示文案。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SupportFormat {
+    /// 画质 id（qn），如 80 = 1080P。
+    #[serde(default)]
+    pub quality: i32,
+    /// 新文案，如「1080P 高清」。
+    #[serde(default)]
+    pub new_description: String,
+    /// 老文案，`new_description` 缺失时兜底。
+    #[serde(default)]
+    pub display_desc: String,
+    /// 角标文案（如「大会员」）。
+    #[serde(default)]
+    pub superscript: String,
+    /// 仅大会员可播。
+    #[serde(default)]
+    pub need_vip: bool,
+    /// 需要登录才可播。
+    #[serde(default)]
+    pub need_login: bool,
+    /// 该画质支持的编码（avc1 / hev1 / av01）。
+    #[serde(default)]
+    pub codecs: Vec<String>,
+    #[serde(default)]
+    pub format: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -273,8 +313,45 @@ pub struct UserInfoData {
     /// 当前等级。
     #[serde(default)]
     pub level_info: Option<LevelInfo>,
+    /// 大会员状态；未登录 / 普通用户为 `None`。
+    #[serde(default)]
+    pub vip: Option<VipInfo>,
     #[serde(default)]
     pub wbi_img: Option<WbiImg>,
+}
+
+/// `/x/web-interface/nav` 里的 `vip` 节点。
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct VipInfo {
+    /// 1 = 大会员有效，0 = 非大会员 / 已过期。
+    #[serde(default)]
+    pub status: i32,
+    /// 会员类型（1 = 月度，2 = 年度…）。
+    #[serde(rename = "type", default)]
+    pub kind: i32,
+    #[serde(default)]
+    pub label: Option<VipLabel>,
+}
+
+impl VipInfo {
+    /// 当前是否处于有效大会员状态。
+    pub fn is_active(&self) -> bool {
+        self.status == 1
+    }
+
+    /// 会员文案（如「年度大会员」）；没有标签时为空串。
+    pub fn label_text(&self) -> &str {
+        self.label
+            .as_ref()
+            .map(|label| label.text.trim())
+            .unwrap_or("")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct VipLabel {
+    #[serde(default)]
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

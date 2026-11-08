@@ -138,6 +138,7 @@ mod tests {
         let path = temp_path("roundtrip");
         let settings = AppSettings {
             close_player_on_finish: false,
+            ..Default::default()
         };
         settings.save(&path).unwrap();
         assert_eq!(AppSettings::load(&path), settings);
