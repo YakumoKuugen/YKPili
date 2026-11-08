@@ -171,7 +171,7 @@ pub fn comment_row(t: &YkTheme, comment: &DynamicComment, opts: CommentRowOption
 
     row.child(
         yk_components::avatar::Avatar::new(28.0)
-            .url(comment.face.clone())
+            .url(yk_domain::models::face_thumb_url(&comment.face))
             .background(linear_gradient(
                 135.,
                 linear_color_stop(p.bili_blue, 0.0),

@@ -3462,7 +3462,7 @@ fn avatar(
         .when(hidden, |el| el.invisible())
         .child(
             yk_components::avatar::Avatar::new(TOP_BAR_AVATAR_SIZE)
-                .url(face.unwrap_or_default())
+                .url(face.map(|f| yk_domain::models::face_thumb_url(&f)).unwrap_or_default())
                 .background(linear_gradient(
                     135.,
                     linear_color_stop(p.bili_blue, 0.),

@@ -174,7 +174,8 @@ impl SearchVideo {
             bvid: self.bvid.clone(),
             cid: 0,
             up_name: self.author.clone(),
-            up_face: self.up_face.clone(),
+            // 署名行只有 18pt，原图头像（可能 2048²，解码 16 MB）纯属浪费。
+            up_face: crate::models::face_thumb_url(&self.up_face),
             up_mid: self.mid,
             view_count: self.view_count,
             danmaku_count: self.danmaku_count,
@@ -1178,9 +1179,10 @@ mod tests {
             page.results.videos[0].up_face,
             "https://i0.hdslb.com/face.jpg"
         );
+        // 转成卡片模型时头像换成缩略图（原模型保留原图地址）。
         assert_eq!(
             page.results.videos[0].to_cover_item(0).up_face,
-            "https://i0.hdslb.com/face.jpg"
+            "https://i0.hdslb.com/face.jpg@96w_96h_1c.webp"
         );
         assert_eq!(page.results.live.len(), 1);
         assert_eq!(page.results.films.len(), 1);
@@ -1215,7 +1217,7 @@ mod tests {
         );
         assert_eq!(
             page.results.videos[0].to_cover_item(0).up_face,
-            "https://i1.hdslb.com/fallback.jpg"
+            "https://i1.hdslb.com/fallback.jpg@96w_96h_1c.webp"
         );
     }
 

@@ -166,7 +166,7 @@ impl AccountView {
         let t = &self.theme;
         let p = &t.palette;
         yk_components::avatar::Avatar::new(88.0)
-            .url(face)
+            .url(yk_domain::models::face_thumb_url_at(face, 176))
             .background(linear_gradient(
                 135.,
                 linear_color_stop(p.bili_blue, 0.),

@@ -19,12 +19,34 @@ pub const COVER_THUMB_WIDTH: u32 = 384;
 /// 16:9 缩略图高度。
 pub const COVER_THUMB_HEIGHT: u32 = 216;
 
+/// 头像缩略图默认边长。
+///
+/// 头像在界面里最大也就 88pt（账号浮层），2× 屏 176px；卡片署名只有 18pt。
+/// B 站图床头像原图有的到 2048×2048，解码是 **16 MB/张**，完全没必要。
+pub const FACE_THUMB_SIZE: u32 = 96;
+
 /// 把 B 站封面 URL 换成 384×216 的缩略图地址；非 B 站 / 已带后缀的 URL 原样返回。
 pub fn cover_thumb_url(url: &str) -> String {
-    if url.is_empty() || url.contains('@') || !url.contains("hdslb.com") || url.contains('?') {
+    thumb_url(url, &format!("@{COVER_THUMB_WIDTH}w_{COVER_THUMB_HEIGHT}h_1c.webp"))
+}
+
+/// 把 B 站头像 URL 换成 `FACE_THUMB_SIZE` 见方的缩略图（默认 96×96）。
+///
+/// 只处理 B 站图床；非 B 站、空串、已带 `@`/`?` 的地址原样返回。
+pub fn face_thumb_url(url: &str) -> String {
+    face_thumb_url_at(url, FACE_THUMB_SIZE)
+}
+
+/// 指定边长的头像缩略图（账号浮层这类大尺寸头像用）。
+pub fn face_thumb_url_at(url: &str, px: u32) -> String {
+    thumb_url(url, &format!("@{}w_{}h_1c.webp", px.max(32), px.max(32)))
+}
+
+fn thumb_url(url: &str, suffix: &str) -> String {
+    if url.is_empty() || url.contains('@') || url.contains('?') || !url.contains("hdslb.com") {
         return url.to_string();
     }
-    format!("{url}@{COVER_THUMB_WIDTH}w_{COVER_THUMB_HEIGHT}h_1c.webp")
+    format!("{url}{suffix}")
 }
 
 /// 首页推荐视频的封面卡片数据。
@@ -100,7 +122,7 @@ impl CoverItem {
             bvid: v.bvid.clone(),
             cid: 0,
             up_name: v.owner.as_ref().map(|o| o.name.clone()).unwrap_or_default(),
-            up_face: v.owner.as_ref().map(|o| o.face.clone()).unwrap_or_default(),
+            up_face: v.owner.as_ref().map(|o| face_thumb_url(&o.face)).unwrap_or_default(),
             up_mid: v.owner.as_ref().map(|o| o.mid).unwrap_or(0),
             view_count: v.stat.as_ref().map(|s| s.view).unwrap_or(0),
             danmaku_count: v.stat.as_ref().map(|s| s.danmaku).unwrap_or(0),
@@ -287,7 +309,11 @@ mod tests {
 
         // 旧实现丢掉的四个字段
         assert_eq!(c.up_name, "生肉烹饪师", "UP 主被丢了");
-        assert_eq!(c.up_face, "https://i1.hdslb.com/f.jpg", "UP 主头像被丢了");
+        // 头像在构造时就换成 96×96 缩略图（署名行只有 18pt，原图 16 MB 没必要）。
+        assert_eq!(
+            c.up_face, "https://i1.hdslb.com/f.jpg@96w_96h_1c.webp",
+            "UP 主头像被丢了或没走缩略图"
+        );
         assert_eq!(c.view_count, 124_000, "播放量被丢了");
         assert_eq!(c.danmaku_count, 144, "弹幕数被丢了");
         assert_eq!(c.duration_secs, 754, "时长被丢了");
@@ -315,6 +341,36 @@ mod tests {
         let other = "https://example.com/a.jpg";
         assert_eq!(cover_thumb_url(other), other);
         assert_eq!(cover_thumb_url(""), "");
+    }
+
+    #[test]
+    fn face_thumb_url_uses_small_variant() {
+        assert_eq!(
+            face_thumb_url("https://i0.hdslb.com/bfs/face/a.jpg"),
+            "https://i0.hdslb.com/bfs/face/a.jpg@96w_96h_1c.webp"
+        );
+        assert_eq!(
+            face_thumb_url_at("https://i0.hdslb.com/bfs/face/b.jpg", 176),
+            "https://i0.hdslb.com/bfs/face/b.jpg@176w_176h_1c.webp"
+        );
+        let already = "https://i0.hdslb.com/bfs/face/a.jpg@64w_64h_1c.webp";
+        assert_eq!(face_thumb_url(already), already);
+        assert_eq!(face_thumb_url("https://example.com/a.jpg"), "https://example.com/a.jpg");
+        assert_eq!(face_thumb_url(""), "");
+    }
+
+    /// 首页卡片的 UP 主头像在构造时就换成缩略图：
+    /// 否则 18pt 的头像会去下载/解码 2048×2048 的原图（16 MB/张）。
+    #[test]
+    fn cover_item_up_face_is_thumbnail() {
+        let mut v = sample_item();
+        v.owner = Some(VideoOwner {
+            mid: 1,
+            name: "up".into(),
+            face: "https://i0.hdslb.com/bfs/face/raw.jpg".into(),
+        });
+        let c = CoverItem::from_recommend(&v, 0, "#000");
+        assert_eq!(c.up_face, "https://i0.hdslb.com/bfs/face/raw.jpg@96w_96h_1c.webp");
     }
 
     #[test]
