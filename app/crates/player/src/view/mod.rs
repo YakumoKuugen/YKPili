@@ -14,6 +14,7 @@ mod tabs;
 pub(crate) use tabs::{comment_skeleton, panel_empty_line};
 pub(crate) use danmaku::{fixed_danmaku_visible, take_fixed_slot};
 use controls::*;
+pub(crate) use controls::VolumePanelView;
 use crate::controller::*;
 
 impl Render for PlayerView {
@@ -166,6 +167,9 @@ impl Render for PlayerView {
                     video_left,
                     video_width,
                     &self.progress_track_bounds,
+                    self.volume_popover_open,
+                    &self.volume_panel,
+                    &self.volume_button_bounds,
                     cx,
                     cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.toggle_play(window, cx);
@@ -389,7 +393,11 @@ impl Render for PlayerView {
                 source,
                 content: Some(content),
                 focus_handle: self.focus_handle.clone(),
-                weak: cx.entity().downgrade(),
+                on_key: Rc::new(cx.listener(
+                    |this, event: &KeyDownEvent, window, cx| {
+                        this.handle_player_key(event, window, cx);
+                    },
+                )),
                 progress: 0.0,
             };
             entrance
@@ -420,29 +428,7 @@ impl Render for PlayerView {
                 .key_context("Player")
                 .track_focus(&self.focus_handle)
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    match event.keystroke.key.as_str() {
-                        // 回车：分享面板开着时复制链接（面板上有对应的键位提示）。
-                        "enter" => {
-                            if this.handle_enter(cx) {
-                                cx.stop_propagation();
-                            }
-                        }
-                        "escape" => {
-                            // 弹层开着时 Esc 只关弹层（APG：Esc 关闭并把焦点还给触发按钮），
-                            // 别一按就进「再按一次退出播放器」——用户想关的是面前这张卡。
-                            if this.close_action_overlays(cx) {
-                                cx.stop_propagation();
-                                return;
-                            }
-                            if this.escape_hint {
-                                this.request_close(window, cx);
-                            } else {
-                                this.arm_escape_hint(cx);
-                            }
-                            cx.stop_propagation();
-                        }
-                        _ => {}
-                    }
+                    this.handle_player_key(event, window, cx);
                 }))
                 .child(content)
                 .into_any_element()

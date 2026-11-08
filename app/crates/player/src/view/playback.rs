@@ -41,6 +41,10 @@ impl PlayerView {
         // 取流期间用户可能已经按过暂停：新 worker 启动后补发一次状态。
         if let Some(w) = self.worker.as_ref() {
             w.set_paused(!self.model.state.playing);
+            // 音量 / 静音跟着视图模型走：新 worker 否则会从 mpv 默认 100% 起播，
+            // 用户上一部片调过的音量在新片里丢失。
+            w.set_volume(self.model.state.volume);
+            w.set_muted(self.model.state.muted);
             // 窗口当前不可见（最小化 / 被完全遮挡）：新 worker 直接停帧，
             // 别先解码几帧再停。
             w.set_render_paused(self.visibility.render_paused());

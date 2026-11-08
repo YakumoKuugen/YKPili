@@ -439,6 +439,38 @@ impl MpvPlayer {
         Ok(())
     }
 
+    /// 设置音量（0.0..=1.0）。mpv 的 `volume` 属性是 0–100 的百分比。
+    ///
+    /// 只改播放器自己的增益，不动系统音量；静音由 [`Self::set_muted`] 单独管。
+    pub fn set_volume(&mut self, volume: f64) -> Result<(), MpvError> {
+        let percent = (volume.clamp(0.0, 1.0) * 100.0).round();
+        self.set_property_string("volume", &format!("{percent:.0}"))
+    }
+
+    /// 静音开关。与音量解耦：静音后保留 `volume`，取消静音即恢复原音量。
+    pub fn set_muted(&mut self, muted: bool) -> Result<(), MpvError> {
+        self.set_property_string("mute", if muted { "yes" } else { "no" })
+    }
+
+    /// `mpv_command("set", <name>, <value>)` 的公共封装。
+    fn set_property_string(&mut self, name: &str, value: &str) -> Result<(), MpvError> {
+        unsafe {
+            let cmd: unsafe extern "C" fn(*mut MpvHandle, *const *const c_char) -> c_int = *self
+                ._lib
+                .get(b"mpv_command")
+                .map_err(|e| MpvError::Library(e.to_string()))?;
+            let c_cmd = CString::new("set").unwrap();
+            let c_prop = CString::new(name).map_err(|_| MpvError::Command(-1))?;
+            let c_val = CString::new(value).map_err(|_| MpvError::Command(-1))?;
+            let args = [c_cmd.as_ptr(), c_prop.as_ptr(), c_val.as_ptr(), ptr::null()];
+            let rc = cmd(self.ctx, args.as_ptr());
+            if rc < 0 {
+                return Err(MpvError::Command(rc));
+            }
+        }
+        Ok(())
+    }
+
     /// 跳到指定位置（秒，绝对定位）。
     ///
     /// 主要给「起播位置没生效时补一刀」用；进度条拖动接上之后也会走这里。

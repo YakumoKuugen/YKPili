@@ -1,6 +1,7 @@
 //! 控制条：进度、播放按钮、音量 / 倍速小胶囊。
 
 use super::*;
+use gpui::component::slider::SliderEvent;
 
 /// 悬浮控制栏：弹幕输入 38 + 操作条 50 = 88。
 ///
@@ -15,6 +16,9 @@ pub(crate) fn control_bar(
     video_left: f32,
     video_width: f32,
     progress_track_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    volume_popover_open: bool,
+    volume_panel: &Entity<VolumePanelView>,
+    volume_button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
     cx: &mut Context<PlayerView>,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -240,7 +244,14 @@ pub(crate) fn control_bar(
                 })
                 .child(ctrl_pill(quality_text))
                 .child(ctrl_pill(rate_text))
-                .child(ctrl_icon(volume_icon, icon_color))
+                .child(volume_control(
+                    volume_panel,
+                    volume_icon,
+                    icon_color,
+                    volume_popover_open,
+                    volume_button_bounds,
+                    cx,
+                ))
                 .child(ctrl_icon(IconName::Captions, icon_color))
                 .child(ctrl_icon(IconName::Settings, icon_color))
                 .child(ctrl_icon(IconName::Maximize, icon_color)),
@@ -275,7 +286,225 @@ pub(crate) fn ctrl_pill(label: String) -> impl IntoElement {
         .child(label)
 }
 
-/// 控制栏右侧图标按钮（音量 / 字幕 / 设置 / 全屏）。
+/// 音量图标 + 可拖动的音量弹出条。
+///
+/// 点图标开 / 关弹出条；外部点击、控制栏收起时由控制器关闭。
+fn volume_control(
+    panel: &Entity<VolumePanelView>,
+    icon: IconName,
+    color: Hsla,
+    open: bool,
+    button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
+    cx: &mut Context<PlayerView>,
+) -> impl IntoElement {
+    let button_bounds = button_bounds.clone();
+    div()
+        .relative()
+        .flex_shrink_0()
+        .child(
+            div()
+                .id("player-volume")
+                .w(px(32.))
+                .h(px(32.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_HALF))
+                .cursor_pointer()
+                .hover(|style| style.bg(rgba(0xFFFFFF1A)))
+                .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                    view.toggle_volume_popover(cx);
+                }))
+                // 先放 bounds 探针，后面图标在命中顺序上更靠前。
+                .child(
+                    canvas(
+                        move |bounds, _, _| button_bounds.set(Some(bounds)),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .inset_0(),
+                )
+                .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color)),
+        )
+        // 弹出条从图标正上方浮出：右缘对齐，宽度向左展开，不挡控制条。
+        .when(open, |this| this.child(panel.clone()))
+}
+
+/// 音量弹出条：独立实体，拖动时只重绘这一小块。
+///
+/// 以前弹出条直接挂在 `PlayerView::render` 里：滑杆每移动 1px 都会让整个
+/// 播放器（视频层、控制栏、评论面板）重排一遍，手感明显发黏。拆成独立
+/// 实体后，拖动只重绘 172×84 的小面板，播放器主体不参与。
+pub(crate) struct VolumePanelView {
+    theme: YkTheme,
+    slider: Entity<SliderState>,
+    player: WeakEntity<PlayerView>,
+    bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    volume: f64,
+    muted: bool,
+}
+
+impl VolumePanelView {
+    pub(crate) fn new(
+        theme: YkTheme,
+        slider: Entity<SliderState>,
+        player: WeakEntity<PlayerView>,
+        bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+        volume: f64,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // 滑杆状态变化（拖动 / 键盘改音量）只通知本面板重绘。
+        cx.observe(&slider, |_, _, cx| cx.notify()).detach();
+        cx.subscribe(&slider, |panel, _slider, event: &SliderEvent, cx| {
+            let (raw, release) = match event {
+                SliderEvent::Change(value) => (value.end(), false),
+                SliderEvent::Release(value) => (value.end(), true),
+            };
+            panel.volume = (f64::from(raw) / 100.0).clamp(0.0, 1.0);
+            // mpv 放开音量后自然解除静音，与控制条图标保持一致。
+            if panel.volume > 0.0 {
+                panel.muted = false;
+            }
+            let player = panel.player.clone();
+            let volume = panel.volume;
+            let _ = player.update(cx, |player, cx| {
+                player.set_volume_from_panel(volume, release, cx);
+            });
+            cx.notify();
+        })
+        .detach();
+        Self {
+            theme,
+            slider,
+            player,
+            bounds,
+            volume,
+            muted,
+        }
+    }
+
+    /// 键盘调音量 / 外部状态变化：同步滑杆与文案。
+    pub(crate) fn set_volume(
+        &mut self,
+        volume: f64,
+        muted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.volume = volume.clamp(0.0, 1.0);
+        self.muted = muted;
+        let target = (self.volume * 100.0).round() as f32;
+        self.slider.update(cx, |state, cx| {
+            if (state.value().end() - target).abs() > 0.5 {
+                state.set_value(target, window, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// 静音状态变化（音量不变，不需要动滑杆）。
+    pub(crate) fn set_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
+        self.muted = muted;
+        cx.notify();
+    }
+}
+
+impl Render for VolumePanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let percent = (self.volume.clamp(0.0, 1.0) * 100.0).round() as i32;
+        let muted = self.muted || self.volume <= 0.001;
+        let bounds_cell = self.bounds.clone();
+        let accent = self.theme.palette.theme_primary;
+        let icon_color = hsla(0.0, 0.0, 1.0, 0.86);
+        div()
+            .id("player-volume-popover")
+            .absolute()
+            .right_0()
+            .bottom(px(36.))
+            .w(px(172.))
+            .p(px(SPACE_3))
+            .flex()
+            .flex_col()
+            .gap(px(SPACE_2))
+            .rounded(px(RADIUS_SM))
+            .bg(rgba(0x0B0F14F2))
+            .border_1()
+            .border_color(rgba(0xFFFFFF1F))
+            .shadow(self.theme.shadows.shadow_glass_elevated.clone())
+            // bounds 探针作为第一个子元素：滑杆 / 静音按钮画在它上面，
+            // 命中顺序上优先给控件，指针不会被一层透明 canvas 截走。
+            .child(
+                canvas(
+                    move |bounds, _, _| bounds_cell.set(Some(bounds)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .id("player-volume-mute")
+                            .w(px(24.))
+                            .h(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(RADIUS_SM))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgba(0xFFFFFF1A)))
+                            .on_click(cx.listener(|panel, _: &ClickEvent, _window, cx| {
+                                let player = panel.player.clone();
+                                let Some(player) = player.upgrade() else {
+                                    return;
+                                };
+                                let mut muted = None;
+                                let _ = player.update(cx, |player, cx| {
+                                    muted = Some(player.toggle_mute_from_panel(cx));
+                                });
+                                if let Some(muted) = muted {
+                                    panel.set_muted(muted, cx);
+                                }
+                            }))
+                            .child(
+                                Icon::new(if muted {
+                                    IconName::VolumeX
+                                } else {
+                                    IconName::Volume2
+                                })
+                                .size(px(16.))
+                                .text_color(icon_color),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(FONT_SIZE_CAPTION))
+                            .text_color(hsla(0.0, 0.0, 1.0, 0.86))
+                            .child(if muted {
+                                "静音".to_string()
+                            } else {
+                                format!("{percent}%")
+                            }),
+                    ),
+            )
+            .child(
+                div().w_full().h(px(20.)).flex().items_center().child(
+                    Slider::new(&self.slider)
+                        .horizontal()
+                        .w_full()
+                        // 与控制条进度条同一套配色：主题色填充 + 白色滑块。
+                        .bg(accent)
+                        .text_color(rgb(0xFFFFFF)),
+                ),
+            )
+    }
+}
+
 pub(crate) fn ctrl_icon(icon: IconName, color: Hsla) -> impl IntoElement {
     div()
         .w(px(32.))

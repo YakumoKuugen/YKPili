@@ -49,6 +49,9 @@ unsafe impl Send for WorkerFrame {}
 enum WorkerCommand {
     Pause(bool),
     Seek(f64),
+    /// 音量（0.0..=1.0）与静音；解码线程负责下发到 mpv。
+    Volume(f64),
+    Muted(bool),
     /// 窗口不可见（最小化 / 被完全遮挡）时停帧：mpv 继续播放音频，
     /// 只是不再「渲染 → NV12 转换 → 上传」每一帧，改为只报播放位置。
     RenderPaused(bool),
@@ -151,6 +154,16 @@ impl FrameWorker {
                             WorkerCommand::Seek(secs) => {
                                 if let Err(e) = player.seek(secs) {
                                     eprintln!("[video] seek {secs:.1}s 失败：{e}");
+                                }
+                            }
+                            WorkerCommand::Volume(volume) => {
+                                if let Err(e) = player.set_volume(volume) {
+                                    eprintln!("[video] 设置音量 {volume:.2} 失败：{e}");
+                                }
+                            }
+                            WorkerCommand::Muted(muted) => {
+                                if let Err(e) = player.set_muted(muted) {
+                                    eprintln!("[video] 设置静音={muted} 失败：{e}");
                                 }
                             }
                             WorkerCommand::RenderPaused(paused) => {
@@ -264,6 +277,16 @@ impl FrameWorker {
     /// 跳转到指定秒数；进度条拖动走这里，UI 线程不直接碰 mpv。
     pub fn seek(&self, position_secs: f64) {
         let _ = self.commands.send(WorkerCommand::Seek(position_secs));
+    }
+
+    /// 设置音量（0.0..=1.0），解码线程下发到 mpv。
+    pub fn set_volume(&self, volume: f64) {
+        let _ = self.commands.send(WorkerCommand::Volume(volume));
+    }
+
+    /// 静音开关，解码线程下发到 mpv。
+    pub fn set_muted(&self, muted: bool) {
+        let _ = self.commands.send(WorkerCommand::Muted(muted));
     }
 
     /// 窗口不可见（最小化 / 被完全遮挡）时暂停出帧；audio 不受影响。

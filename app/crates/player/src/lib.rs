@@ -38,6 +38,7 @@ use gpui::assets::IconName;
 use gpui::component::input::{Input, InputEvent, InputState};
 use gpui::component::kbd::Kbd;
 use gpui::component::menu::ContextMenuExt as _;
+use gpui::component::slider::{Slider, SliderState};
 use gpui::component::Icon;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -50,7 +51,7 @@ use yk_domain::format;
 use controller::dispatch_history_report;
 pub use controller::set_test_cursor;
 use model::PlayerModel;
-use view::ActionOverlay;
+use view::{ActionOverlay, VolumePanelView};
 use yk_domain::player::PlayerState;
 use yk_components::status;
 use yk_theme::theme::*;
@@ -368,6 +369,14 @@ pub struct PlayerView {
     tab: usize,
     /// 控制栏显隐、音量、错误统一收在视图模型里，视图与控制器共读这一份。
     model: PlayerModel,
+    /// 音量弹出条是否展开。点控制栏音量图标切换，点外部 / 控制栏收起时关闭。
+    volume_popover_open: bool,
+    /// 音量弹出条（独立实体，拖滑杆只重绘这一块）。
+    volume_panel: Entity<VolumePanelView>,
+    /// 音量图标按钮的 bounds：点它属于「切换弹出条」，不能被外部点击关闭逻辑误判。
+    volume_button_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// 音量弹出条的 bounds：点它外部才收起。
+    volume_popover_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// 弹幕：屏幕上已排好位置的滚动 / 顶部 / 底部弹幕。
     danmaku: Vec<PlacedDanmaku>,
     /// 当前视频的全部弹幕（按时间排序），信息面板「弹幕」Tab 用它。
@@ -595,6 +604,30 @@ impl PlayerView {
              输入内容随之丢失，见附录 F L-1 / 附录 D 事实 19"
         );
         eprintln!("[player] PlayerView::new（实例数 {n}）");
+        let model = PlayerModel::new();
+        // 音量滑杆：0–100 整数步进，初值取视图模型的音量（默认 100）。
+        // 拖动不需要额外窗口句柄：SliderState 自己处理指针捕获。
+        let volume_slider = cx.new(|_| {
+            SliderState::new()
+                .min(0.)
+                .max(100.)
+                .step(1.)
+                .default_value((model.state.volume * 100.0) as f32)
+        });
+        // 弹出条做成独立实体：拖动滑杆只重绘它自己，不带着整个播放器重排。
+        let volume_popover_bounds = Rc::new(Cell::new(None));
+        let weak_self = cx.entity().downgrade();
+        let volume_panel = cx.new(|cx| {
+            VolumePanelView::new(
+                theme.clone(),
+                volume_slider,
+                weak_self,
+                volume_popover_bounds.clone(),
+                model.state.volume,
+                model.state.muted,
+                cx,
+            )
+        });
         Self {
             theme,
             frame: TestFrame::new(1280, 720),
@@ -707,7 +740,11 @@ impl PlayerView {
             visibility_observer: None,
             visibility: VisibilityGate::default(),
             image_handler: None,
-            model: PlayerModel::new(),
+            model,
+            volume_popover_open: false,
+            volume_panel,
+            volume_button_bounds: Rc::new(Cell::new(None)),
+            volume_popover_bounds,
         }
     }
 }

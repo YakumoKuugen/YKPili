@@ -1452,6 +1452,21 @@ impl PlayerView {
                         return;
                     }
                     let _ = weak_down.update(cx, |view, cx| {
+                        // 音量弹出条：点它外面任何地方都收起；点音量图标本身
+                        // 留给按钮的 on_click 做「切换」，否则会先关再开。
+                        if view.volume_popover_open {
+                            let inside_popover = view
+                                .volume_popover_bounds
+                                .get()
+                                .is_some_and(|bounds| bounds.contains(&event.position));
+                            let on_button = view
+                                .volume_button_bounds
+                                .get()
+                                .is_some_and(|bounds| bounds.contains(&event.position));
+                            if !inside_popover && !on_button {
+                                view.close_volume_popover(cx);
+                            }
+                        }
                         // 展开的面板盖在控制条右侧之上，点面板不能误触进度条。
                         let panel_covers =
                             view.expanded && view.pointer_in_panel_zone(event.position, window);
@@ -1549,8 +1564,8 @@ impl PlayerView {
                     if !view.model.controls_visible {
                         return false;
                     }
-                    // 正在输入弹幕 / 拖动进度条时不自动隐藏。
-                    if view.input_focused || view.scrubbing {
+                    // 正在输入弹幕 / 拖动进度条 / 调音量时不自动隐藏。
+                    if view.input_focused || view.scrubbing || view.volume_popover_open {
                         view.last_activity = std::time::Instant::now();
                         return true;
                     }
@@ -1577,6 +1592,11 @@ impl PlayerView {
         // 拖动中收控制条 / 窗口失焦：先把拖动收尾，避免 scrub 状态悬空。
         if self.scrubbing {
             self.end_scrub(cx);
+        }
+        // 音量弹出条挂在控制条里，控制条一收它也必须跟着消失。
+        if self.volume_popover_open {
+            self.volume_popover_open = false;
+            self.volume_popover_bounds.set(None);
         }
         // 正在输入弹幕时不能把输入框从树里拿掉，等失焦后再走自动隐藏。
         if self.input_focused {
@@ -1701,6 +1721,26 @@ impl PlayerView {
     /// 测试入口：读侧栏（信息面板）当前是否展开。
     pub fn panel_expanded(&self) -> bool {
         self.expanded
+    }
+
+    /// 测试用：当前播放状态 (playing, position_secs, volume, muted)。
+    pub fn test_playback_state(&self) -> (bool, f64, f64, bool) {
+        (
+            self.model.state.playing,
+            self.model.state.position_secs,
+            self.model.state.volume,
+            self.model.state.muted,
+        )
+    }
+
+    /// 测试用：音量弹出条是否展开。
+    pub fn test_volume_popover_open(&self) -> bool {
+        self.volume_popover_open
+    }
+
+    /// 测试用：切换音量弹出条（等价于点控制栏音量图标）。
+    pub fn test_toggle_volume_popover(&mut self, cx: &mut Context<Self>) {
+        self.toggle_volume_popover(cx);
     }
 
     /// 测试入口：互动行的实际几何（窗口坐标）。
@@ -2167,22 +2207,74 @@ pub(crate) fn lerp_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>, t: f32) -> Bound
     }
 }
 
-/// 入场期的 Esc 也从同一个焦点句柄进；用弱实体回到 PlayerView 的状态机。
-pub(crate) fn player_escape_handler(
-    weak: WeakEntity<PlayerView>,
-) -> impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static {
-    move |event, window, cx| {
-        if event.keystroke.key != "escape" {
-            return;
-        }
-        let _ = weak.update(cx, |view, cx| {
-            if view.escape_hint {
-                view.request_close(window, cx);
-            } else {
-                view.arm_escape_hint(cx);
+impl PlayerView {
+    /// 播放器快捷键的统一入口。
+    ///
+    /// **必须同时挂在「直开」外壳和「封面入场」外壳上**：从卡片点开时，
+    /// 顶层元素是 `PlayerEntrance` 而不是下面的普通 div，只在普通 div 上挂
+    /// 监听器会让正常使用路径（卡片打开）完全收不到键。
+    pub(crate) fn handle_player_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // 输入框抢键盘时，空格 / 方向键属于「打字 / 移动光标」，
+        // 不能被播放器快捷键劫走。Enter / Esc 仍按原逻辑走。
+        let typing = self.input_focused;
+        // 注意不能直接用 `modifiers.modified()`：macOS 给方向键带上
+        // `NSFunctionKeyMask`（function = true），那样左右 / 上下会被误判成
+        // 「带修饰键」而全部失效。只挡真正会改变语义的四个修饰键。
+        let m = event.keystroke.modifiers;
+        let plain = !(m.control || m.alt || m.shift || m.platform);
+        match event.keystroke.key.as_str() {
+            // 空格：播放 / 暂停。
+            "space" if plain && !typing => {
+                self.toggle_play(window, cx);
+                cx.stop_propagation();
             }
-        });
-        cx.stop_propagation();
+            // 左右：快退 / 快进 5 秒。
+            "left" if plain && !typing => {
+                self.seek_relative(-5.0, window, cx);
+                cx.stop_propagation();
+            }
+            "right" if plain && !typing => {
+                self.seek_relative(5.0, window, cx);
+                cx.stop_propagation();
+            }
+            // 上下：音量 -/+ 5%。
+            "up" if plain && !typing => {
+                let volume = (self.model.state.volume + 0.05).clamp(0.0, 1.0);
+                self.set_volume(volume, window, cx);
+                cx.stop_propagation();
+            }
+            "down" if plain && !typing => {
+                let volume = (self.model.state.volume - 0.05).clamp(0.0, 1.0);
+                self.set_volume(volume, window, cx);
+                cx.stop_propagation();
+            }
+            // 回车：分享面板开着时复制链接（面板上有对应的键位提示）。
+            "enter" => {
+                if self.handle_enter(cx) {
+                    cx.stop_propagation();
+                }
+            }
+            "escape" => {
+                // 弹层开着时 Esc 只关弹层（APG：Esc 关闭并把焦点还给触发按钮），
+                // 别一按就进「再按一次退出播放器」——用户想关的是面前这张卡。
+                if self.close_action_overlays(cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                if self.escape_hint {
+                    self.request_close(window, cx);
+                } else {
+                    self.arm_escape_hint(cx);
+                }
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2246,7 +2338,9 @@ pub(crate) struct PlayerEntrance {
     pub(crate) source: CoverSource,
     pub(crate) content: Option<AnyElement>,
     pub(crate) focus_handle: FocusHandle,
-    pub(crate) weak: WeakEntity<PlayerView>,
+    /// 全套播放器快捷键。用 `Rc` 是因为动画每帧会用 `..el` 重建结构体，
+    /// 必须能克隆；`Box<dyn Fn>` 在这里不可 Clone。
+    pub(crate) on_key: Rc<dyn Fn(&KeyDownEvent, &mut Window, &mut App)>,
     pub(crate) progress: f32,
 }
 
@@ -2257,7 +2351,7 @@ impl RenderOnce for PlayerEntrance {
             source,
             content,
             focus_handle,
-            weak,
+            on_key,
             progress,
         } = self;
         let p = entrance_progress(progress);
@@ -2293,7 +2387,7 @@ impl RenderOnce for PlayerEntrance {
             .occlude()
             .key_context("Player")
             .track_focus(&focus_handle)
-            .on_key_down(player_escape_handler(weak));
+            .on_key_down(move |event, window, cx| on_key(event, window, cx));
 
         if progress >= 1.0 {
             return shell.child(content.expect("入场结束时必须挂上播放器内容"));
@@ -2592,9 +2686,17 @@ impl PlayerView {
         cx.notify();
     }
 
-    /// 跳到指定秒数。拖动松手与键盘快进都走这里，避免两套 seek 逻辑。
+    /// 跳到指定秒数。拖动松手、键盘快进、续播都走这里，避免多套 seek 逻辑。
     pub(crate) fn seek(&mut self, position_secs: f64, cx: &mut Context<Self>) {
-        let target = position_secs.max(0.0);
+        // 夹到 [0, duration]：键盘连按右方向键很容易冲过片尾，
+        // 越过之后 mpv 会直接 EOF，看起来像「一按就关播」。
+        let duration = self.model.state.duration_secs;
+        let max = if duration > 0.0 {
+            duration
+        } else {
+            f64::MAX
+        };
+        let target = position_secs.clamp(0.0, max);
         self.model.state.position_secs = target;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(worker) = self.worker.as_ref() {
@@ -2605,13 +2707,87 @@ impl PlayerView {
         cx.notify();
     }
 
-    /// 设置音量（0..=1）。
+    /// 相对当前进度快进 / 快退（方向键左右）。负数为后退。
     ///
-    /// 解码端目前只接 pause / seek 两条命令，音量先落在视图模型里；
-    /// mpv 命令通道补齐后在这里下发，视图不需要再改。
-    pub fn set_volume(&mut self, volume: f64, cx: &mut Context<Self>) {
+    /// 键盘操作时把控制栏叫出来：否则用户只听到声音变化 / 看不到进度，
+    /// 不知道当前跳到哪了。
+    pub(crate) fn seek_relative(
+        &mut self,
+        delta_secs: f64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.note_activity(window, cx);
+        self.seek(self.model.state.position_secs + delta_secs, cx);
+    }
+
+    /// 设置音量（0..=1），并同步到解码端与弹出条滑杆（键盘上下键走这里）。
+    pub fn set_volume(&mut self, volume: f64, window: &mut Window, cx: &mut Context<Self>) {
+        let volume = volume.clamp(0.0, 1.0);
+        self.set_volume_from_panel(volume, true, cx);
+        // 调音量意味着用户在看控制条：把黑框叫回来，别让滑块在脸上消失。
+        self.note_activity(window, cx);
+        // 键盘调音量时回写滑杆；滑杆拖动不会走这里，避免反向抖动。
+        let muted = self.model.state.muted;
+        let panel = self.volume_panel.clone();
+        panel.update(cx, |panel, cx| {
+            panel.set_volume(volume, muted, window, cx);
+        });
+    }
+
+    /// 音量落库（模型 + mpv）。
+    ///
+    /// `notify_player` 只在滑杆松开 / 键盘操作时为 true：拖动过程中整窗
+    /// 不重绘，由[`VolumePanelView`]自己按帧重绘，避免播放器主体拖泥带水。
+    pub(crate) fn set_volume_from_panel(
+        &mut self,
+        volume: f64,
+        notify_player: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.model.set_volume(volume);
+        self.sync_audio_to_worker();
+        if notify_player {
+            cx.notify();
+        }
+    }
+
+    /// 音量图标按钮：切换音量弹出条。
+    pub(crate) fn toggle_volume_popover(&mut self, cx: &mut Context<Self>) {
+        self.volume_popover_open = !self.volume_popover_open;
+        if !self.volume_popover_open {
+            self.volume_popover_bounds.set(None);
+        }
         cx.notify();
+    }
+
+    /// 点弹出条外部时收起。
+    pub(crate) fn close_volume_popover(&mut self, cx: &mut Context<Self>) {
+        if self.volume_popover_open {
+            self.volume_popover_open = false;
+            self.volume_popover_bounds.set(None);
+            cx.notify();
+        }
+    }
+
+    /// 静音 / 取消静音（音量弹出条里的喇叭按钮）。
+    ///
+    /// 返回新的静音状态，供弹出条自己的图标 / 文案同步；这里不碰弹出条
+    /// 实体，避免「面板更新中再更新面板」的重入。
+    pub(crate) fn toggle_mute_from_panel(&mut self, cx: &mut Context<Self>) -> bool {
+        self.model.state.toggle_mute();
+        self.sync_audio_to_worker();
+        cx.notify();
+        self.model.state.muted
+    }
+
+    /// 把视图模型里的音量 / 静音状态下发给解码线程。没有 worker 时是空操作。
+    fn sync_audio_to_worker(&self) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(worker) = self.worker.as_ref() {
+            worker.set_volume(self.model.state.volume);
+            worker.set_muted(self.model.state.muted);
+        }
     }
 }
 
