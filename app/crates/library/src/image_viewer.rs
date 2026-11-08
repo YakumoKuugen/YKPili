@@ -11,7 +11,9 @@
 //! - ←/→ 或 A/D：上一张 / 下一张，切换后回到 1× 并居中；
 //! - 右下角「复制」：把当前图片写入系统剪贴板；
 //! - 右下角「还原」：只把缩放与位移还原成初始值，不关闭查看器；
-//! - Esc / 右键 / 点击图片外的背景：关闭。
+//! - Esc / 右键 / 点击图片外的背景：关闭；
+//! - 打开与关闭都会清空窗口级文本选区，避免把点击缩略图的「半截手势」
+//!   留给下面的评论区（否则鼠标一动，评论正文会整段显示成选中态）。
 
 use gpui::assets::IconName;
 use gpui::component::Icon;
@@ -161,6 +163,14 @@ impl ImageViewer {
         self.copying = false;
         self.copy_feedback = None;
         self.copy_generation = self.copy_generation.wrapping_add(1);
+        // 打开查看器属于全新一轮交互：把窗口级文本选区清干净。
+        //
+        // 点缩略图时，按下那一刻选区层已经进入 `is_selecting`；随后
+        // `on_click` 里的 `stop_propagation` 会把这次 mouse-up 从窗口级
+        // 选区监听前截走，`is_selecting` 就永久停在 true。之后鼠标一动，
+        // 选区就按「从缩略图拖到正文」算，评论区整段文字显示成选中态。
+        // 打开和关闭各清一次（见 `close`），从根上断掉这条残缺手势。
+        gpui::base::TextSelection::clear(window, cx);
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -238,7 +248,7 @@ impl ImageViewer {
         .detach();
     }
 
-    pub fn close(&mut self, cx: &mut Context<Self>) {
+    pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.open {
             return;
         }
@@ -249,6 +259,10 @@ impl ImageViewer {
         self.copy_feedback = None;
         self.copy_generation = self.copy_generation.wrapping_add(1);
         self.transform.reset();
+        // 关闭查看器同样清选区：点背景关图片也是「按下 → on_click 关闭并
+        // stop_propagation」，mouse-up 到不了选区层，不清理就会把这半截
+        // 手势留给下面的评论区，鼠标一动出现整段选中。
+        gpui::base::TextSelection::clear(window, cx);
         cx.notify();
     }
 
@@ -365,8 +379,8 @@ impl Render for ImageViewer {
             .occlude()
             .track_focus(&self.focus_handle)
             // 点击背景只关查看器（图片自己 stop_propagation）。
-            .on_click(cx.listener(|this, _: &gpui::ClickEvent, _window, cx| {
-                this.close(cx);
+            .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                this.close(window, cx);
                 cx.stop_propagation();
             }))
             // 滚轮缩放，锚点取指针相对屏幕中心的偏移。
@@ -398,12 +412,12 @@ impl Render for ImageViewer {
             )
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(|this, _: &gpui::MouseDownEvent, _window, cx| {
-                    this.close(cx);
+                cx.listener(|this, _: &gpui::MouseDownEvent, window, cx| {
+                    this.close(window, cx);
                     cx.stop_propagation();
                 }),
             )
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 // 处理过的键要吞掉：否则方向键会滚到后面的详情页，
                 // Esc 会顺手把详情页也关掉。
                 match event.keystroke.key.as_str() {
@@ -419,7 +433,7 @@ impl Render for ImageViewer {
                     }
                     "escape" => {
                         cx.stop_propagation();
-                        this.close(cx);
+                        this.close(window, cx);
                     }
                     // 0 或 Home：还原（和右下角按钮同一行为）。
                     "0" | "home" => {
