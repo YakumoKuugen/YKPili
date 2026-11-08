@@ -111,6 +111,8 @@ fn write_locked(guard: &mut Option<Sink>, scope: &str, message: &str) {
             );
         }
     }
+    // 一条错误只占一行：HTTP / panic 的 message 可能自带换行，压平成空格。
+    let message = message.replace('\n', " ").replace('\r', "");
     let now = Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     let _ = writeln!(sink.file, "{now} [{scope}] {message}");
     // 逐条 flush：崩溃时最后一条错误不能丢在缓冲里。
