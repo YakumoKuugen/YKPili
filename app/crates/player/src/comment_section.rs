@@ -26,6 +26,7 @@ use gpui::{
 use yk_infra::api::client::{
     fetch_comment_page, post_comment, CommentPage, ReqwestClient, COMMENT_PAGE_SIZE,
 };
+pub use yk_infra::api::client::CommentSort;
 use yk_infra::dynamic::{CommentTarget, DynamicComment};
 use yk_theme::theme::*;
 
@@ -278,6 +279,10 @@ pub struct Section {
     /// 评论目标与 Cookie：读 / 写都在这里用。
     pub target: Option<CommentTarget>,
     pub cookie: String,
+    /// 当前排序（最热 / 最新）。换排序会清空列表并从第一页重拉。
+    pub sort: CommentSort,
+    /// 加载代次：换排序 / 换目标 / 重置都会 +1，旧请求回来按它丢弃。
+    load_generation: u64,
     /// 上一次评论请求（节流）。
     last_request: Option<std::time::Instant>,
 }
@@ -304,14 +309,25 @@ impl Default for Section {
             back_to_top: false,
             target: None,
             cookie: String::new(),
+            sort: CommentSort::Hot,
+            load_generation: 0,
             last_request: None,
         }
     }
 }
 
 impl Section {
+    /// 整体重置（换视频 / 关播放器）。
+    ///
+    /// 排序是用户的显式选择，跨视频保留：换成「最新」之后点开下一个视频，
+    /// 不该无声地跳回「最热」。
     pub fn reset(&mut self) {
+        let sort = self.sort;
+        let generation = self.load_generation;
         *self = Self::default();
+        self.sort = sort;
+        // 重置不等于「没发过请求」：在途的旧请求回来时不能落到新列表上。
+        self.load_generation = generation.wrapping_add(1);
     }
 
     /// 换目标（换视频 / 打开另一条动态）。
@@ -320,8 +336,24 @@ impl Section {
         self.cookie = cookie;
     }
 
+    /// 换排序（最热 / 最新）：清空列表并从第一页重拉。
+    ///
+    /// 游标不跨排序复用（`mode` 变了，`next` 就没有意义），所以只能整份重置，
+    /// 不能在现有列表上重排。请求沿用 `REQUEST_INTERVAL` 节流；列表清空后
+    /// 宿主按「空列表 + 未到底」画加载态。
+    pub fn set_sort<T: CommentHost>(&mut self, sort: CommentSort, cx: &mut Context<T>) {
+        if self.sort == sort {
+            return;
+        }
+        self.sort = sort;
+        self.load_first(cx);
+    }
+
     /// 第一页：清列表、发请求。
     pub fn load_first<T: CommentHost>(&mut self, cx: &mut Context<T>) {
+        // 换排序 / 换目标都会走到这里：旧请求回来时列表已经换了，按代次丢弃。
+        self.load_generation = self.load_generation.wrapping_add(1);
+        let generation = self.load_generation;
         let Some(target) = self.target.clone() else {
             self.list.reset();
             self.list.is_end = true;
@@ -330,6 +362,7 @@ impl Section {
         self.list.reset();
         self.rows = CommentRows::default();
         self.rendered_rows = 0;
+        let sort = self.sort;
         let cookie = self.cookie.clone();
         let wait = self.wait_time();
         self.note_request(wait);
@@ -342,10 +375,13 @@ impl Section {
                         std::thread::sleep(wait);
                     }
                     let client = ReqwestClient::new().map_err(|e| e.to_string())?;
-                    fetch_comment_page(&client, &cookie, &target, 0, PAGE_SIZE)
+                    fetch_comment_page(&client, &cookie, &target, 0, PAGE_SIZE, sort)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
+                if view.comments().load_generation != generation {
+                    return;
+                }
                 match result {
                     Ok(page) => view.comments().list.apply_first(page, true),
                     Err(error) => {
@@ -371,6 +407,8 @@ impl Section {
             return;
         }
         let cursor = self.list.next;
+        let generation = self.load_generation;
+        let sort = self.sort;
         let cookie = self.cookie.clone();
         let wait = self.wait_time();
         self.list.loading_more = true;
@@ -385,10 +423,14 @@ impl Section {
                         std::thread::sleep(wait);
                     }
                     let client = ReqwestClient::new().map_err(|e| e.to_string())?;
-                    fetch_comment_page(&client, &cookie, &target, cursor, PAGE_SIZE)
+                    fetch_comment_page(&client, &cookie, &target, cursor, PAGE_SIZE, sort)
                 })
                 .await;
             let _ = this.update(cx, |view, cx| {
+                // 排序 / 目标已经换了：这一页属于旧列表，直接丢掉。
+                if view.comments().load_generation != generation {
+                    return;
+                }
                 match result {
                     Ok(page) => view.comments().list.apply_more(page),
                     Err(error) => {
@@ -1147,6 +1189,22 @@ mod tests {
             is_end,
             total: 0,
         }
+    }
+
+    #[test]
+    fn reset_keeps_user_sort_and_drops_old_list() {
+        let mut section = Section::default();
+        assert_eq!(section.sort, CommentSort::Hot, "默认最热");
+        section.sort = CommentSort::Newest;
+        section.list.apply_first(page(vec![comment(1)], 1, false), true);
+
+        section.reset();
+        assert_eq!(
+            section.sort,
+            CommentSort::Newest,
+            "换视频不该把用户选的排序悄悄改回最热"
+        );
+        assert!(section.list.items.is_empty(), "重置必须清空旧视频的评论");
     }
 
     #[test]

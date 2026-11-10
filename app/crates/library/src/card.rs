@@ -9,7 +9,7 @@ use std::rc::Rc;
 use gpui::assets::IconName;
 use gpui::component::Icon;
 use gpui::prelude::*;
-use gpui::{InteractiveElement, StatefulInteractiveElement, *};
+use gpui::{InteractiveElement, StatefulInteractiveElement, TestSupportExt as _, *};
 use yk_domain::models::CoverItem;
 use yk_player::CoverSource;
 use yk_theme::theme::*;
@@ -22,6 +22,14 @@ pub trait CardHost: Sized + 'static {
     fn card_is_playing(&self) -> bool;
     fn card_close_requested(&self) -> bool;
     fn card_scroll_settling(&self) -> bool;
+    /// 这批卡片所在的层是否压在播放器之上（目前只有搜索结果浮窗）。
+    ///
+    /// 播放器打开时，下层卡片既不响应 hover 也不接受点击 —— 否则
+    /// 「点浮窗外侧关闭」的同一拍会又打开一张封面卡。但结果浮窗本身就压在
+    /// 播放器上面，必须照常可点：点封面 = 直接换一个视频。
+    fn card_above_player(&self) -> bool {
+        false
+    }
     /// 返回是否发生了状态变化（需要 `cx.notify()`）。
     fn card_update_hover(&mut self, idx: usize, hovered: bool, animate: bool) -> bool;
     /// 整卡点击：打开播放器并带上封面入场几何。
@@ -263,8 +271,9 @@ pub fn card<V: CardHost>(
         .absolute()
         .inset_0()
         .on_hover(cx.listener(move |host, hovered: &bool, _window, cx| {
-            // 播放浮窗打开期间，不允许下层封面响应 hover。
-            if host.card_is_playing() {
+            // 播放浮窗打开期间，不允许下层封面响应 hover；
+            // 但压在播放器上面的那一层（搜索结果浮窗）要照常响应。
+            if host.card_is_playing() && !host.card_above_player() {
                 return;
             }
             // 滚动期间卡片从指针下滑过，GPUI 会连续给出 true/false。
@@ -278,6 +287,8 @@ pub fn card<V: CardHost>(
 
     div()
         .id(("cover", idx))
+        // 测试里按 id 点卡片（真实整卡点击），release 构建是空操作。
+        .test_support()
         .relative()
         .w(px(card_w))
         .h(px(card_h))
@@ -299,7 +310,10 @@ pub fn card<V: CardHost>(
         .on_click(cx.listener(move |host, _: &ClickEvent, window, cx| {
             // 播放浮窗/遮罩已经打开时，落到下层的点击一律忽略；
             // 否则点浮窗外侧关闭的同一拍可能又打开一张封面卡。
-            if host.card_is_playing() || host.card_close_requested() {
+            // 结果浮窗压在最上层，里面的卡不受这条限制（点封面 = 换视频）。
+            if (host.card_is_playing() && !host.card_above_player())
+                || host.card_close_requested()
+            {
                 return;
             }
             // 必须在打开播放器、网格重排之前冻结封面几何。

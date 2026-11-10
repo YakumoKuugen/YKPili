@@ -1954,6 +1954,18 @@ impl PlayerView {
         self.comment_section.rendered_rows
     }
 
+    /// 测试入口：评论区当前排序（最热 / 最新）。
+    #[doc(hidden)]
+    pub fn test_comment_sort(&self) -> crate::comment_section::CommentSort {
+        self.comment_section.sort
+    }
+
+    /// 测试入口：当前已加载的评论条数（换排序后清空，等第一页回来）。
+    #[doc(hidden)]
+    pub fn test_comment_count(&self) -> usize {
+        self.comment_section.list.items.len()
+    }
+
     /// 测试入口：评论输入条是否展开 / 输入框是否拿到焦点。
     #[doc(hidden)]
     pub fn test_composer_state(&self) -> (bool, bool) {

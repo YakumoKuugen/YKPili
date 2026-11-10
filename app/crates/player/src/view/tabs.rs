@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::comment_section::CommentSort;
+use gpui::TestSupportExt as _;
+
 impl PlayerView {
     /// 面板 Tab 内容：评论 / 弹幕 / 选集。
     pub(crate) fn tab_content(
@@ -162,14 +165,45 @@ impl PlayerView {
                             .gap(px(SPACE_2))
                             .text_size(px(FONT_SIZE_CAPTION))
                             .text_color(s.text_quaternary)
-                            .child(
-                                div()
-                                    .text_color(s.text_primary)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child("最热"),
-                            )
-                            .child(div().child("|"))
-                            .child(div().child("最新")),
+                            .children(CommentSort::ALL.iter().flat_map(|&sort| {
+                                let on = sort == self.comment_section.sort;
+                                let tab = div()
+                                    .id(("player-comment-sort", sort as usize))
+                                    .test_support()
+                                    .cursor_pointer()
+                                    .text_color(if on {
+                                        s.text_primary
+                                    } else {
+                                        s.text_quaternary
+                                    })
+                                    .font_weight(if on {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .hover(|style| style.text_color(s.text_secondary))
+                                    .child(sort.label())
+                                    .on_click(cx.listener(
+                                        move |view, _: &ClickEvent, _window, cx| {
+                                            cx.stop_propagation();
+                                            // 换排序等于换了一份列表：回到顶部，
+                                            // 否则旧滚动位置落在新列表之外，看着像空白。
+                                            view.panel_scroll
+                                                .set_offset(gpui::point(px(0.), px(0.)));
+                                            view.comment_section.set_sort(sort, cx);
+                                            cx.notify();
+                                        },
+                                    ));
+                                let separator = (sort == CommentSort::Hot).then(|| {
+                                    div()
+                                        .text_color(s.text_quaternary)
+                                        .child("|")
+                                        .into_any_element()
+                                });
+                                [Some(tab.into_any_element()), separator]
+                                    .into_iter()
+                                    .flatten()
+                            })),
                     ),
             )
             .child(list)

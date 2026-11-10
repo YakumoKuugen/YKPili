@@ -952,6 +952,41 @@ where
 /// 用户滚到列表底部再取下一页。
 pub const COMMENT_PAGE_SIZE: u32 = 20;
 
+/// 评论排序：直接对应 `/x/v2/reply/main` 的 `mode`。
+///
+/// 网页端「最热 / 最新」就是这两个值；换排序后游标不通用，
+/// 调用方必须清空列表、从 `next=0` 重新拉第一页（见
+/// `yk_player::comment_section::Section::set_sort`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommentSort {
+    /// 按热度（`mode=3`）—— 默认，与旧实现一致。
+    #[default]
+    Hot,
+    /// 按时间（`mode=2`）。
+    Newest,
+}
+
+impl CommentSort {
+    /// 线上接口用的 `mode` 值。
+    pub const fn mode(self) -> u32 {
+        match self {
+            Self::Hot => 3,
+            Self::Newest => 2,
+        }
+    }
+
+    /// 界面上显示的文案。
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Hot => "最热",
+            Self::Newest => "最新",
+        }
+    }
+
+    /// 两个排序，按界面顺序。
+    pub const ALL: [Self; 2] = [Self::Hot, Self::Newest];
+}
+
 /// 一页评论（游标翻页）。
 #[derive(Debug, Clone, Default)]
 pub struct CommentPage {
@@ -969,12 +1004,14 @@ pub struct CommentPage {
 ///
 /// `size` 会被夹到 1..=30（服务端硬上限）；调用方应传
 /// [`COMMENT_PAGE_SIZE`]，**不要**为了「一次取更多」而在上层循环拼页。
+/// `sort` 决定 `mode`（最热 / 最新），同一轮翻页必须始终传同一个值。
 pub fn fetch_comment_page<C>(
     client: &C,
     cookie: &str,
     target: &CommentTarget,
     next: u64,
     size: u32,
+    sort: CommentSort,
 ) -> Result<CommentPage, String>
 where
     C: HttpClient<Error = String>,
@@ -985,7 +1022,14 @@ where
             ..Default::default()
         });
     }
-    let req = bilibili::comment_main(&target.oid, target.kind, cookie, next, size.clamp(1, 30));
+    let req = bilibili::comment_main(
+        &target.oid,
+        target.kind,
+        cookie,
+        sort.mode(),
+        next,
+        size.clamp(1, 30),
+    );
     let body = client.get(&req)?;
     let parsed: ReplyMainResponse =
         serde_json::from_str(&body).map_err(|e| format!("评论响应解析失败：{e}"))?;
@@ -1847,7 +1891,7 @@ mod tests {
         duplicate_first: bool,
         /// 服务端业务码；非 0 时直接回错误码。
         code: i64,
-        calls: std::cell::RefCell<Vec<(u64, u32)>>,
+        calls: std::cell::RefCell<Vec<(u64, u32, u32)>>,
     }
 
     impl HttpClient for CommentClient {
@@ -1868,7 +1912,14 @@ mod tests {
                 .and_then(|rest| rest.split('&').next())
                 .and_then(|v| v.parse().ok())
                 .unwrap();
-            self.calls.borrow_mut().push((next, ps));
+            let mode: u32 = req
+                .url
+                .split("mode=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .and_then(|v| v.parse().ok())
+                .unwrap();
+            self.calls.borrow_mut().push((next, ps, mode));
             if self.code != 0 {
                 return Ok(format!(r#"{{"code":{},"data":null}}"#, self.code));
             }
@@ -1911,12 +1962,20 @@ mod tests {
             code: 0,
             calls: Default::default(),
         };
-        let page = fetch_comment_page(&client, "", &comment_target(), 0, COMMENT_PAGE_SIZE).unwrap();
+        let page = fetch_comment_page(
+            &client,
+            "",
+            &comment_target(),
+            0,
+            COMMENT_PAGE_SIZE,
+            CommentSort::Hot,
+        )
+        .unwrap();
         assert_eq!(page.items.len(), 20);
         assert_eq!(page.next, 2, "游标原样回传，供下一次「滚到底」继续翻");
         assert!(!page.is_end, "服务端没说到底，就不能标成到底");
         assert_eq!(page.total, 500);
-        assert_eq!(*client.calls.borrow(), vec![(0, 20)], "一批只能发一个请求");
+        assert_eq!(*client.calls.borrow(), vec![(0, 20, 3)], "一批只能发一个请求");
     }
 
     #[test]
@@ -1928,7 +1987,15 @@ mod tests {
             code: 0,
             calls: Default::default(),
         };
-        let page = fetch_comment_page(&client, "", &comment_target(), 0, COMMENT_PAGE_SIZE).unwrap();
+        let page = fetch_comment_page(
+            &client,
+            "",
+            &comment_target(),
+            0,
+            COMMENT_PAGE_SIZE,
+            CommentSort::Hot,
+        )
+        .unwrap();
         assert_eq!(page.items.len(), 5, "页内重复 rpid 只保留一条");
     }
 
@@ -1941,10 +2008,42 @@ mod tests {
             code: 0,
             calls: Default::default(),
         };
-        let page = fetch_comment_page(&client, "", &comment_target(), 4, COMMENT_PAGE_SIZE).unwrap();
+        let page = fetch_comment_page(
+            &client,
+            "",
+            &comment_target(),
+            4,
+            COMMENT_PAGE_SIZE,
+            CommentSort::Hot,
+        )
+        .unwrap();
         assert_eq!(page.items.len(), 12);
         assert!(page.is_end);
-        assert_eq!(*client.calls.borrow(), vec![(4, 20)]);
+        assert_eq!(*client.calls.borrow(), vec![(4, 20, 3)]);
+    }
+
+    #[test]
+    fn comment_page_carries_newest_sort_to_mode() {
+        // 「最新」必须真的换成 mode=2，不能只在界面上换个颜色。
+        let client = CommentClient {
+            count: 3,
+            next: Some(1),
+            duplicate_first: false,
+            code: 0,
+            calls: Default::default(),
+        };
+        fetch_comment_page(
+            &client,
+            "",
+            &comment_target(),
+            0,
+            COMMENT_PAGE_SIZE,
+            CommentSort::Newest,
+        )
+        .unwrap();
+        assert_eq!(*client.calls.borrow(), vec![(0, 20, 2)]);
+        assert_eq!(CommentSort::Newest.label(), "最新");
+        assert_eq!(CommentSort::Hot.mode(), 3);
     }
 
     #[test]
@@ -1957,7 +2056,15 @@ mod tests {
             code: -352,
             calls: Default::default(),
         };
-        let err = fetch_comment_page(&client, "", &comment_target(), 0, COMMENT_PAGE_SIZE).unwrap_err();
+        let err = fetch_comment_page(
+            &client,
+            "",
+            &comment_target(),
+            0,
+            COMMENT_PAGE_SIZE,
+            CommentSort::Hot,
+        )
+        .unwrap_err();
         assert!(err.contains("风控"), "错误文案应说明被风控：{err}");
     }
 
@@ -1971,7 +2078,7 @@ mod tests {
             }
         }
 
-        let page = fetch_comment_page(&PinnedClient, "", &comment_target(), 0, 20).unwrap();
+        let page = fetch_comment_page(&PinnedClient, "", &comment_target(), 0, 20, CommentSort::Hot).unwrap();
         assert_eq!(page.items.len(), 2, "置顶与普通评论各一条，重复 rpid 去重");
         assert_eq!(page.items[0].rpid, 900);
         assert!(page.items[0].is_top, "置顶评论必须带标记");
@@ -1989,7 +2096,7 @@ mod tests {
             }
         }
 
-        let page = fetch_comment_page(&TopClient, "", &comment_target(), 0, 20).unwrap();
+        let page = fetch_comment_page(&TopClient, "", &comment_target(), 0, 20, CommentSort::Hot).unwrap();
         assert_eq!(page.items.len(), 3, "两条置顶 + 一条普通；置顶在 replies 里不重复");
         assert_eq!(page.items[0].rpid, 901, "管理员置顶排最前");
         assert!(page.items[0].is_top);

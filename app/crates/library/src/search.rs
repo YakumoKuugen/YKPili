@@ -733,7 +733,11 @@ pub trait SearchHost: crate::card::CardHost + Sized {
     }
 
     fn open_search_video(&mut self, bvid: String, cx: &mut gpui::Context<Self>) {
-        if self.card_is_playing() || self.card_close_requested() || bvid.trim().is_empty() {
+        // 结果浮窗压在播放器之上，里面的投稿格 / 视频结果要照常可点。
+        if (self.card_is_playing() && !self.card_above_player())
+            || self.card_close_requested()
+            || bvid.trim().is_empty()
+        {
             return;
         }
         if bvid.starts_with("BV") || bvid.starts_with("bv") {

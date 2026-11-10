@@ -20,6 +20,7 @@ use yk_domain::format;
 use yk_components::status;
 use yk_theme::theme::*;
 
+use yk_player::comment_section::CommentSort;
 use yk_player::comment_view::text_copy_menu;
 
 use crate::dynamic_card::card_ghost;
@@ -1030,12 +1031,19 @@ impl DynamicDetailView {
             }
             CommentState::Ready => {
                 if self.comments_section.list.items.is_empty() {
+                    // 列表空有两种含义：换排序 / 首屏还在路上（未到底），
+                    // 或者服务端真的说「没有更多了」。别把加载中画成空状态。
+                    let text = if self.comments_section.list.is_end {
+                        "还没有评论，来抢沙发吧"
+                    } else {
+                        "评论加载中…"
+                    };
                     list = list.child(
                         div()
                             .py(px(SPACE_6))
                             .text_size(px(FONT_SIZE_CAPTION))
                             .text_color(s.text_tertiary)
-                            .child("还没有评论，来抢沙发吧"),
+                            .child(text),
                     );
                 } else {
                     let copy_notice = {
@@ -1087,18 +1095,33 @@ impl DynamicDetailView {
                     .text_color(s.text_primary)
                     .child(format!("评论 {}", format::count(count))),
             )
-            .child(
+            .children(CommentSort::ALL.iter().map(|&sort| {
+                let on = sort == self.comments_section.sort;
                 div()
+                    .id(("dynamic-comment-sort", sort as usize))
+                    .test_support()
+                    .cursor_pointer()
                     .text_size(px(FONT_SIZE_MICRO))
-                    .text_color(t.palette.theme_primary)
-                    .child("最热"),
-            )
-            .child(
-                div()
-                    .text_size(px(FONT_SIZE_MICRO))
-                    .text_color(s.text_quaternary)
-                    .child("最新"),
-            );
+                    .text_color(if on {
+                        t.palette.theme_primary
+                    } else {
+                        s.text_quaternary
+                    })
+                    .font_weight(if on {
+                        FontWeight::MEDIUM
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .hover(|style| style.text_color(s.text_secondary))
+                    .child(sort.label())
+                    .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                        // 换排序后列表整份换掉：滚回顶部，别停在旧列表的高度。
+                        view.right_scroll.set_offset(point(px(0.), px(0.)));
+                        view.comments_section.set_sort(sort, cx);
+                        cx.notify();
+                    }))
+            }));
 
         if standalone {
             div()

@@ -549,6 +549,21 @@ impl AppRoot {
         self.search_closing
     }
 
+    /// 测试 / 验收：搜索结果浮窗当前是否展开。
+    pub fn search_results_open_for_test(&self) -> bool {
+        self.search_panel_open
+    }
+
+    /// 测试 / 验收：搜索结果浮窗是否正在播退场动画。
+    pub fn search_results_closing_for_test(&self) -> bool {
+        self.search_panel_closing
+    }
+
+    /// 测试 / 验收：播放浮窗实体是否已创建。
+    pub fn player_open_for_test(&self) -> bool {
+        self.playing.is_some()
+    }
+
     /// 展开顶栏搜索浮层：收起态胶囊 → 浮在最上层的完整搜索框。
     ///
     /// 代际 +1 换动画 id；`search_bar_expanded` 等动画落地后才置 true，
@@ -1339,6 +1354,8 @@ impl AppRoot {
             eprintln!("[play] 跳过：封面没有 bvid");
             return;
         }
+        // 从搜索结果里起播同样要先撤掉结果浮窗（它现在压在最上层）。
+        self.begin_search_panel_close(cx);
         eprintln!(
             "[play] 从封面起播：{bvid}（{}）",
             if self.up_profile.is_some() {
@@ -1398,6 +1415,15 @@ impl AppRoot {
             self.up_profile = None;
         }
         self.search.open = false;
+        // UP 主浮窗要压在页面上；结果浮窗现在是最上层、还带整窗背板，
+        // 不撤掉会把浮窗整个盖住。和搜索浮层一样，这里直接撤、不播动画：
+        // 用户点的是「这个人是谁」，不是在跟结果面板互动。
+        if self.search_panel_open {
+            self.search_panel_open = false;
+            self.search_panel_closing = false;
+            self.search_panel_pending = false;
+            self.reset_card_hover();
+        }
         // 从播放器面板 / 卡片署名进来：浮窗压在播放器之上（否则会被视频窗口盖住）。
         self.player_on_top = false;
         let theme = self.theme.clone();
@@ -2780,6 +2806,12 @@ impl CardHost for AppRoot {
         self.close_player_requested
     }
 
+    /// 搜索结果浮窗是唯一压在播放器之上的卡片层：里面的封面照常可点
+    /// （点开就直接换视频）。让位逻辑在 `card_open` 里，点完面板会收起。
+    fn card_above_player(&self) -> bool {
+        self.search_panel_open
+    }
+
     fn card_scroll_settling(&self) -> bool {
         self.scroll_settling()
     }
@@ -2797,6 +2829,9 @@ impl CardHost for AppRoot {
         cx: &mut Context<Self>,
     ) {
         eprintln!("[M3] 进入播放浮窗: {title}（{bvid}）");
+        // 结果浮窗在最上层：起播前先让位，否则视频会被它的整窗背板挡住。
+        // 面板没开时是空操作，首页卡片不受影响。
+        self.begin_search_panel_close(cx);
         self.ensure_player(cx);
         if let Some(player) = self.playing.clone() {
             // 先给入场起点，再换播放源；播放器实例本身不重建。
@@ -3053,6 +3088,8 @@ impl yk_library::search::SearchHost for AppRoot {
     }
 
     fn search_open_player(&mut self, bvid: String, cx: &mut Context<Self>) {
+        // 起播前让位：结果浮窗在最上层，不收起会把播放器连同背板一起挡住。
+        self.begin_search_panel_close(cx);
         self.ensure_player(cx);
         if let Some(player) = self.playing.clone() {
             let _ = player.update(cx, |view, cx| view.open_bvid(bvid, cx));
@@ -3784,9 +3821,6 @@ impl Render for AppRoot {
                 }
                 .render(t),
             )
-            // 搜索结果浮窗：压在页面与 Dock 之上，但排在播放器 / 账号 / 设置
-            // 这些真正的「上层」之前 —— 点结果起播时播放器要盖住它。
-            .children(search_results)
             // 左下角悬浮文件夹：参考 Rare UI 的 Folder，hover 掀盖露出卡片。
             // 纯视觉元素（不接路由），只挂在首页；窗口太窄时 Dock 会挤到这边，直接不画。
             .children(
@@ -3884,6 +3918,11 @@ impl Render for AppRoot {
                     .is_some()
                     .then(|| yk_shell::overlay::quit_hint(t, QUIT_HINT_TEXT)),
             )
+            // 搜索结果浮窗：与搜索框浮层同属最上层 —— 用户正在操作的是这一层，
+            // 播放器 / UP 主 / 账号 / 设置 / 退出提示都压在它之下。
+            // 它的整窗背板会吃掉下层点击，所以起播时必须先让位：
+            // 见 `card_open` / `search_open_player` / `play_from_cover`。
+            .children(search_results)
             // 搜索浮层永远最上层：播放器 / 账号面板 / 退出提示都压在它之下，
             // 开启时连遮罩一起盖住整窗。
             .children(search_overlay);

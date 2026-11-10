@@ -237,10 +237,13 @@ pub fn dynamic_comments(oid: &str, kind: i64, cookie: &str, pn: u32, ps: u32) ->
 /// `ps` 线上上限是 30（再大也会被截到 30）；调用方只取一页
 /// （[`super::client::COMMENT_PAGE_SIZE`] = 20），滚动到底再取下页。
 /// **不要**在上层拼页凑「一次 100 条」：连续 4 个请求会被频控打成 `-352`。
-pub fn comment_main(oid: &str, kind: i64, cookie: &str, next: u64, ps: u32) -> Request {
+///
+/// `mode` 是排序：3 = 热度、2 = 按时间（对应网页端的「最热 / 最新」）。
+/// 换排序后游标不通用，调用方必须从 `next=0` 重新拉第一页。
+pub fn comment_main(oid: &str, kind: i64, cookie: &str, mode: u32, next: u64, ps: u32) -> Request {
     Request {
         url: format!(
-            "{API_BASE}/x/v2/reply/main?oid={oid}&type={kind}&mode=3&next={next}&ps={ps}&web_location=1315875"
+            "{API_BASE}/x/v2/reply/main?oid={oid}&type={kind}&mode={mode}&next={next}&ps={ps}&web_location=1315875"
         ),
         cookie: cookie.to_string(),
         name: "comment_main",
