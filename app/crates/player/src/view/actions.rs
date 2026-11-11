@@ -546,7 +546,7 @@ impl PlayerView {
             .into_any_element()
     }
 
-    /// 分享面板：哔哩哔哩动态 / QQ / 复制链接。
+    /// 分享面板：哔哩哔哩动态 / QQ / 复制链接 / 分享播放进度。
     pub(crate) fn share_panel(&self, t: &YkTheme, cx: &mut Context<Self>) -> Option<AnyElement> {
         // 退场动画期间 bool 已经清零，但这一帧还得把卡画出来。
         if !self.share_panel_open && self.overlay_closing_kind != Some(ActionOverlay::Share) {
@@ -558,90 +558,90 @@ impl PlayerView {
             .as_ref()
             .map(|source| source.title.clone())
             .unwrap_or_default();
+        let progress = format::duration(self.current_position_secs().round() as u64);
         let list = div()
             .flex()
             .flex_col()
             .gap(px(SPACE_1))
             .child(
-                div()
-                    .id("player-share-dynamic")
-                    .h(px(30.))
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .px(px(SPACE_2))
-                    .rounded(px(RADIUS_SM))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(s.fill_3))
-                    .text_size(px(FONT_SIZE_CAPTION))
-                    .text_color(s.text_primary)
-                    .child(
-                        Icon::new(IconName::Share)
-                            .size(px(ICON_SIZE_SM))
-                            .text_color(s.text_secondary),
-                    )
-                    .child(div().min_w(px(0.)).truncate().child("分享到哔哩哔哩动态"))
-                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
-                        view.share_to_dynamic(cx);
-                    })),
+                share_row(
+                    "player-share-dynamic",
+                    Icon::new(IconName::Share)
+                        .size(px(ICON_SIZE_SM))
+                        .text_color(s.text_secondary)
+                        .into_any_element(),
+                    "分享到哔哩哔哩动态",
+                    s.fill_3,
+                    s.text_primary,
+                )
+                .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                    view.share_to_dynamic(cx);
+                })),
             )
             .child(
-                div()
-                    .id("player-share-qq")
-                    .h(px(30.))
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .px(px(SPACE_2))
-                    .rounded(px(RADIUS_SM))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(s.fill_3))
-                    .text_size(px(FONT_SIZE_CAPTION))
-                    .text_color(s.text_primary)
-                    .child(
-                        div()
-                            .w(px(16.))
-                            .h(px(16.))
-                            .rounded(px(RADIUS_HALF))
-                            .bg(rgb(0x12B7F5))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(9.))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xFFFFFF))
-                            .child("Q"),
-                    )
-                    .child(div().min_w(px(0.)).truncate().child("分享到 QQ"))
-                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
-                        view.share_to_qq(cx);
-                    })),
+                share_row(
+                    "player-share-qq",
+                    div()
+                        .w(px(16.))
+                        .h(px(16.))
+                        .rounded(px(RADIUS_HALF))
+                        .bg(rgb(0x12B7F5))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(9.))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(rgb(0xFFFFFF))
+                        .child("Q")
+                        .into_any_element(),
+                    "分享到 QQ",
+                    s.fill_3,
+                    s.text_primary,
+                )
+                .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                    view.share_to_qq(cx);
+                })),
             )
             .child(
-                div()
-                    .id("player-share-copy")
-                    .h(px(30.))
-                    .flex()
-                    .items_center()
-                    .gap(px(SPACE_2))
-                    .px(px(SPACE_2))
-                    .rounded(px(RADIUS_SM))
-                    .cursor_pointer()
-                    .hover(|style| style.bg(s.fill_3))
-                    .text_size(px(FONT_SIZE_CAPTION))
-                    .text_color(s.text_primary)
-                    .child(
-                        Icon::new(IconName::Link)
-                            .size(px(ICON_SIZE_SM))
-                            .text_color(s.text_secondary),
-                    )
-                    .child(div().min_w(px(0.)).truncate().child("复制链接"))
-                    // 回车键位提示：分享面板开着时回车 = 复制链接。
-                    .child(div().flex_1().min_w(px(0.)))
-                    .child(enter_key_hint())
-                    .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
-                        view.copy_video_link(cx);
-                    })),
+                share_row(
+                    "player-share-copy",
+                    Icon::new(IconName::Link)
+                        .size(px(ICON_SIZE_SM))
+                        .text_color(s.text_secondary)
+                        .into_any_element(),
+                    "复制链接",
+                    s.fill_3,
+                    s.text_primary,
+                )
+                // 回车键位提示：分享面板开着时回车 = 复制链接。
+                .child(div().flex_1().min_w(px(0.)))
+                .child(enter_key_hint())
+                .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                    view.copy_video_link(cx);
+                })),
+            )
+            .child(
+                share_row(
+                    "player-share-progress",
+                    Icon::new(IconName::Timer)
+                        .size(px(ICON_SIZE_SM))
+                        .text_color(s.text_secondary)
+                        .into_any_element(),
+                    "分享播放进度",
+                    s.fill_3,
+                    s.text_primary,
+                )
+                // 行尾挂着要分享的时间点，点之前就知道对方从哪开始看。
+                .child(div().flex_1().min_w(px(0.)))
+                .child(
+                    div()
+                        .text_size(px(FONT_SIZE_MICRO))
+                        .text_color(s.text_quaternary)
+                        .child(progress),
+                )
+                .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
+                    view.copy_progress_link(cx);
+                })),
             );
         let head = if title.is_empty() {
             div().into_any_element()
@@ -743,6 +743,37 @@ pub(crate) fn overlay_icon(
         .hover(|style| style.bg(rgba(0xFFFFFF24)))
         .child(Icon::new(icon).size(px(ICON_SIZE_SM)).text_color(color))
         .on_click(on_click)
+}
+
+/// 分享面板的一行：16px 图标 + 文案（超长截断）。
+///
+/// 返回 `Stateful<Div>`，调用方可以继续链 `.child()` 挂尾部提示、再挂 `.on_click`。
+/// 颜色按值传入而不是借 `&YkTheme`：hover 闭包要 `'static`，
+/// 借引用会让整个元素被主题生命周期绑住。
+fn share_row(
+    id: &'static str,
+    icon: AnyElement,
+    label: &'static str,
+    hover: Hsla,
+    text: Hsla,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        // 测试按 id 取这一行的实际几何：分享面板是 deferred 浮层，
+        // 行坐标不能像普通文档流那样手算。
+        .debug_selector(move || id.to_string())
+        .h(px(30.))
+        .flex()
+        .items_center()
+        .gap(px(SPACE_2))
+        .px(px(SPACE_2))
+        .rounded(px(RADIUS_SM))
+        .cursor_pointer()
+        .hover(move |style| style.bg(hover))
+        .text_size(px(FONT_SIZE_CAPTION))
+        .text_color(text)
+        .child(icon)
+        .child(div().min_w(px(0.)).truncate().child(label))
 }
 
 /// 元信息行的一项：12px 图标 + 计数。

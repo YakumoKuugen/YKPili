@@ -490,6 +490,12 @@ pub struct PlayerView {
     /// 打开时由「观看历史」带进来的起播位置（服务端进度）。
     /// 与本地记录一起交给 `yk_infra::resume::resolve_start_position` 取更靠后的。
     resume_seed: Option<f64>,
+    /// 深链里由分享者指定的起播秒数（`t=`）。
+    ///
+    /// 和 `resume_seed` 分开：分享链接的进度是**明确指令**，直接按它起播，
+    /// 不参与「本地 / 服务端 / seed 取更靠后」的比较，否则本机看过更远的位置
+    /// 会把分享者的起点顶掉。一次有效，消费后清零。
+    link_start_secs: Option<f64>,
     /// 本次播放的实际起播位置（取流成功后算出，0 = 从头播）。
     start_position: f64,
     /// 当前视频的续播记录键（`bvid#cid`）。
@@ -731,6 +737,7 @@ impl PlayerView {
             up_avatar_bounds: std::rc::Rc::new(std::cell::Cell::new(None)),
             resume: yk_infra::resume::ResumeStore::load_default(),
             resume_seed: None,
+            link_start_secs: None,
             start_position: 0.0,
             resume_key: None,
             last_resume_save: 0.0,
@@ -804,8 +811,10 @@ impl PlayerView {
 #[cfg(test)]
 mod tests {
     use super::{COMMENT_PAGE_SIZE, COMMENT_REQUEST_INTERVAL};
-    use crate::controller::cursor_local;
-    use crate::view::{percent_encode, qq_share_url, share_link_text, video_page_url};
+    use crate::controller::{cursor_local, explicit_start_position};
+    use crate::view::{
+        percent_encode, qq_share_url, share_link_text, video_page_url, video_page_url_at,
+    };
     use crate::comment_view::COMMENT_TEXT_LINE_HEIGHT;
     use gpui::{point, px};
 
@@ -895,6 +904,42 @@ mod tests {
             COMMENT_REQUEST_INTERVAL >= std::time::Duration::from_millis(500),
             "请求间隔太短，评论区会再次被 -352 拦"
         );
+    }
+
+    #[test]
+    fn progress_link_carries_page_and_time() {
+        // 进度分享必须走 B 站网页链接：QQ 里 `ykpili://` 不是可点链接。
+        assert_eq!(
+            video_page_url_at("BV1mG1QBNEFN", 1, Some(90.4)),
+            "https://www.bilibili.com/video/BV1mG1QBNEFN?t=90"
+        );
+        // 多 P 带 p，进度带 t，两个参数可以同时出现。
+        assert_eq!(
+            video_page_url_at("  BV1mG1QBNEFN  ", 2, Some(90.4)),
+            "https://www.bilibili.com/video/BV1mG1QBNEFN?p=2&t=90"
+        );
+        // 单 P 不带 p；0 秒不写假的 t=0（等于从头播）。
+        assert_eq!(
+            video_page_url_at("BV1mG1QBNEFN", 1, Some(0.0)),
+            "https://www.bilibili.com/video/BV1mG1QBNEFN"
+        );
+        assert_eq!(
+            video_page_url_at("BV1mG1QBNEFN", 1, None),
+            "https://www.bilibili.com/video/BV1mG1QBNEFN"
+        );
+    }
+
+    #[test]
+    fn explicit_start_position_honors_the_link() {
+        // 分享的起点是明确意图：低于续播 5 秒阈值也照播。
+        assert_eq!(explicit_start_position(3.0, 754.0), 3.0);
+        // 时长已知时收到最后一秒，避免点开即结束。
+        assert_eq!(explicit_start_position(753.9, 754.0), 753.0);
+        assert_eq!(explicit_start_position(900.0, 754.0), 753.0);
+        // 异常输入回到从头播，时长未知时原样采信。
+        assert_eq!(explicit_start_position(-2.0, 754.0), 0.0);
+        assert_eq!(explicit_start_position(f64::NAN, 754.0), 0.0);
+        assert_eq!(explicit_start_position(90.0, 0.0), 90.0);
     }
 
     #[test]

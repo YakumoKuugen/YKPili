@@ -2755,7 +2755,8 @@ impl AppRoot {
             let page = (page > 1).then_some(page);
             let bvid_for_player = bvid.clone();
             let _ = player.update(cx, |view, cx| {
-                view.open_bvid_at_page(bvid_for_player, page, start_secs, cx);
+                // 深链里的 t= 优先于本地续播：这是分享者指定的起点。
+                view.open_link_at_page(bvid_for_player, page, start_secs, cx);
             });
         }
 

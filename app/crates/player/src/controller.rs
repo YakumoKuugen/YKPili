@@ -37,6 +37,25 @@ impl PlayerView {
         self.open_bvid_at_page(bvid, None, seed, cx);
     }
 
+    /// 打开深链里的视频：`start_secs` 是分享者指定的起播点（链接里的 `t=`）。
+    ///
+    /// 和 [`Self::open_bvid_at`] 的区别：这里的进度是**链接的一部分**，优先级最高，
+    /// 不参与「本地续播 / 服务端历史取更靠后」的比较 —— 否则本机看过更远的位置
+    /// 会把分享者的起点顶掉，就不是「从参数的位置开始播放」了。
+    pub fn open_link_at_page(
+        &mut self,
+        bvid: String,
+        page: Option<u32>,
+        start_secs: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        // 同时把 `t=` 当 seed 传下去：只是为了让 open_bvid_at_page 知道
+        // 「这次有明确起点，不必再查服务端历史」，真正的起播位置仍由
+        // `link_start_secs` 决定（seed 会参与取 max，不能当唯一来源）。
+        self.open_bvid_at_page(bvid, page, start_secs, cx);
+        self.link_start_secs = start_secs.filter(|seconds| seconds.is_finite() && *seconds > 0.0);
+    }
+
     /// 打开指定分 P 的视频。
     ///
     /// `page` 是 B 站网页里的 `?p=`（从 1 开始）；`None` / 1 走默认第一 P。
@@ -85,6 +104,7 @@ impl PlayerView {
         self.finish_handled = false;
         // 续播上下文重置：起播位置要等取流成功（拿到时长）才能定。
         self.resume_seed = seed;
+        self.link_start_secs = None;
         self.start_position = 0.0;
         self.resume_key = None;
         self.last_resume_save = 0.0;
@@ -1033,6 +1053,45 @@ impl PlayerView {
         );
     }
 
+    /// 分享当前播放进度：复制带 `p` / `t` 的 B 站视频链接。
+    ///
+    /// 链接走 B 站网页而不是 `ykpili://`：QQ 等聊天软件不会把自定义协议
+    /// 渲染成可点链接。`t=` 会被浏览器与用户脚本识别；装了 YKPili 用户脚本时
+    /// 点开直接唤起客户端，并从这一秒起播（见 [`Self::open_link_at_page`]）。
+    pub(crate) fn copy_progress_link(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let bvid = source.bvid.trim().to_string();
+        if bvid.is_empty() {
+            self.show_interaction_note("这个视频没有可分享的链接".into(), true, cx);
+            return;
+        }
+        self.close_action_overlays(cx);
+        let page = source.current_page.max(1) as u32;
+        let position = self.current_position_secs();
+        let link = video_page_url_at(&bvid, page, Some(position).filter(|seconds| *seconds > 0.0));
+        let text = share_link_text(&link, &source.title);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let note = if position > 0.0 {
+            format!(
+                "已复制链接 · 从 {} 开始播放",
+                format::duration(position.round() as u64)
+            )
+        } else {
+            "已复制链接 · 从头开始播放".to_string()
+        };
+        self.show_interaction_note(note, false, cx);
+    }
+
+    /// 当前播放位置（秒）。
+    ///
+    /// 进度条拖动位置（`play_time`）可能比视图模型里的 `position_secs` 新，
+    /// 两者取更大值，避免分享出去的点落后于用户看到的进度。
+    pub(crate) fn current_position_secs(&self) -> f64 {
+        self.play_time.max(self.model.state.position_secs).max(0.0)
+    }
+
     /// 窗口可见性变化：不可见时让视频线程停帧，可见时恢复。
     ///
     /// **只管「看不见」，不管「失焦」**：失焦（点了别的应用）时窗口还在屏幕上，
@@ -1756,6 +1815,16 @@ impl PlayerView {
     ) -> f64 {
         let duration = src.duration_secs as f64;
         let key = yk_infra::resume::key(&src.bvid, src.cid);
+        // 分享链接里的 `t=` 是明确指令：只做边界收口，不和续播记录比大小。
+        if let Some(seconds) = self.link_start_secs.take() {
+            let start = explicit_start_position(seconds, duration);
+            self.resume_key = Some(key);
+            eprintln!(
+                "[deeplink] 按分享进度起播：{start:.1}s（链接 {seconds:.1}s，时长 {}s）：{}",
+                src.duration_secs, src.bvid
+            );
+            return start;
+        }
         let local = self
             .resume
             .resume_position(&key)
@@ -1908,6 +1977,41 @@ impl PlayerView {
         self.fav_panel_open = true;
         self.fav_scroll.set_offset(point(px(0.), px(0.)));
         self.note_overlay_opened(cx);
+    }
+
+    /// 测试入口：直接打开分享弹层（跳过登录检查，也不拉接口）。
+    #[doc(hidden)]
+    pub fn test_open_share_overlay(&mut self, cx: &mut Context<Self>) {
+        self.coin_panel_open = false;
+        self.fav_panel_open = false;
+        self.share_panel_open = true;
+        self.note_overlay_opened(cx);
+    }
+
+    /// 测试 / 截图入口：直接灌一份「只要能分享」的播放源（不取流）。
+    ///
+    /// 分享面板要读 `bvid`、`current_page` 和当前播放位置；
+    /// `tried_worker = true` 让渲染不启动解码线程（空 URL 只会刷错误日志）。
+    #[doc(hidden)]
+    pub fn with_share_source(
+        mut self,
+        bvid: &str,
+        title: &str,
+        page: i32,
+        position_secs: f64,
+    ) -> Self {
+        self.source = Some(yk_domain::playback::PlaybackSource {
+            bvid: bvid.to_string(),
+            title: title.to_string(),
+            current_page: page,
+            duration_secs: 754,
+            ..Default::default()
+        });
+        self.model.state.duration_secs = 754.0;
+        self.model.state.position_secs = position_secs;
+        self.play_time = position_secs;
+        self.tried_worker = true;
+        self
     }
 
     /// 测试入口：展开全部收藏夹，验证长列表能在卡片内部滚动。
@@ -2545,6 +2649,23 @@ impl PlayerView {
     }
 }
 
+/// 分享链接里的起播秒数收口。
+///
+/// 与续播记录不同，链接里的 `t=` 是分享者的明确意图，**低于 5 秒也照播**，
+/// 不再套「刚开始看就从头」的规则；只处理三种异常：
+/// 非有限值 / 负数归零；时长已知时收到最后一秒（避免点开即结束）。
+pub(crate) fn explicit_start_position(seconds: f64, duration_secs: f64) -> f64 {
+    if !seconds.is_finite() {
+        return 0.0;
+    }
+    let seconds = seconds.max(0.0);
+    if duration_secs > 0.0 {
+        seconds.min((duration_secs - 1.0).max(0.0))
+    } else {
+        seconds
+    }
+}
+
 /// 回车键位提示（分享面板「复制链接」行尾）。
 ///
 /// 用组件库的 `Kbd`：macOS 上渲染成 `⏎`，别的平台渲染成 `Enter` ——
@@ -3143,7 +3264,7 @@ impl PlayerView {
         else {
             return;
         };
-        let position = self.play_time.max(self.model.state.position_secs).max(0.0);
+        let position = self.current_position_secs();
         let load_generation = self.load_generation;
         self.quality_generation = self.quality_generation.wrapping_add(1);
         let generation = self.quality_generation;

@@ -65,6 +65,11 @@ path = "tests/player_fav_popover.rs"
 harness = false
 
 [[test]]
+name = "player_share_link"
+path = "tests/player_share_link.rs"
+harness = false
+
+[[test]]
 name = "pages_visual"
 path = "tests/pages_visual.rs"
 harness = false

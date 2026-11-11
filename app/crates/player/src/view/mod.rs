@@ -668,6 +668,27 @@ pub(crate) fn video_page_url(bvid: &str) -> String {
     format!("https://www.bilibili.com/video/{}", bvid.trim())
 }
 
+/// 带分 P / 起播秒数的 B 站视频链接：`.../BV...?p=2&t=90`。
+///
+/// 分享进度走 B 站网页链接而不是 `ykpili://`：自定义协议在 QQ 里不是可点链接。
+/// `p` / `t` 都是 B 站网页认的参数；装了 YKPili 用户脚本时，点开会把链接
+/// 转成自有深链交给客户端，没装脚本也能在网页里从这一秒接着看。
+pub(crate) fn video_page_url_at(bvid: &str, page: u32, start_secs: Option<f64>) -> String {
+    let mut url = video_page_url(bvid);
+    let mut query = Vec::new();
+    if page > 1 {
+        query.push(format!("p={page}"));
+    }
+    if let Some(seconds) = start_secs.filter(|seconds| seconds.is_finite() && *seconds > 0.0) {
+        query.push(format!("t={}", seconds.round() as u64));
+    }
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(&query.join("&"));
+    }
+    url
+}
+
 /// 腾讯 QQ 分享卡片链接。
 ///
 /// QQ 桌面版注册的 `tencent://` / `mqqapi://` 只能跳到指定聊天对象，
