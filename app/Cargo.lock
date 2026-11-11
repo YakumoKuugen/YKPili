@@ -8884,6 +8884,7 @@ dependencies = [
  "raw-window-handle",
  "winresource",
  "yk-components",
+ "yk-deeplink",
  "yk-domain",
  "yk-infra",
  "yk-library",
@@ -8898,6 +8899,15 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "yk-theme",
+]
+
+[[package]]
+name = "yk-deeplink"
+version = "0.1.0"
+dependencies = [
+ "objc2 0.6.5",
+ "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

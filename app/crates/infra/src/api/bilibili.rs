@@ -77,6 +77,17 @@ pub fn video_info(bvid: &str, img_key: &str, sub_key: &str, cookie: &str, wts: u
     }
 }
 
+/// 用旧式 av 号查视频详情。深链里出现 `av123` 时先转成 BV 再交给播放器。
+///
+/// 这个端点不需要 WBI 签名，冷启动时少一次 `nav` 请求。
+pub fn video_info_by_aid(aid: u64, cookie: &str) -> Request {
+    Request {
+        url: format!("{API_BASE}/x/web-interface/view?aid={aid}"),
+        cookie: cookie.to_string(),
+        name: "video_info_by_aid",
+    }
+}
+
 /// 视频标签（不需要 WBI 签名）。信息面板的标签行用它。
 pub fn video_tags(bvid: &str, cookie: &str) -> Request {
     Request {

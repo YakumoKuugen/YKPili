@@ -108,6 +108,20 @@ fribidi dav1d`。想自己管理工具链时可以先手动装好，脚本检测
 编译完会用 `scripts/libmpv_features.py verify` 核对指纹与体积预算；
 校验不过直接终止打包。强制重编：`./scripts/build-libmpv.sh --platform macos --force`。
 
+## 深链 / Universal Link
+
+`Info.plist` 已注册 `ykpili://` 自定义协议；签名脚本在提供真实证书时
+会自动附加 `YKPili.entitlements` 的 Associated Domains 权限。
+
+Universal Link 还需要：
+
+1. 在 `go.ykpili.app` 部署 `apple-app-site-association`（模板在本目录）；
+2. 把导出的 provisioning profile 放到 `packaging/macos/embedded.provisionprofile`，
+   打包时会复制进 `.app`；
+3. 从链接点击进入（不要在地址栏输入）。
+
+完整步骤见 [`docs/深链与UniversalLink.md`](../../docs/深链与UniversalLink.md)。
+
 ## 关于 mpv 的许可证
 
 裁剪版把 mpv（GPL-2.0-or-later）与 FFmpeg（LGPL-2.1-or-later，未启用 GPL 编码器）

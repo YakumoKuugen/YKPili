@@ -215,6 +215,28 @@ impl ReqwestClient {
         }
         Ok(bytes.to_vec())
     }
+
+    /// 跟随一次 HTTP 跳转，返回最终 URL。
+    ///
+    /// 深链场景专用：`b23.tv/xxxx` 只回 302，真正的 BV 号在 `Location`
+    /// 指向的页面里。reqwest 默认跟随跳转，`resp.url()` 就是终点。
+    pub fn resolve_redirect(&self, url: &str) -> Result<String, String> {
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            return Err("短链必须是 http(s) 地址".to_string());
+        }
+        let resp = self
+            .inner
+            .get(url)
+            .header("User-Agent", UA)
+            .header("Referer", "https://www.bilibili.com/")
+            .send()
+            .map_err(|error| format!("短链请求失败：{error}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("短链返回 HTTP {status}"));
+        }
+        Ok(resp.url().to_string())
+    }
 }
 
 impl HttpClient for ReqwestClient {
@@ -433,6 +455,28 @@ where
     parsed.data.ok_or_else(|| "视频详情缺少 data".to_string())
 }
 
+/// 旧式 `av` 号转 `BV` 号。深链 / 用户脚本可能给出 `av170001`。
+pub fn fetch_bvid_by_aid<C>(client: &C, aid: u64, cookie: &str) -> Result<String, String>
+where
+    C: HttpClient<Error = String>,
+{
+    if aid == 0 {
+        return Err("av 号不能为 0".to_string());
+    }
+    let req = bilibili::video_info_by_aid(aid, cookie);
+    let body = client.get(&req)?;
+    let parsed: VideoInfoResponse =
+        serde_json::from_str(&body).map_err(|e| format!("av 详情解析失败：{e}"))?;
+    if parsed.code != 0 {
+        return Err(format!("av 详情返回 code={}", parsed.code));
+    }
+    let data = parsed.data.ok_or_else(|| "av 详情缺少 data".to_string())?;
+    if data.bvid.trim().is_empty() {
+        return Err("av 详情没有返回 BV 号".to_string());
+    }
+    Ok(data.bvid)
+}
+
 /// 拉视频标签。标签接口是纯读、不需要 WBI；失败时由调用方退回分区名。
 pub fn fetch_video_tags<C>(client: &C, bvid: &str, cookie: &str) -> Result<Vec<String>, String>
 where
@@ -642,20 +686,42 @@ pub fn fetch_playback<C>(client: &C, bvid: &str, cookie: &str) -> Result<Playbac
 where
     C: HttpClient<Error = String>,
 {
+    fetch_playback_page(client, bvid, None, cookie)
+}
+
+/// 取流，可指定分 P（从 1 开始）。
+///
+/// 普通卡片 / 历史 / 收藏仍走 [`fetch_playback`]；网页深链里的 `?p=2`
+/// 走这里，避免「打开了视频却永远播第一 P」。
+pub fn fetch_playback_page<C>(
+    client: &C,
+    bvid: &str,
+    page: Option<u32>,
+    cookie: &str,
+) -> Result<PlaybackSource, String>
+where
+    C: HttpClient<Error = String>,
+{
     if bvid.trim().is_empty() {
         return Err("卡片没有 bvid，无法播放".into());
     }
     let (img, sub) = fetch_wbi_keys(client, cookie)?;
     let info = fetch_video_info_with_keys(client, bvid, cookie, &img, &sub)?;
-    let cid = if info.cid > 0 {
-        info.cid
-    } else {
-        info.pages
-            .iter()
-            .find(|p| p.cid > 0)
-            .map(|p| p.cid)
-            .unwrap_or(0)
-    };
+    // 指定了分 P 且详情里找得到，就用那一 P 的 cid；找不到退回默认 cid。
+    let requested_page = page
+        .filter(|page| *page >= 1)
+        .and_then(|page| info.pages.iter().find(|item| item.page == page as i32));
+    let cid = requested_page
+        .map(|page| page.cid)
+        .filter(|cid| *cid > 0)
+        .or_else(|| (info.cid > 0).then_some(info.cid))
+        .or_else(|| {
+            info.pages
+                .iter()
+                .find(|page| page.cid > 0)
+                .map(|page| page.cid)
+        })
+        .unwrap_or(0);
     if cid == 0 {
         return Err("视频详情没有 cid，无法取播放地址".into());
     }
@@ -680,9 +746,15 @@ where
     source.current_page = info
         .pages
         .iter()
-        .find(|page| page.cid == cid)
-        .map(|page| page.page)
+        .find(|item| item.cid == cid)
+        .map(|item| item.page)
         .unwrap_or(source.current_page);
+    // 分 P 的时长不一定等于整段视频时长；有精确值就覆盖。
+    if let Some(page) = info.pages.iter().find(|item| item.cid == cid) {
+        if page.duration > 0 {
+            source.duration_secs = page.duration;
+        }
+    }
     if source.bvid.trim().is_empty() {
         source.bvid = bvid.to_string();
     }
@@ -2144,6 +2216,55 @@ mod tests {
         assert_eq!(src.audio_url.as_deref(), Some("a80"));
         assert_eq!(src.duration_secs, 107);
         assert_eq!(src.owner_sign, "UP 的签名", "UP 主签名要带进信息面板");
+    }
+
+    #[test]
+    fn playback_page_picks_the_requested_part() {
+        struct MultiPartClient;
+        impl HttpClient for MultiPartClient {
+            type Error = String;
+            fn get(&self, req: &Request) -> Result<String, String> {
+                match req.name {
+                    "user_info" => Ok(
+                        r#"{"code":0,"data":{"wbi_img":{"img_url":"a.png","sub_url":"b.png"}}}"#
+                            .into(),
+                    ),
+                    "video_info" => Ok(
+                        r#"{"code":0,"data":{"bvid":"BV1","cid":41,"title":"T","duration":100,
+                            "pages":[{"cid":41,"page":1,"part":"P1","duration":100},
+                                     {"cid":42,"page":2,"part":"P2","duration":60}],
+                            "owner":{"mid":7,"name":"UP","face":""}}}"#
+                            .into(),
+                    ),
+                    "user_card" => Ok(r#"{"code":0,"data":{"card":{"sign":""}}}"#.into()),
+                    "play_url" => Ok(
+                        r#"{"code":0,"data":{"timelength":107000,"dash":{"video":[{"id":80,"baseUrl":"v80","codecs":"avc1","width":1920,"height":1080}],"audio":[{"id":30280,"baseUrl":"a80","codecs":"mp4a"}]}}}"#
+                            .into(),
+                    ),
+                    other => Err(format!("未预期请求：{other}")),
+                }
+            }
+        }
+        let src = fetch_playback_page(&MultiPartClient, "BV1", Some(2), "").unwrap();
+        assert_eq!(src.cid, 42, "应使用第 2 P 的 cid 取流");
+        assert_eq!(src.current_page, 2);
+        assert_eq!(src.duration_secs, 60, "分 P 时长不能沿用整段视频");
+    }
+
+    #[test]
+    fn av_number_resolves_to_bvid() {
+        struct AvClient;
+        impl HttpClient for AvClient {
+            type Error = String;
+            fn get(&self, req: &Request) -> Result<String, String> {
+                assert_eq!(req.name, "video_info_by_aid");
+                Ok(r#"{"code":0,"data":{"bvid":"BV1xx411c7mD","aid":170001}}"#.into())
+            }
+        }
+        assert_eq!(
+            fetch_bvid_by_aid(&AvClient, 170001, "").unwrap(),
+            "BV1xx411c7mD"
+        );
     }
 
     #[test]

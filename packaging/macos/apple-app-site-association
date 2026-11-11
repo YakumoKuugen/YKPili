@@ -1,0 +1,23 @@
+{
+  "applinks": {
+    "details": [
+      {
+        "appIDs": ["TEAMID.com.ykpili.app"],
+        "components": [
+          {
+            "/": "/video/*",
+            "comment": "分享链接：https://go.ykpili.app/video/BV1xx411c7mD?p=2&t=30"
+          },
+          {
+            "/": "/open",
+            "comment": "通用入口：https://go.ykpili.app/open?url=<encoded bilibili url>"
+          },
+          {
+            "/": "/search",
+            "comment": "搜索：https://go.ykpili.app/search?keyword=关键词"
+          }
+        ]
+      }
+    ]
+  }
+}

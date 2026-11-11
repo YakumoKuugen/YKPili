@@ -294,6 +294,15 @@ pub struct AppRoot {
     /// 系统「减少动效」轮询是否已启动（macOS/Windows 没有订阅通知）
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     motion_watchdog_started: bool,
+    /// 深链队列：Windows 管道线程 / macOS AppDelegate 回调往里写，
+    /// GPUI 主线程每 180ms 取一次。
+    deep_links: yk_deeplink::DeepLinkHandle,
+    /// 深链轮询任务只启动一次。
+    deep_link_watch_started: bool,
+    /// 当前展示的深链提示；None = 不显示。
+    deep_link_notice: Option<yk_components::deeplink::DeepLinkNotice>,
+    /// 提示代际：新链接覆盖旧提示时，旧定时器不能把新提示清掉。
+    deep_link_notice_generation: u64,
 }
 
 impl AppRoot {
@@ -2601,6 +2610,247 @@ impl AppRoot {
         }
     }
 
+    /// 启动深链轮询。每个 AppRoot 只挂一次。
+    ///
+    /// 平台线程只往队列里写字符串，真正「开播放器 / 切页面」必须回主线程，
+    /// 否则 GPUI 的 Entity 借用会跨线程炸掉。
+    fn start_deep_link_watch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.deep_link_watch_started {
+            return;
+        }
+        self.deep_link_watch_started = true;
+        let window_handle = window.window_handle();
+        let links = self.deep_links.clone();
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(180))
+                .await;
+            let incoming = links.drain();
+            if incoming.is_empty() {
+                continue;
+            }
+            // 浏览器把窗口留在后面时，用户需要看到应用主动弹出来。
+            let _ = window_handle.update(cx, |_, window, cx| {
+                window.activate_window();
+                cx.activate(true);
+            });
+            let alive = this.update(cx, |root, cx| root.handle_incoming_links(incoming, cx));
+            if alive.is_err() {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn handle_incoming_links(
+        &mut self,
+        incoming: Vec<yk_deeplink::IncomingLink>,
+        cx: &mut Context<Self>,
+    ) {
+        // 连续点两条链接时，最后一条才是用户真正想看的。
+        for item in incoming.into_iter().rev() {
+            let link = yk_deeplink::DeepLink::parse(&item.raw);
+            eprintln!(
+                "[deeplink] {}：{} -> {:?}",
+                item.source.label(),
+                item.raw,
+                link
+            );
+            match link {
+                yk_deeplink::DeepLink::Video(video) => {
+                    self.open_deep_link_video(video, cx);
+                    return;
+                }
+                yk_deeplink::DeepLink::ShortLink { url, .. } => {
+                    self.resolve_deep_link_short(url, cx);
+                    return;
+                }
+                yk_deeplink::DeepLink::Search { keyword, .. } => {
+                    self.open_deep_link_search(keyword, cx);
+                    return;
+                }
+                yk_deeplink::DeepLink::Unsupported { raw, reason } => {
+                    self.show_deep_link_notice(
+                        yk_components::deeplink::DeepLinkNotice::error(
+                            "无法打开这个深链",
+                            format!("{reason} · {raw}"),
+                        ),
+                        cx,
+                    );
+                    return;
+                }
+            }
+        }
+    }
+
+    fn open_deep_link_video(&mut self, video: yk_deeplink::VideoLink, cx: &mut Context<Self>) {
+        if let Some(bvid) = video.bvid.clone() {
+            self.open_deep_link_player(bvid, video.page, video.start_secs, cx);
+            return;
+        }
+        if let Some(aid) = video.avid {
+            let page = video.page;
+            let start = video.start_secs;
+            self.show_deep_link_notice(
+                yk_components::deeplink::DeepLinkNotice::info(
+                    "正在解析 av 号",
+                    format!("av{aid} · 转成 BV 号后开始播放"),
+                ),
+                cx,
+            );
+            cx.spawn(async move |this, cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let client = yk_infra::api::client::ReqwestClient::new()?;
+                        yk_infra::api::client::fetch_bvid_by_aid(&client, aid, "")
+                    })
+                    .await;
+                let _ = this.update(cx, |root, cx| match result {
+                    Ok(bvid) => root.open_deep_link_player(bvid, page, start, cx),
+                    Err(error) => root.show_deep_link_notice(
+                        yk_components::deeplink::DeepLinkNotice::error("av 号解析失败", error),
+                        cx,
+                    ),
+                });
+            })
+            .detach();
+            return;
+        }
+
+        self.show_deep_link_notice(
+            yk_components::deeplink::DeepLinkNotice::error(
+                "深链里没有视频号",
+                "需要 BV 号或 av 号".to_string(),
+            ),
+            cx,
+        );
+    }
+
+    /// 真正打开播放器。所有入口（BV / av / 短链）最后都汇到这里。
+    fn open_deep_link_player(
+        &mut self,
+        bvid: String,
+        page: u32,
+        start_secs: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_player(cx);
+        self.player_on_top = true;
+        self.close_player_requested = false;
+        self.player_page_hidden = false;
+        // 深链是用户刚刚发起的动作：挡路的浮层先收掉，别让播放器藏在设置页后面。
+        self.settings = None;
+        self.account = None;
+        self.login = None;
+        self.dynamic_detail = None;
+        self.up_profile = None;
+        self.search.open = false;
+        self.search_closing = false;
+        self.search_panel_pending = false;
+        self.search_panel_open = false;
+        self.search_panel_closing = false;
+
+        if let Some(player) = self.playing.clone() {
+            let page = (page > 1).then_some(page);
+            let bvid_for_player = bvid.clone();
+            let _ = player.update(cx, |view, cx| {
+                view.open_bvid_at_page(bvid_for_player, page, start_secs, cx);
+            });
+        }
+
+        let mut detail = bvid;
+        if page > 1 {
+            detail.push_str(&format!(" · P{page}"));
+        }
+        if let Some(seconds) = start_secs.filter(|seconds| *seconds > 0.0) {
+            detail.push_str(&format!(
+                " · 从 {} 开始",
+                yk_domain::format::duration(seconds.round() as u64)
+            ));
+        }
+        self.show_deep_link_notice(
+            yk_components::deeplink::DeepLinkNotice::success("已从浏览器转到 YKPili", detail),
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn resolve_deep_link_short(&mut self, url: String, cx: &mut Context<Self>) {
+        self.show_deep_link_notice(
+            yk_components::deeplink::DeepLinkNotice::info(
+                "正在解析 B 站短链",
+                url.clone(),
+            ),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = yk_infra::api::client::ReqwestClient::new()?;
+                    client.resolve_redirect(&url)
+                })
+                .await;
+            let _ = this.update(cx, |root, cx| match result {
+                Ok(final_url) => match yk_deeplink::DeepLink::parse(&final_url) {
+                    yk_deeplink::DeepLink::Video(video) => {
+                        root.open_deep_link_video(video, cx);
+                    }
+                    _ => root.show_deep_link_notice(
+                        yk_components::deeplink::DeepLinkNotice::error(
+                            "短链没有指向视频",
+                            final_url,
+                        ),
+                        cx,
+                    ),
+                },
+                Err(error) => root.show_deep_link_notice(
+                    yk_components::deeplink::DeepLinkNotice::error("短链解析失败", error),
+                    cx,
+                ),
+            });
+        })
+        .detach();
+    }
+
+    fn open_deep_link_search(&mut self, keyword: String, cx: &mut Context<Self>) {
+        eprintln!("[deeplink] 搜索：{keyword}");
+        self.search_submit(keyword.clone(), cx);
+        // `search_submit` 的默认组装行为是弹结果浮窗；深链应当落到结果页。
+        self.page = Some(Route::Search);
+        self.search_panel_pending = false;
+        self.search_panel_open = false;
+        self.search_panel_closing = false;
+        self.show_deep_link_notice(
+            yk_components::deeplink::DeepLinkNotice::success("已从浏览器转到 YKPili", format!("搜索：{keyword}")),
+            cx,
+        );
+    }
+
+    fn show_deep_link_notice(
+        &mut self,
+        notice: yk_components::deeplink::DeepLinkNotice,
+        cx: &mut Context<Self>,
+    ) {
+        self.deep_link_notice = Some(notice);
+        self.deep_link_notice_generation = self.deep_link_notice_generation.wrapping_add(1);
+        let generation = self.deep_link_notice_generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(3200))
+                .await;
+            let _ = this.update(cx, |root, cx| {
+                if root.deep_link_notice_generation == generation {
+                    root.deep_link_notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     pub fn new() -> Self {
         eprintln!("[app] AppRoot::new 被调用");
         Self {
@@ -2695,6 +2945,10 @@ impl AppRoot {
             quit_hint_generation: 0,
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             motion_watchdog_started: false,
+            deep_links: yk_deeplink::handle(),
+            deep_link_watch_started: false,
+            deep_link_notice: None,
+            deep_link_notice_generation: 0,
         }
     }
 }
@@ -3300,6 +3554,9 @@ impl Render for AppRoot {
                 }
             }
         }
+
+        // 深链轮询：平台线程写入队列，主线程在这里消费。
+        self.start_deep_link_watch(window, cx);
 
         // 窗口可见性：最小化 / 被完全遮挡时停掉页面侧的动画与补帧。
         // 失焦不算 —— 窗口还在屏幕上，内容该照常刷新。
@@ -3925,7 +4182,19 @@ impl Render for AppRoot {
             .children(search_results)
             // 搜索浮层永远最上层：播放器 / 账号面板 / 退出提示都压在它之下，
             // 开启时连遮罩一起盖住整窗。
-            .children(search_overlay);
+            .children(search_overlay)
+            // 深链提示：挂在最上层，往下 3 秒自动消失。
+            .children(self.deep_link_notice.as_ref().map(|notice| {
+                div()
+                    .absolute()
+                    .top(px(TOP_BAR_HEIGHT + SPACE_3))
+                    .left_0()
+                    .right_0()
+                    .flex()
+                    .justify_center()
+                    .child(yk_components::deeplink::DeepLinkToast::new(t, notice).build())
+                    .into_any_element()
+            }));
 
         match self.remote_image_cache.clone() {
             Some(cache) => root.image_cache(cache),

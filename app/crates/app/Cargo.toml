@@ -21,6 +21,7 @@ yk-player = { path = "../player" }
 yk-library = { path = "../library" }
 yk-shell = { path = "../shell" }
 yk-infra = { path = "../infra" }
+yk-deeplink = { path = "../deeplink" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # 取 HWND，把系统标题栏切成深色（应用是深色主题，白标题栏太刺眼）。

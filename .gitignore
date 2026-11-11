@@ -483,3 +483,6 @@ __pycache__/
 # libmpv 裁剪：本地产物与源码/构建缓存
 /packaging/macos/vendor/
 /packaging/libmpv/build/
+
+# macOS 签名材料（含 Team ID / 证书信息，不入库）
+/packaging/macos/embedded.provisionprofile

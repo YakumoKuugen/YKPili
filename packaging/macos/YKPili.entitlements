@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Universal Link 需要的 Associated Domains 权限。
+
+  生效条件（缺一不可）：
+  1. 用付费 Apple Developer 账号的证书签名，并带对应 provisioning profile；
+  2. 在 https://go.ykpili.app/.well-known/apple-app-site-association
+     部署 apple-app-site-association，content-type 为 application/json；
+  3. AASA 里的 appID 与 TEAMID / Bundle ID 完全一致；
+  4. 用户是通过「点击链接」进入，而不是在地址栏里输入。
+
+  B 站域名不受本项目控制，不能给 bilibili.com 注册 Universal Link；
+  B 站链接在浏览器里一律走 ykpili:// 自定义协议。
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.developer.associated-domains</key>
+	<array>
+		<string>applinks:go.ykpili.app</string>
+	</array>
+</dict>
+</plist>

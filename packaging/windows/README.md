@@ -106,6 +106,9 @@ python -c "from PIL import Image; im=Image.open('packaging/macos/AppIcon.icns').
   `X:\Program Files (x86)\YKPili` / `X:\YKPili`（只认带 `ykpili.exe` 的目录）。
   用户显式传 `/D=...` 时不会被覆盖；
 - 开始菜单 + 桌面快捷方式；
+- 注册 `ykpili://` 深链协议（`HKCU\Software\Classes\ykpili`），卸载时一并清理；
+  Windows 端单实例转发与浏览器脚本用法见
+  [`docs/深链与UniversalLink.md`](../../docs/深链与UniversalLink.md)；
 - 卸载程序在安装目录，注册表写在 `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\YKPili`；
 - 卸载不删除 `%APPDATA%\YKPili` 与缓存。
 

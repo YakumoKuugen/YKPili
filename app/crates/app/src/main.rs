@@ -23,19 +23,49 @@ use yk_app::AppRoot;
 /// 见下方 `main` 的 iOS 分支。
 #[cfg(not(target_os = "ios"))]
 fn main() {
+    // 深链单实例：浏览器拉起第二个进程时，先转发 URL 再退出。
+    // 必须放在 error_log::init 之前 —— 否则第二个进程会把正在运行的
+    // 主进程错误日志清空。
+    if yk_deeplink::forward_link_before_ui() {
+        return;
+    }
+
     // 错误日志：启动即清空上一次会话，之后只在报错时写入。
     // 必须在任何网络 / 播放代码之前初始化，panic hook 才能覆盖整段生命周期。
     yk_infra::error_log::init();
 
-    application()
-        // 关键：GPUI 默认是 NullHttpClient（不发请求、静默失败），
-        // 换成真实的客户端后 img() 才能拉到图床上的封面。
-        .with_http_client(yk_app::http::YkHttpClient::shared())
+    let app = application();
+
+    // macOS 自定义 URL Scheme（Info.plist 的 CFBundleURLTypes）：
+    // AppKit 把 URL 交给 GPUI，这里转进深链队列。
+    // Universal Link 由 yk-deeplink 注入的 AppDelegate 方法捕获，也走同一队列。
+    app.on_open_urls(|urls| {
+        for url in urls {
+            let lower = url.to_ascii_lowercase();
+            let is_ours = lower.starts_with("ykpili:")
+                || lower.contains("bilibili.com/")
+                || lower.contains("b23.tv/")
+                || lower.contains("bili2233.cn/")
+                || lower.contains("go.ykpili.app/")
+                || lower.contains("ykpili.app/");
+            if !is_ours {
+                continue;
+            }
+            eprintln!("[deeplink] macOS 收到 URL：{url}");
+            yk_deeplink::ingest(url, yk_deeplink::LinkSource::MacOpenUrl);
+        }
+    });
+
+    // 关键：GPUI 默认是 NullHttpClient（不发请求、静默失败），
+    // 换成真实的客户端后 img() 才能拉到图床上的封面。
+    app.with_http_client(yk_app::http::YkHttpClient::shared())
         // 卡片封面操作图标（clock / download / message-circle 等）不在
         // 组件库的默认子集里，必须注册完整图标目录，否则 `Icon` 取不到 SVG。
         .with_assets(assets::AllAssets)
         .run(|cx| {
             init(cx);
+            // 注册协议 / 消费命令行 / 启动命名管道 / 注入 Universal Link。
+            let _ = yk_deeplink::install();
 
             // 首屏策略：先把「能立刻显示的内容」铺上，网络请求移到窗口里异步做。
             // - 有缓存：先显示缓存，请求回来后原地替换；

@@ -150,6 +150,13 @@ Section "YKPili（必需）" SecMain
   WriteRegStr HKCU "Software\YKPili" "InstallDir" "$INSTDIR"
   WriteRegStr HKCU "Software\YKPili" "Version" "${APP_VERSION}"
 
+  ; ykpili:// 深链协议（当前用户，无需管理员权限）。
+  ; 应用启动时也会自愈式注册一次，这里注册是为了「装完就能从浏览器拉起」。
+  WriteRegStr HKCU "Software\Classes\ykpili" "" "URL:YKPili Protocol"
+  WriteRegStr HKCU "Software\Classes\ykpili" "URL Protocol" ""
+  WriteRegStr HKCU "Software\Classes\ykpili\DefaultIcon" "" '"$INSTDIR\ykpili.exe",0'
+  WriteRegStr HKCU "Software\Classes\ykpili\shell\open\command" "" '"$INSTDIR\ykpili.exe" "%1"'
+
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YKPili" "DisplayName" "YKPili"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YKPili" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YKPili" "Publisher" "YKPili"
@@ -171,4 +178,5 @@ Section "Uninstall"
 
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\YKPili"
   DeleteRegKey HKCU "Software\YKPili"
+  DeleteRegKey HKCU "Software\Classes\ykpili"
 SectionEnd

@@ -11,6 +11,7 @@
 
 pub mod avatar;
 pub mod cover;
+pub mod deeplink;
 pub mod media;
 pub mod gallery;
 pub mod status;

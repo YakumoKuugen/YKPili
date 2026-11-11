@@ -8,11 +8,12 @@
 
 | 路径 | 说明 |
 | --- | --- |
-| `app/` | **正式工程**：Cargo workspace（`app` / `theme` / `components` / `player` / `library` / `shell` / `core` / `infra`，见 `docs/代码架构.md`） |
+| `app/` | **正式工程**：Cargo workspace（`app` / `theme` / `components` / `player` / `library` / `shell` / `core` / `infra` / `deeplink`，见 `docs/代码架构.md`） |
 | `demos/` | **Demo / 验证工程**：各自独立，有单独的 `Cargo.toml`、`Cargo.lock` 与构建缓存 |
 | `docs/` | **文档**：UX 设计预览、调研、截图、技能与归档 |
 | `scripts/` | 构建、打包、图标脚本 |
 | `packaging/` | 打包资源（`macos/Info.plist`、`macos/AppIcon.icns`、`windows/` 图标与 NSIS 脚本） |
+| `userscripts/` | 浏览器用户脚本（`ykpili-deeplink.user.js`：B 站视频链接 → 客户端） |
 | `dist/` | 构建产物（`.app` / `.dmg` / Windows zip / setup.exe，不入库） |
 
 ## 常用命令
@@ -87,5 +88,6 @@ cargo run --bin decode_test
 - `docs/macos-零拷贝视频播放器踩坑全记录.md` — 播放内核调研
 - `docs/macos-音频设备掉线崩溃.md` — 拔耳机闪退的定位与 libmpv 补丁
 - `docs/播放器内存排查.md` — 内存涨到 2.7 G 的定位：无界帧队列与每帧分配
+- `docs/深链与UniversalLink.md` — Windows 深链 / macOS Universal Link / 浏览器用户脚本
 - `docs/skills/` — 可复用的技能说明与参考
 - `docs/archive/` — 历史版本与旧 Avalonia 工程归档

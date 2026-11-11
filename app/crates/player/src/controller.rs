@@ -34,6 +34,21 @@ impl PlayerView {
     /// `seed` 来自「观看历史」页：那条记录本身就写着上次看到哪，
     /// 直接拿来当起播位置，不用等本地记录或再发一次请求。
     pub fn open_bvid_at(&mut self, bvid: String, seed: Option<f64>, cx: &mut Context<Self>) {
+        self.open_bvid_at_page(bvid, None, seed, cx);
+    }
+
+    /// 打开指定分 P 的视频。
+    ///
+    /// `page` 是 B 站网页里的 `?p=`（从 1 开始）；`None` / 1 走默认第一 P。
+    /// 深链与用户脚本会把网页参数带进来，否则多 P 视频永远只能播第一集。
+    pub fn open_bvid_at_page(
+        &mut self,
+        bvid: String,
+        page: Option<u32>,
+        seed: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        let page = page.filter(|page| (1..=9_999).contains(page));
         // 换源前先把上一条的关闭上报补掉，否则连续点两个视频时
         // 第一个只留下打开时的 0s 那一拍。
         self.flush_history_report();
@@ -175,7 +190,8 @@ impl PlayerView {
                             let _ = history_tx.send(progress);
                         });
                     }
-                    let source = yk_infra::api::client::fetch_playback(&client, &bvid, &cookie);
+                    let source =
+                        yk_infra::api::client::fetch_playback_page(&client, &bvid, page, &cookie);
                     // 历史查询**不能拖住起播**：它只决定「从第几秒开始」，
                     // 拿不到就从 0 / 本地续播记录开始。以前这里等 2 秒，
                     // 相当于每次开播都先站 2 秒——这是我们比别家慢的主因。

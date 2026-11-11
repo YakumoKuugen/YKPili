@@ -83,6 +83,13 @@ install -m 755 "$BIN" "$APP/Contents/MacOS/$EXECUTABLE"
 cp packaging/macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# Universal Link / Associated Domains 需要 provisioning profile 才能生效。
+# 把开发者导出的 profile 放到 packaging/macos/embedded.provisionprofile，
+# 打包时会自动放进 .app；没有就跳过（只影响 Universal Link）。
+if [[ -f "packaging/macos/embedded.provisionprofile" ]]; then
+    cp "packaging/macos/embedded.provisionprofile" "$APP/Contents/embedded.provisionprofile"
+fi
+
 sed \
     -e "s|__APP_NAME__|$APP_NAME|g" \
     -e "s|__EXECUTABLE__|$EXECUTABLE|g" \
@@ -145,12 +152,20 @@ else
 fi
 
 # ---------- 签名 ----------
+APP_ENTITLEMENTS=()
 if [[ "$SIGN_IDENTITY" == "-" ]]; then
     SIGN_ARGS=(--force --sign -)
     echo "==> ad-hoc 签名"
 else
     SIGN_ARGS=(--force --sign "$SIGN_IDENTITY" --options runtime --timestamp)
     echo "==> 使用证书签名：$SIGN_IDENTITY"
+    # Universal Link 依赖 Associated Domains 权限；ad-hoc 签名没有
+    # provisioning profile，加上反而会让 codesign 失败，所以只在真证书时附加。
+    ENTITLEMENTS="$ROOT/packaging/macos/YKPili.entitlements"
+    if [[ -f "$ENTITLEMENTS" ]]; then
+        APP_ENTITLEMENTS=(--entitlements "$ENTITLEMENTS")
+        echo "==> 附加 Associated Domains 权限（Universal Link）"
+    fi
 fi
 
 if [[ -d "$APP/Contents/Frameworks" ]]; then
@@ -158,7 +173,7 @@ if [[ -d "$APP/Contents/Frameworks" ]]; then
         codesign "${SIGN_ARGS[@]}" "$lib"
     done < <(find "$APP/Contents/Frameworks" -type f -name "*.dylib" -print0)
 fi
-codesign "${SIGN_ARGS[@]}" "$APP"
+codesign "${SIGN_ARGS[@]}" "${APP_ENTITLEMENTS[@]}" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 
 # ---------- DMG ----------
