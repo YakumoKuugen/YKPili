@@ -87,7 +87,9 @@ pub fn install() {
 
     let selector = sel!(application:continueUserActivity:restorationHandler:);
     let types = c"B@:@@@?";
-    let imp: objc2::ffi::IMP = Some(unsafe {
+    // objc2 0.6 起 `Imp` 是不可空的函数指针（`runtime::Imp`），
+    // 已弃用的 `ffi::IMP` 是 `Option<...>`，不能再直接传给 `class_addMethod`。
+    let imp: objc2::runtime::Imp = unsafe {
         std::mem::transmute::<
             unsafe extern "C-unwind" fn(
                 *mut AnyObject,
@@ -96,9 +98,9 @@ pub fn install() {
                 *mut AnyObject,
                 *mut AnyObject,
             ) -> bool,
-            unsafe extern "C-unwind" fn(),
+            objc2::runtime::Imp,
         >(continue_user_activity)
-    });
+    };
 
     let added = unsafe {
         objc2::ffi::class_addMethod(
@@ -108,7 +110,7 @@ pub fn install() {
             types.as_ptr(),
         )
     };
-    if added != 0 {
+    if added.as_bool() {
         eprintln!("[deeplink] 已注入 Universal Link 回调");
     } else {
         eprintln!("[deeplink] Universal Link 回调已存在，跳过");
