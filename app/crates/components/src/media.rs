@@ -4,9 +4,7 @@
 
 use gpui::prelude::*;
 use gpui::*;
-use gpui::prelude::*;
-use gpui::*;
-use gpui::{img, px, AnyElement, App, Hsla, ImageSource, ObjectFit, StatefulInteractiveElement as _, Window};
+use gpui::{img, px, AnyElement, App, Hsla, ImageSource, ObjectFit, Window};
 
 /// 铺满父容器的封面图；`url` 为空时返回 `None`，由调用方保留占位层。
 pub fn cover_image(url: &str) -> Option<AnyElement> {
