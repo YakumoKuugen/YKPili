@@ -395,10 +395,27 @@ impl PlayerView {
 
     /// 打开视频后读一次 UP 主关系：是否已关注 + 粉丝数。
     ///
-    /// 两个请求都放后台、失败静默：
-    /// - 关系状态要登录态，未登录直接跳过（按钮保持「关注」，点了会提示登录）；
-    /// - 粉丝数是公开接口，未登录也能显示。
+    /// 视频的关注态由 `archive/relation` 的 `attention` 带回来（见
+    /// [`Self::spawn_interaction_state`]），这里只补粉丝数，不再重复请求。
+    /// 直播没有 archive 请求，走 [`Self::spawn_live_follow_state`]。
     pub(crate) fn spawn_follow_state(&mut self, owner_mid: i64, cx: &mut Context<Self>) {
+        self.spawn_follow_state_inner(owner_mid, false, cx);
+    }
+
+    /// 直播：只有来源没给出关注状态时，才补查一次 `x/relation?fid=`。
+    ///
+    /// 从「关注直播」列表进来的房间已经知道是已关注，只需要粉丝数。
+    pub(crate) fn spawn_live_follow_state(&mut self, owner_mid: i64, cx: &mut Context<Self>) {
+        let need_follow = !self.follow_known;
+        self.spawn_follow_state_inner(owner_mid, need_follow, cx);
+    }
+
+    fn spawn_follow_state_inner(
+        &mut self,
+        owner_mid: i64,
+        fetch_follow: bool,
+        cx: &mut Context<Self>,
+    ) {
         if owner_mid <= 0 {
             // 没有 uid 就无从查起：保持未知，点击时给出人话提示。
             return;
@@ -412,10 +429,28 @@ impl PlayerView {
                 .spawn(async move {
                     let client = yk_infra::api::client::ReqwestClient::new()
                         .map_err(|error| error.to_string())?;
-                    // 关注状态不再单独发 `x/relation?fid`：同一次开播的
-                    // `archive/relation` 已经把 `attention` 带回来了。
-                    // 这里只补粉丝数（那是另一个接口的字段）。
-                    let followed: Option<bool> = None;
+                    // 直播才查关注态：点播已经在 archive/relation 里拿到权威值。
+                    let followed = if fetch_follow && !cookie.trim().is_empty() {
+                        match yk_infra::api::client::fetch_followed(
+                            &client, &cookie, owner_mid,
+                        ) {
+                            Ok(followed) => {
+                                eprintln!(
+                                    "[follow] 关注状态：mid={owner_mid} followed={followed}"
+                                );
+                                Some(followed)
+                            }
+                            Err(error) => {
+                                yk_infra::error_log::error(
+                                    "follow",
+                                    format!("关注状态读取失败：{error}"),
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     let fans = match yk_infra::api::client::fetch_relation_stat(
                         &client, &cookie, owner_mid,
                     ) {

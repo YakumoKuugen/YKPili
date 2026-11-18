@@ -34,6 +34,7 @@ fn live_room() -> LiveRoom {
         watched_full: "3.0万人看过".into(),
         online: 999,
         live_status: 1,
+        followed: Some(true),
         started_at: Some(1_793_000_000),
     }
 }

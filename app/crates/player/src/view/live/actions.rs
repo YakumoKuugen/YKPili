@@ -27,6 +27,10 @@ impl PlayerView {
             room.room_id, room.title
         );
         self.live = Some(Box::new(LiveState::from_room(&room)));
+        // 关注直播列表里的房间天然已关注：直接点亮按钮，免一次 `x/relation`。
+        // 来源未知（None）时才在取流成功后补查。
+        self.followed = room.followed.unwrap_or(false);
+        self.follow_known = room.followed.is_some();
         self.loading_source = true;
         self.model.clear_error();
         self.model.state.playing = true;
@@ -404,7 +408,7 @@ impl PlayerView {
                     }
                 }
                 if uid_changed {
-                    view.spawn_follow_state(info.uid, cx);
+                    view.spawn_live_follow_state(info.uid, cx);
                 }
                 cx.notify();
             });
@@ -492,7 +496,11 @@ impl PlayerView {
         quality_switch: bool,
         cx: &mut Context<Self>,
     ) {
-        let uid = playback.uid;
+        let uid = if playback.uid > 0 {
+            playback.uid
+        } else {
+            self.live.as_ref().map(|live| live.uid).unwrap_or(0)
+        };
         eprintln!(
             "[live] 取流成功：room={} 协议={} qn={} title={}",
             playback.room_id,
@@ -564,7 +572,7 @@ impl PlayerView {
         }
         self.source = Some(source);
         // 关注按钮 / 粉丝数：直播只保留「关注主播」这一项互动。
-        self.spawn_follow_state(uid, cx);
+        self.spawn_live_follow_state(uid, cx);
         if !quality_switch {
             let need_chat = self
                 .live

@@ -706,6 +706,12 @@ impl PlayerView {
         self.control_bar_model().live.is_some()
     }
 
+    /// 测试入口：关注按钮状态（followed, known）。
+    #[doc(hidden)]
+    pub fn test_follow_state(&self) -> (bool, bool) {
+        (self.followed, self.follow_known)
+    }
+
     /// 测试入口：不取流，直接把视图切成直播会话。
     #[doc(hidden)]
     pub fn test_set_live(&mut self, room_id: i64) {

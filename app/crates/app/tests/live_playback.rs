@@ -26,6 +26,7 @@ fn live_room() -> LiveRoom {
         watched_full: "3.0万人看过".into(),
         online: 999,
         live_status: 1,
+        followed: Some(true),
         started_at: Some(1_793_000_000),
     }
 }
@@ -85,6 +86,8 @@ fn clicking_a_live_card_opens_the_player_in_live_mode(cx: &mut TestAppContext) {
     assert_eq!(room_id, Some(1001));
     assert_eq!(tabs, vec!["弹幕", "直播信息"]);
     assert!(control_live, "控制栏应换成 LIVE 形态");
+    // 关注直播列表天然已关注：按钮应直接是「已关注」，不再等关系接口。
+    assert_eq!(player.read_with(&cx, |player, _| player.test_follow_state()), (true, true));
 
     // 侧边面板聊天：塞两条消息后重绘，确认列表能真实排版（不连网络）。
     player.update(&mut cx, |player, _| {

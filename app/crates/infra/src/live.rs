@@ -43,6 +43,11 @@ pub struct LiveRoom {
     pub online: u64,
     /// 1 = 在播。
     pub live_status: i64,
+    /// 数据源能直接给出的关注状态。
+    ///
+    /// 关注直播列表里的房间**天然都是已关注**（接口只返回关注中的在播房间），
+    /// 播放器据此直接点亮关注按钮，不再额外请求 `x/relation`。
+    pub followed: Option<bool>,
     /// 开播时间（Unix 秒）。
     pub started_at: Option<u64>,
 }
@@ -315,6 +320,8 @@ impl LiveRoom {
             live_status: opt_num_in(&sources, "live_status")
                 .or_else(|| opt_num_in(&sources, "status"))
                 .unwrap_or(1) as i64,
+            // 这个列表本身就是「关注中的直播」，无需再查关系。
+            followed: Some(true),
             started_at,
         })
     }
@@ -520,6 +527,8 @@ mod tests {
         assert_eq!(first.watched, 30000);
         assert_eq!(first.watched_text, "3.0万");
         assert_eq!(first.watched_full, "3.0万人看过");
+        // 关注直播列表天然已关注，播放器据此免掉一次关系查询。
+        assert_eq!(first.followed, Some(true));
         assert_eq!(
             first.cover_thumb_url(),
             "https://i0.hdslb.com/bfs/live/room_cover.jpg@480w_270h_1c.webp"
