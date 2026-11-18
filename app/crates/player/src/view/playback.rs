@@ -46,6 +46,7 @@ impl PlayerView {
             720,
             if is_live { 0.0 } else { self.start_position },
             referer.to_string(),
+            is_live,
         );
         if worker.is_none() {
             // 线程都没起来：这是明确的「无法播放」，必须落错误日志并给出界面提示。
@@ -124,6 +125,7 @@ impl PlayerView {
                         match w.latest() {
                             Some(crate::video_worker::WorkerFrame::Frame(buf, t)) => {
                                 view.current = Some(buf);
+                                view.last_frame_at = std::time::Instant::now();
                                 // 首帧到了：本次播放在正常出画面，清掉无帧告警。
                                 view.first_frame_seen = true;
                                 view.no_frame_logged = false;
@@ -148,6 +150,7 @@ impl PlayerView {
                             // 只是没有新画面。这里**不** notify：没人看画面，
                             // 每次位置更新都重绘整窗只是白烧 CPU。
                             Some(crate::video_worker::WorkerFrame::Position(t)) => {
+                                view.last_frame_at = std::time::Instant::now();
                                 view.play_time = t;
                                 view.model.state.position_secs = t;
                                 view.ensure_danmaku_ahead(cx);
@@ -162,6 +165,21 @@ impl PlayerView {
                     // 播完自动收起：开关关掉时只停在最后一帧，等用户自己关。
                     if finished && !view.finish_handled && !view.closing && !view.scrubbing {
                         view.on_playback_finished(cx);
+                    }
+                    // 直播断流：FLV 的 duration 不可信，只有连续 8s 没有新帧
+                    // （位置包也没有）才认定为断流 / 下播。
+                    if view.is_live()
+                        && view.model.state.playing
+                        && !view.loading_source
+                        && view.visibility.is_visible()
+                        && !view.finish_handled
+                        && view.last_frame_at.elapsed() >= std::time::Duration::from_secs(8)
+                    {
+                        eprintln!(
+                            "[live] 连续 8s 没有新帧，按断流处理（room={:?}）",
+                            view.live.as_ref().map(|live| live.room_id)
+                        );
+                        view.on_live_finished(cx);
                     }
                     if got {
                         received += 1;

@@ -446,6 +446,11 @@ pub struct PlayerView {
     first_frame_seen: bool,
     /// 本次播放是否已经为「长时间没有首帧」写过错误日志（避免每 2 秒重复写）。
     no_frame_logged: bool,
+    /// 最近一次从解码线程收到帧 / 位置的时间。
+    ///
+    /// 直播不能拿 mpv 的 `duration` 判结束：FLV 常带一个有限时长，
+    /// 播到那个点会误报 EOF。直播只在「确实连续若干秒没有新帧」时才算断流。
+    last_frame_at: std::time::Instant,
     /// 当前卡片的播放源；None = 还没点卡片 / 正在请求。
     source: Option<yk_domain::playback::PlaybackSource>,
     /// 正在后台取播放地址。
@@ -775,6 +780,7 @@ impl PlayerView {
             tried_worker: false,
             first_frame_seen: false,
             no_frame_logged: false,
+            last_frame_at: std::time::Instant::now(),
             source: None,
             loading_source: false,
             history_report: None,

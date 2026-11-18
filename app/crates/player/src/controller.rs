@@ -87,6 +87,7 @@ impl PlayerView {
         self.tried_worker = false;
         self.first_frame_seen = false;
         self.no_frame_logged = false;
+        self.last_frame_at = std::time::Instant::now();
         self.play_time = 0.0;
         self.model.state.position_secs = 0.0;
         self.model.state.duration_secs = 0.0;
@@ -2389,6 +2390,13 @@ impl PlayerView {
     pub(crate) fn on_playback_finished(&mut self, cx: &mut Context<Self>) {
         // 直播断流 / 下播：绝不自动关窗，改为断流浮层等用户选择。
         if self.is_live() {
+            // 直播启动初期 / 用户暂停时没有帧；mpv 还可能对 FLV 报一个
+            // 假的有限 duration 并触发 EOF。只有画面确实停了才认断流。
+            if !self.model.state.playing
+                || self.last_frame_at.elapsed() < std::time::Duration::from_secs(6)
+            {
+                return;
+            }
             self.on_live_finished(cx);
             return;
         }
@@ -3098,6 +3106,8 @@ impl PlayerView {
             worker.set_paused(!self.model.state.playing);
         }
         if self.model.state.playing {
+            // 从暂停恢复：把「最近一帧」时间重置，避免断流看门狗拿暂停前的旧时间戳误判。
+            self.last_frame_at = std::time::Instant::now();
             // 起播即藏：黑框不挡画面；鼠标一动会重新浮出。
             window.focus(&self.focus_handle, cx);
             self.hide_controls(cx);

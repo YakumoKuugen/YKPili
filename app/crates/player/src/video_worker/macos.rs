@@ -75,7 +75,15 @@ pub struct FrameWorker {
 impl FrameWorker {
     /// 启动渲染线程。失败（找不到 libmpv / 打不开文件）返回 `None`。
     pub fn spawn(video: String, width: u32, height: u32) -> Option<Self> {
-        Self::spawn_with_audio(video, None, width, height, 0.0, "https://www.bilibili.com/".to_string())
+        Self::spawn_with_audio(
+            video,
+            None,
+            width,
+            height,
+            0.0,
+            "https://www.bilibili.com/".to_string(),
+            false,
+        )
     }
 
     /// 启动渲染线程；DASH 视频把独立音轨一起交给 mpv。
@@ -94,6 +102,8 @@ impl FrameWorker {
         start_secs: f64,
         // HTTP Referer：点播主站域名，直播 live.bilibili.com。
         referer: String,
+        // 直播：mpv 会给 FLV 一个假的有限 duration，不能拿它判结束。
+        is_live: bool,
     ) -> Option<Self> {
         // 队列**必须有界**：一帧 1080p 的 CVPixelBuffer 约 3 MB，4K 约 12 MB。
         // 无界 channel 在 UI 线程卡顿（切页、解码封面、系统调度）时会按 60fps
@@ -191,8 +201,10 @@ impl FrameWorker {
                     // 不能等 `latest()` 被取走才知道放完了。
                     let eof_reached = player.get_property_flag("eof-reached").unwrap_or(false);
                     let duration = player.get_property_double("duration").unwrap_or(0.0);
+                    // 直播不信任 duration / eof：FLV 常带 30s 左右的假时长，
+                    // 播到那里会误报「已结束」。断流由 UI 的「连续无新帧」检测。
                     eof_in_thread.store(
-                        yk_domain::player::is_playback_finished(t, duration, eof_reached),
+                        !is_live && yk_domain::player::is_playback_finished(t, duration, eof_reached),
                         Ordering::Relaxed,
                     );
                     // 窗口不可见（最小化 / 被完全遮挡）：不出帧。

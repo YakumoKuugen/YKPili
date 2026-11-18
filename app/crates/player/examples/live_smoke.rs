@@ -47,6 +47,7 @@ fn run() {
         720,
         0.0,
         "https://live.bilibili.com/".to_string(),
+        true,
     );
     let Some(worker) = worker else {
         println!("FAIL：渲染线程启动失败");
@@ -54,11 +55,21 @@ fn run() {
     };
     worker.set_muted(true);
     worker.set_volume(0.0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let secs = std::env::var("YK_LIVE_SMOKE_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     let mut frames = 0;
     let mut last = 0.0;
+    let mut last_report = std::time::Instant::now();
+    let mut finished = false;
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
+        if worker.finished() {
+            finished = true;
+            println!("FINISHED：worker 报结束（t={last:.2}s），直播不应触发");
+        }
         match worker.latest() {
             Some(yk_player::video_worker::WorkerFrame::Frame(frame, t)) => {
                 frames += 1;
@@ -73,16 +84,17 @@ fn run() {
             Some(yk_player::video_worker::WorkerFrame::Position(t)) => last = t,
             None => {}
         }
-        if frames >= 5 {
-            break;
+        if last_report.elapsed() >= std::time::Duration::from_secs(10) {
+            last_report = std::time::Instant::now();
+            println!("[{secs}s 探针] 累计 {frames} 帧，t={last:.2}s，finished={finished}");
         }
     }
-    if frames >= 5 {
-        println!("OK：收到 {frames} 帧，最后位置 {last:.2}s");
+    if finished {
+        println!("FAIL：直播播放中被误判为结束");
     } else if frames > 0 {
-        println!("WARN：只收到 {frames} 帧，位置 {last:.2}s");
+        println!("OK：收到 {frames} 帧，最后位置 {last:.2}s（未误判结束）");
     } else {
-        println!("FAIL：10s 内没有帧（位置 {last:.2}s）");
+        println!("FAIL：{secs}s 内没有帧（位置 {last:.2}s）");
     }
 }
 

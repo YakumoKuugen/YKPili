@@ -78,6 +78,7 @@ impl PlayerView {
         self.tried_worker = false;
         self.first_frame_seen = false;
         self.no_frame_logged = false;
+        self.last_frame_at = std::time::Instant::now();
         self.finish_handled = false;
         eprintln!("[live] 重新连接：room={room_id} qn={qn}");
         self.fetch_live_source(qn, generation, None, cx);
@@ -541,6 +542,7 @@ impl PlayerView {
         self.tried_worker = false;
         self.first_frame_seen = false;
         self.no_frame_logged = false;
+        self.last_frame_at = std::time::Instant::now();
         let mut source = playback_source(&playback);
         // 取流接口可能不带主播资料：用列表 / 房间信息兜底，面板不出现空名字。
         if let Some(live) = self.live.as_ref() {
