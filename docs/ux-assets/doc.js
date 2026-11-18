@@ -339,10 +339,14 @@
     if (toggle) toggle.addEventListener('click', function () {
       pw.classList.toggle('playing'); syncIcon();
     });
-    ['#pw-expand', '#pw-collapse', '#pw-close'].forEach(function (sel) {
+    ['#pw-expand', '#pw-collapse'].forEach(function (sel) {
       var b = scope.querySelector(sel);
       if (b) b.addEventListener('click', function () { setCollapsed(sel !== '#pw-expand', '按钮'); });
     });
+    /* 骑边界按钮是「展开 / 收起」双向开关：收起态图标与 title 都是「展开」，
+       点一下必须能回来，否则唯一的常驻入口就成了单向的。 */
+    var closeToggle = scope.querySelector('#pw-close');
+    if (closeToggle) closeToggle.addEventListener('click', function () { setCollapsed(!collapsed, '按钮'); });
     if (side) {
       var t = null;
       side.addEventListener('mouseenter', function () { clearTimeout(t); setCollapsed(false, '鼠标进入'); });
