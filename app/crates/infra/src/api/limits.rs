@@ -66,6 +66,12 @@ pub enum Bucket {
     Passport,
     /// 所有写操作（点赞 / 投币 / 收藏 / 发动态 / 发私信 / 删历史 / 上报进度）。
     Write,
+    /// 直播接口（列表 / 取流 / 房间信息 / 弹幕 token）。
+    ///
+    /// 这几个接口风控是**按域整体**看的：取流、房间信息、弹幕 token 在
+    /// 1 秒内齐发就会被 `-352`。同组串行 + 1s 间隔，一次开播自然排成
+    /// 「先取流、再房间信息、最后弹幕 token」。
+    Live,
     /// 未归类的读接口兜底。
     Other,
 }
@@ -101,6 +107,8 @@ impl Bucket {
             Bucket::Passport => Duration::from_millis(1000),
             // 写操作最容易被风控：1.2 秒一次，手动点也够用。
             Bucket::Write => Duration::from_millis(1200),
+            // 直播整域共用一条时间线：开播的三个接口不能挤在一起。
+            Bucket::Live => Duration::from_millis(1000),
             Bucket::Other => Duration::from_millis(300),
         }
     }
@@ -127,6 +135,7 @@ impl Bucket {
             Bucket::UserCards => "user_cards",
             Bucket::Passport => "passport",
             Bucket::Write => "write",
+            Bucket::Live => "live",
             Bucket::Other => "other",
         }
     }
@@ -163,6 +172,10 @@ pub fn bucket_for(url: &str, write: bool) -> Bucket {
         || path.contains("/web_im/")
     {
         return Bucket::Session;
+    }
+    // 直播整域单独排队：列表 / 取流 / 房间信息 / 弹幕 token 共用 1s 间隔。
+    if host == "api.live.bilibili.com" {
+        return Bucket::Live;
     }
 
     // 顺序有讲究：/x/v2/reply 要在 /x/v2/ 之前判，search 要在 web-interface 之前判。
@@ -297,6 +310,21 @@ pub fn acquire(bucket: Bucket) -> Duration {
     waited
 }
 
+/// 某个分组刚被风控命中：把它的时间线直接推到 `duration` 之后。
+///
+/// 与普通排队不同，这是「负缓存」：命中 `-352` 后所有同组请求都先等一会儿，
+/// 而不是继续按 1s 间隔试探把限制拖得更久。
+pub fn penalize(bucket: Bucket, duration: Duration) {
+    let mut state = state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let until = Instant::now() + duration;
+    let entry = state.last.entry(bucket).or_insert(until);
+    if *entry < until {
+        *entry = until;
+    }
+}
+
 fn sleep_until(slot: Instant) {
     let wait = slot.saturating_duration_since(Instant::now());
     if !wait.is_zero() {
@@ -314,6 +342,26 @@ mod tests {
     use super::*;
 
     const BASE: &str = "https://api.bilibili.com";
+
+    #[test]
+    fn live_endpoints_share_one_bucket() {
+        // 开播时取流 / 房间信息 / 弹幕 token 会在 1 秒内齐发；
+        // 必须归到同一个 Bucket 串行，否则一起撞 -352。
+        for path in [
+            "https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?room_id=1",
+            "https://api.live.bilibili.com/xlive/web-room/v1/index/getInfoByRoom?room_id=1",
+            "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?id=1",
+            "https://api.live.bilibili.com/relation/v1/feed/feed_list?page=1",
+        ] {
+            assert_eq!(bucket_for(path, false), Bucket::Live, "{path}");
+        }
+        // 发弹幕是写操作，仍归 Write。
+        assert_eq!(
+            bucket_for("https://api.live.bilibili.com/msg/send", true),
+            Bucket::Write
+        );
+        assert!(Bucket::Live.interval() >= Duration::from_millis(800));
+    }
 
     #[test]
     fn buckets_cover_the_real_endpoints() {

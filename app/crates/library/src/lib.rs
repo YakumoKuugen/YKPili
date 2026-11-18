@@ -17,6 +17,7 @@ pub mod dynamic_card;
 pub mod dynamic_view;
 pub mod favorites;
 pub mod following;
+pub mod following_live;
 pub mod image;
 pub mod history;
 pub mod home;

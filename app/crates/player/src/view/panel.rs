@@ -58,20 +58,6 @@ impl PlayerView {
             .into_any_element()
     }
 
-    /// 面板 Tab：评论 / 弹幕 / 选集。「选集」只在多 P 时出现。
-    pub(crate) fn panel_tabs(&self) -> Vec<&'static str> {
-        let multi = self
-            .source
-            .as_ref()
-            .map(|source| source.pages.len() > 1)
-            .unwrap_or(false);
-        if multi {
-            vec!["评论", "弹幕", "选集"]
-        } else {
-            vec!["评论", "弹幕"]
-        }
-    }
-
     /// 信息面板：标题 → 元信息 → UP 主 → 互动 → 标签 → Tab → 内容。
     ///
     /// 内容按 400px 排版，收起态只把右半裁掉（D-05：收起仍是 200px 半宽）。
@@ -81,10 +67,18 @@ impl PlayerView {
         let scale_factor = window.scale_factor();
         let s = &t.surfaces;
         let p = &t.palette;
+        let is_live = self.is_live();
         let source = self.source.as_ref();
 
         let title = match source {
             Some(source) if !source.title.is_empty() => source.title.clone(),
+            // 取流成功前先显示列表带来的直播标题，避免面板一片「加载中」。
+            _ if self.live.is_some() => self
+                .live
+                .as_ref()
+                .map(|live| live.title.clone())
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| "直播间".to_string()),
             _ if self.loading_source => "正在获取播放地址…".to_string(),
             _ if self.model.error().is_some() => "播放失败".to_string(),
             _ => "视频信息".to_string(),
@@ -109,7 +103,7 @@ impl PlayerView {
                     .child(title),
             );
 
-        let meta = source.map(|source| {
+        let meta = (!is_live).then(|| source).flatten().map(|source| {
             div()
                 .flex()
                 .items_center()
@@ -264,7 +258,7 @@ impl PlayerView {
                         .items_center()
                         .gap(px(SPACE_2))
                         .mt(px(SPACE_3))
-                        .child(
+                        .children((!is_live).then(|| {
                             div()
                                 .id("player-charge")
                                 .flex_shrink_0()
@@ -279,8 +273,8 @@ impl PlayerView {
                                 .text_size(px(FONT_SIZE_CAPTION))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(0xFFFFFF))
-                                .child("充电"),
-                        )
+                                .child("充电")
+                        }))
                         .child(
                             div()
                                 .id("player-follow")
@@ -341,7 +335,7 @@ impl PlayerView {
 
         // 视频简介单独一行，放在 UP 信息块之后：不塞进 UP 昵称下面的窄列，
         // 也不会把「发消息 / 关注」这类 UP 操作挤成两行。
-        let desc_row = source.and_then(|source| {
+        let desc_row = (!is_live).then(|| source).flatten().and_then(|source| {
             let desc = source.desc.trim().to_string();
             if desc.is_empty() {
                 return None;
@@ -472,6 +466,9 @@ impl PlayerView {
                 .inset_0(),
             );
 
+        // 直播没有投稿互动（赞 / 币 / 藏 / 分享）：整行不挂树。
+        let actions = if is_live { div() } else { actions };
+
         let mut tags: Vec<String> = if !self.tags.is_empty() {
             self.tags.clone()
         } else {
@@ -512,8 +509,9 @@ impl PlayerView {
             row
         });
 
-        let tabs = self.panel_tabs();
-        let active = self.tab.min(tabs.len().saturating_sub(1));
+        let spec = self.panel_spec();
+        let tabs = spec.tabs;
+        let active = spec.active.min(tabs.len().saturating_sub(1));
         let mut tabs_row = div()
             .flex()
             .border_t_1()
@@ -546,7 +544,11 @@ impl PlayerView {
                         hsla(0.0, 0.0, 0.0, 0.0)
                     }))
                     .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
-                        view.tab = index;
+                        view.set_active_tab(index);
+                        if view.is_live() && index == 1 {
+                            // 房间信息按需拉：只在用户真的看「直播信息」时请求。
+                            view.ensure_live_room_info(cx);
+                        }
                         cx.notify();
                     })),
             );
@@ -587,25 +589,29 @@ impl PlayerView {
                     view.panel_generation = view.panel_generation.wrapping_add(1);
                     cx.notify();
                 }
-                // 滚到底部附近就补下一批评论（每批 1 页 20 条）。
-                view.comment_section
-                    .maybe_load_more(&view.panel_scroll, cx);
-                // 评论是窗口化渲染：可见区随滚动变化，每滚一下都要重算窗口，
-                // 否则滚出已创建的 ~27 行之后会看到空白。
-                if view.tab == 0 {
-                    cx.notify();
+                // 评论只在点播模式加载 / 重绘；直播没有评论列表。
+                if !view.is_live() {
+                    view.comment_section
+                        .maybe_load_more(&view.panel_scroll, cx);
+                    if view.active_tab() == 0 {
+                        cx.notify();
+                    }
                 }
                 view.note_activity(window, cx);
             }))
             .child(content);
 
         // 「回到顶部」浮出判定与输入条让位都在共享组件里，这里只喂滚动位置。
-        self.comment_section.sync_scroll(&self.panel_scroll);
+        if !self.is_live() {
+            self.comment_section.sync_scroll(&self.panel_scroll);
+        } else {
+            self.comment_section.back_to_top = false;
+        }
         if !self.expanded {
             self.comment_section.back_to_top = false;
         }
-        // 评论输入条只活在「展开 + 评论 Tab」这一帧。
-        let composer_visible = self.tab == 0 && self.expanded;
+        // 评论输入条只活在「点播 + 展开 + 评论 Tab」这一帧；直播的输入在控制栏。
+        let composer_visible = !self.is_live() && self.active_tab() == 0 && self.expanded;
 
         let to_width = self.panel_width();
         let from_width = if self.panel_generation == 0 {

@@ -6,10 +6,14 @@ use super::*;
 
 mod controls;
 mod danmaku;
+mod live;
+mod mode;
 mod panel;
 mod actions;
 mod playback;
 pub(crate) use actions::*;
+pub(crate) use live::{watched_text, LiveState};
+pub(crate) use mode::*;
 mod tabs;
 pub(crate) use tabs::{comment_skeleton, panel_empty_line};
 pub(crate) use danmaku::{fixed_danmaku_visible, take_fixed_slot};
@@ -162,14 +166,14 @@ impl Render for PlayerView {
         let watch_badge = self.model.controls_visible.then(|| self.watch_badge(cx));
         let bar: Option<AnyElement> = if self.model.controls_visible {
             let (video_left, video_width) = self.video_bar_geometry(window);
+            // 外壳只读插槽：点播 / 直播的差异由 ControlBarModel 表达。
+            let bar_model = self.control_bar_model();
             Some(
                 control_bar(
                     &t,
-                    &self.model.state,
+                    &bar_model,
                     self.danmaku_input.as_ref(),
                     self.danmaku_sending,
-                    self.source.as_ref(),
-                    self.quality_switching,
                     self.quality_popover_open,
                     self.speed_popover_open,
                     video_left,
@@ -235,13 +239,16 @@ impl Render for PlayerView {
                 None
             })
             // ①c 取流状态：加载中 / 失败说明，不遮挡控制栏与右侧面板
-            .children(
-                if self.loading_source {
+            .children({
+                // 直播的失败 / 断流由中央浮层负责，这里只保留「正在获取地址」。
+                let status = if self.loading_source {
                     Some("正在获取播放地址…".to_string())
+                } else if self.is_live() {
+                    None
                 } else {
                     self.model.error.clone()
-                }
-                .map(|text| {
+                };
+                status.map(|text| {
                     div()
                         .absolute()
                         .top_0()
@@ -255,10 +262,31 @@ impl Render for PlayerView {
                         .text_color(rgb(0xFFFFFF))
                         .child(text)
                         .into_any_element()
-                }),
-            )
+                })
+            })
             // ①e 暂停态中央播放按钮
             .child(self.center_play(&t, cx))
+            // ①f 直播角标（由插槽提供；点播没有）
+            .children(self.mode_badge().map(|badge| {
+                let color = match badge.tone {
+                    BadgeTone::Live => t.palette.bili_pink,
+                };
+                div()
+                    .absolute()
+                    .top(px(SPACE_3))
+                    .left(px(SPACE_3))
+                    .h(px(22.))
+                    .px(px(SPACE_2))
+                    .flex()
+                    .items_center()
+                    .rounded_full()
+                    .bg(color)
+                    .text_size(px(FONT_SIZE_MICRO))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xFFFFFF))
+                    .child(badge.text)
+                    .into_any_element()
+            }))
             // ② 控制栏黑框 + 左下角标：只在鼠标活动时挂树；隐藏时留一条 3px 进度线。
             .children(watch_badge)
             // ③ 控制栏右端压在面板/视频边界上，仍保持可点击。
@@ -268,6 +296,8 @@ impl Render for PlayerView {
             .children((!fullscreen).then(|| self.info_panel(&t, window, cx)))
             // ⑤ 骑边界按钮：面板之后挂载 → 压在面板之上（GPUI 没有 z-index）
             .children((!fullscreen).then(|| self.panel_toggle(&t, cx)))
+            // ⑤b 直播断流 / 取流失败浮层：压在画面与面板之上，等用户重连或关闭。
+            .children(self.live_overlay(&t, window, cx))
             // ⑥ 互动反馈 toast：窗口底部居中，浮在视频与右侧面板之上。
             .children(self.interaction_toast(&t))
             // 鼠标移动 / 点击都算活动：把控制栏叫回来并重新计时 5 秒。

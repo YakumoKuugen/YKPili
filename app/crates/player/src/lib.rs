@@ -51,8 +51,7 @@ use yk_domain::format;
 use controller::dispatch_history_report;
 pub use controller::set_test_cursor;
 use model::PlayerModel;
-use view::{ActionOverlay, VolumePanelView};
-use yk_domain::player::PlayerState;
+use view::{ActionOverlay, LiveState, VolumePanelView};
 use yk_components::status;
 use yk_theme::theme::*;
 
@@ -382,6 +381,8 @@ pub struct PlayerView {
     fullscreen_changed_at: Option<std::time::Instant>,
     /// 当前 Tab：0 评论 / 1 弹幕 / 2 选集。
     tab: usize,
+    /// 直播会话；Some = 当前是直播模式（`mode_kind()` 据此分派）。
+    live: Option<Box<LiveState>>,
     /// 控制栏显隐、音量、错误统一收在视图模型里，视图与控制器共读这一份。
     model: PlayerModel,
     /// 音量弹出条是否展开。点控制栏音量图标切换，点外部 / 控制栏收起时关闭。
@@ -640,6 +641,96 @@ impl Drop for PlayerView {
 }
 
 impl PlayerView {
+    /// 测试入口：当前是否直播模式。
+    #[doc(hidden)]
+    pub fn test_mode_is_live(&self) -> bool {
+        self.is_live()
+    }
+
+    /// 测试入口：直播会话的 room_id（切到直播后立即可读，不依赖取流）。
+    #[doc(hidden)]
+    pub fn test_live_room_id(&self) -> Option<i64> {
+        self.live.as_ref().map(|live| live.room_id)
+    }
+
+    /// 测试入口：当前播放源是否带直播标记（取流成功后才有）。
+    #[doc(hidden)]
+    pub fn test_source_is_live(&self) -> bool {
+        self.source
+            .as_ref()
+            .map(|source| source.is_live)
+            .unwrap_or(false)
+    }
+
+    /// 测试入口：面板 Tab 文案（点播 2~3 个 / 直播 2 个）。
+    #[doc(hidden)]
+    pub fn test_panel_tabs(&self) -> Vec<&'static str> {
+        self.panel_spec().tabs
+    }
+
+    /// 测试入口：往直播聊天里塞一条消息（不连网络）。
+    #[doc(hidden)]
+    pub fn test_push_live_chat(&mut self, uname: &str, text: &str) {
+        if let Some(live) = self.live.as_mut() {
+            live.chat.mark_connected();
+            live.chat.push(yk_infra::live_chat::LiveChatMessage {
+                uid: 1,
+                uname: uname.to_string(),
+                text: text.to_string(),
+                kind: yk_infra::live_chat::LiveChatKind::Danmaku,
+                color: Some((255, 255, 255)),
+                guard_level: 0,
+                is_admin: false,
+                ts: 0,
+            });
+        }
+    }
+
+    /// 测试入口：直播聊天缓冲条数。
+    #[doc(hidden)]
+    pub fn test_live_chat_len(&self) -> usize {
+        self.live
+            .as_ref()
+            .map(|live| live.chat.messages.len())
+            .unwrap_or(0)
+    }
+
+    /// 测试入口：控制栏插槽是否有 LIVE 角标。
+    #[doc(hidden)]
+    pub fn test_control_bar_is_live(&self) -> bool {
+        self.control_bar_model().live.is_some()
+    }
+
+    /// 测试入口：不取流，直接把视图切成直播会话。
+    #[doc(hidden)]
+    pub fn test_set_live(&mut self, room_id: i64) {
+        self.live = Some(Box::new(LiveState::from_room(&yk_infra::live::LiveRoom {
+            room_id,
+            uid: 1,
+            uname: "测试主播".into(),
+            title: "测试直播".into(),
+            area_name: "测试分区".into(),
+            live_status: 1,
+            ..Default::default()
+        })));
+        self.model.state.duration_secs = 0.0;
+    }
+
+    /// 测试入口：注入一条直播源（跳过网络），验证控制栏 / 面板 / worker 插槽。
+    #[doc(hidden)]
+    pub fn test_set_live_source(&mut self, room_id: i64, url: &str) {
+        self.test_set_live(room_id);
+        self.source = Some(yk_domain::playback::PlaybackSource {
+            video_url: url.to_string(),
+            title: "测试直播".into(),
+            quality: "原画".into(),
+            quality_id: 10000,
+            is_live: true,
+            live_room_id: room_id,
+            ..Default::default()
+        });
+    }
+
     pub fn new(theme: YkTheme, cx: &mut Context<Self>) -> Self {
         let n = LIVE_PLAYERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         assert!(
@@ -703,6 +794,7 @@ impl PlayerView {
             force_controls_visible: false,
             fullscreen_changed_at: None,
             tab: 0,
+            live: None,
             danmaku: Vec::new(),
             danmaku_all: Vec::new(),
             danmaku_source: Vec::new(),

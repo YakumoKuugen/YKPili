@@ -9,11 +9,9 @@ use gpui::component::slider::SliderEvent;
 /// 面板展开到 400 时允许盖住右端，这是用户主动展开换来的代价。
 pub(crate) fn control_bar(
     t: &YkTheme,
-    state: &PlayerState,
+    model: &ControlBarModel,
     danmaku_input: Option<&Entity<InputState>>,
     danmaku_sending: bool,
-    source: Option<&yk_domain::playback::PlaybackSource>,
-    quality_switching: bool,
     quality_popover_open: bool,
     speed_popover_open: bool,
     video_left: f32,
@@ -28,26 +26,52 @@ pub(crate) fn control_bar(
     cx: &mut Context<PlayerView>,
     on_play: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let (time_now, time_total) = state.time_texts();
-    let progress = state.progress().clamp(0.0, 1.0) as f32;
+    // 时间码由插槽决定：点播「当前 / 总长」，直播只有「已看」。
+    let (time_now, time_total) = match (model.timeline, model.live) {
+        (Some(timeline), _) => (
+            format::duration(timeline.position.max(0.0) as u64),
+            format::duration(timeline.duration.max(0.0) as u64),
+        ),
+        (None, Some(live)) => (watched_text(live.watched_secs), String::new()),
+        (None, None) => ("--:--".to_string(), String::new()),
+    };
+    let progress = model
+        .timeline
+        .map(|timeline| {
+            if timeline.duration > 0.0 {
+                (timeline.position / timeline.duration).clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            }
+        })
+        .unwrap_or(0.0);
     let s = &t.surfaces;
     let p = &t.palette;
     let icon_color = hsla(0.0, 0.0, 1.0, 0.86);
-    let rate_text = format!("倍速 {}x", trim_rate(state.rate));
-    let volume_icon = if state.muted || state.volume <= 0.001 {
+    let rate_text = format!("倍速 {}x", trim_rate(model.rate));
+    let volume_icon = if model.muted || model.volume <= 0.001 {
         IconName::VolumeX
     } else {
         IconName::Volume2
     };
-    let quality_text = if quality_switching {
-        "切换中…".to_string()
-    } else {
-        source
-            .map(|source| source.quality.trim())
-            .filter(|quality| !quality.is_empty())
-            .map(|quality| quality.to_string())
-            .unwrap_or_else(|| "画质".to_string())
-    };
+    let quality_text = model
+        .quality
+        .as_ref()
+        .map(|quality| {
+            if quality.switching {
+                "切换中…".to_string()
+            } else if quality.label.trim().is_empty() {
+                "画质".to_string()
+            } else {
+                quality.label.trim().to_string()
+            }
+        })
+        .unwrap_or_else(|| "画质".to_string());
+    let quality_switching = model
+        .quality
+        .as_ref()
+        .map(|quality| quality.switching)
+        .unwrap_or(false);
 
     div()
         .absolute()
@@ -182,7 +206,7 @@ pub(crate) fn control_bar(
                         .hover(|style| style.bg(rgba(0xFFFFFF1A)))
                         .on_click(on_play)
                         .child(
-                            Icon::new(if state.playing {
+                            Icon::new(if model.playing {
                                 IconName::Pause
                             } else {
                                 IconName::Play
@@ -191,16 +215,44 @@ pub(crate) fn control_bar(
                             .text_color(rgb(0xFFFFFF)),
                         ),
                 )
-                .child(
+                // 直播：LIVE 粉胶囊 + 已看时长，不渲染进度轨道。
+                .children(model.live.map(|live| {
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .px(px(6.))
+                                .h(px(18.))
+                                .flex()
+                                .items_center()
+                                .rounded_full()
+                                .bg(p.bili_pink)
+                                .text_size(px(FONT_SIZE_MICRO))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(0xFFFFFF))
+                                .child("LIVE"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(FONT_SIZE_CAPTION))
+                                .text_color(hsla(0.0, 0.0, 1.0, 0.85))
+                                .child(watched_text(live.watched_secs)),
+                        )
+                }))
+                // 点播：时间码 + 可拖动进度轨道。
+                .children(model.timeline.map(|_| {
                     div()
                         .flex_shrink_0()
                         .text_size(px(FONT_SIZE_CAPTION))
                         .text_color(hsla(0.0, 0.0, 1.0, 0.85))
-                        .child(format!("{time_now} / {time_total}")),
-                )
-                // 进度条：左侧已播 + 右侧未播，滑块骑在交界处。
-                // 轨道自身记录 bounds，按下 / 拖动时把鼠标 x 换算成 0..1。
-                .child({
+                        .child(format!("{time_now} / {time_total}"))
+                }))
+                .children(model.timeline.map(|_| {
+                    // 进度条：左侧已播 + 右侧未播，滑块骑在交界处。
+                    // 轨道自身记录 bounds，按下 / 拖动时把鼠标 x 换算成 0..1。
                     let track_bounds = progress_track_bounds.clone();
                     div()
                         .id("player-progress-track")
@@ -251,26 +303,29 @@ pub(crate) fn control_bar(
                             .absolute()
                             .inset_0(),
                         )
-                })
+                }))
+                // 直播没有进度条，用弹性空白把右侧操作推到最右边。
+                .when(model.kind.is_live(), |el| el.child(div().flex_1()))
                 .child(quality_control(
                     t,
-                    source,
+                    model.quality.as_ref(),
                     quality_text,
-                    quality_switching,
                     quality_popover_open,
                     quality_button_bounds,
                     control_popover_bounds,
                     cx,
                 ))
-                .child(speed_control(
-                    t,
-                    state.rate,
-                    rate_text,
-                    speed_popover_open,
-                    speed_button_bounds,
-                    control_popover_bounds,
-                    cx,
-                ))
+                .children(model.speed.then(|| {
+                    speed_control(
+                        t,
+                        model.rate,
+                        rate_text,
+                        speed_popover_open,
+                        speed_button_bounds,
+                        control_popover_bounds,
+                        cx,
+                    )
+                }))
                 .child(volume_control(
                     volume_panel,
                     volume_icon,
@@ -283,7 +338,7 @@ pub(crate) fn control_bar(
                 .child(ctrl_icon(IconName::Settings, icon_color))
                 .child(ctrl_icon_button(
                     "player-fullscreen",
-                    if state.fullscreen {
+                    if model.fullscreen {
                         IconName::Minimize
                     } else {
                         IconName::Maximize
@@ -366,15 +421,15 @@ fn ctrl_pill_shell(
 /// 画质胶囊 + 清晰度菜单。
 fn quality_control(
     t: &YkTheme,
-    source: Option<&yk_domain::playback::PlaybackSource>,
+    menu: Option<&QualityMenu>,
     label: String,
-    switching: bool,
     open: bool,
     button_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
     popover_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
     cx: &mut Context<PlayerView>,
 ) -> AnyElement {
-    let popover = open.then(|| quality_menu(t, source, switching, popover_bounds, cx));
+    let switching = menu.map(|menu| menu.switching).unwrap_or(false);
+    let popover = open.then(|| quality_menu(t, menu, popover_bounds, cx));
     ctrl_pill_shell(
         "player-quality-pill",
         label,
@@ -391,15 +446,15 @@ fn quality_control(
 /// 清晰度菜单：按大会员状态生成的可选档位，当前档带对勾。
 fn quality_menu(
     t: &YkTheme,
-    source: Option<&yk_domain::playback::PlaybackSource>,
-    switching: bool,
+    menu: Option<&QualityMenu>,
     popover_bounds: &Rc<Cell<Option<Bounds<Pixels>>>>,
     cx: &mut Context<PlayerView>,
 ) -> AnyElement {
     let s = &t.surfaces;
     let p = &t.palette;
-    let current = source.map(|source| source.quality_id).unwrap_or(0);
-    let qualities = source.map(|source| source.qualities.as_slice()).unwrap_or(&[]);
+    let current = menu.map(|menu| menu.current).unwrap_or(0);
+    let qualities = menu.map(|menu| menu.items.as_slice()).unwrap_or(&[]);
+    let switching = menu.map(|menu| menu.switching).unwrap_or(false);
     let bounds = popover_bounds.clone();
 
     let mut list = div().flex().flex_col().gap(px(SPACE_0_5));

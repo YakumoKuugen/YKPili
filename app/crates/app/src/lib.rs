@@ -33,6 +33,7 @@ pub use yk_library::card::{animate_cover_zoom, card, CardHost};
 pub use yk_library::cover::{cover_art, cover_visual, CoverVisual};
 pub use yk_library::image::ImageResidency;
 pub use yk_library::favorites as favorites_view;
+pub use yk_library::following_live::FollowingTab;
 pub use yk_library::history as history_view;
 pub use yk_components::gallery as components;
 pub use yk_infra::http;
@@ -199,6 +200,10 @@ pub struct AppRoot {
     following_has_more: bool,
     /// 关注流请求代际：登录 / 退出 / 刷新时只接受最后一次结果。
     following_generation: u64,
+    /// 关注页当前停在哪个二级分栏（动态 / 直播）。
+    following_tab: FollowingTab,
+    /// 直播分栏的数据、四态与分页。
+    following_live: yk_library::following_live::FollowingLiveState,
     /// 观看历史页状态（数据、筛选、批量选择、搜索框）。
     history: history_view::HistoryState,
     /// 收藏夹页状态（夹子列表、夹内视频、分页与本地排序）。
@@ -426,10 +431,89 @@ impl AppRoot {
         self.dynamic_detail.is_some()
     }
 
+    /// 测试 / 截图入口：注入关注直播数据并停在关注页（不发请求）。
+    pub fn with_following_live(mut self, rooms: Vec<yk_infra::live::LiveRoom>) -> Self {
+        self.page = Some(Route::Following);
+        self.following_live.items = rooms;
+        self.following_live.loaded = true;
+        self.following_live.loading = false;
+        self.following_live.loading_more = false;
+        self.following_live.refreshing = false;
+        self.following_live.has_more = false;
+        self.following_live.error = None;
+        // 刚注入的数据视作「刚加载完」：切 tab 时不会因为 60s 过期去发真实请求。
+        self.following_live.last_ok_at = Some(std::time::Instant::now());
+        self
+    }
+
+    /// 测试 / 截图入口：指定关注页落在哪个分栏。
+    pub fn with_following_tab(mut self, tab: FollowingTab) -> Self {
+        self.following_tab = tab;
+        self
+    }
+
+    /// 测试入口：当前关注分栏。
+    #[doc(hidden)]
+    pub fn following_tab_for_test(&self) -> FollowingTab {
+        self.following_tab
+    }
+
+    /// 测试入口：直播分栏的条目数。
+    #[doc(hidden)]
+    pub fn following_live_len_for_test(&self) -> usize {
+        self.following_live.items.len()
+    }
+
+    /// 测试入口：动态分栏的条目数。
+    #[doc(hidden)]
+    pub fn following_len_for_test(&self) -> usize {
+        self.following.len()
+    }
+
+    /// 测试入口：直播分栏是否已成功加载过。
+    #[doc(hidden)]
+    pub fn following_live_loaded_for_test(&self) -> bool {
+        self.following_live.loaded
+    }
+
+    /// 测试入口：Dock 二级分页当前是否展开。
+    #[doc(hidden)]
+    pub fn dock_tabs_open_for_test(&self) -> bool {
+        self.dock_tabs_open
+    }
+
+    /// 测试入口：直接走 Dock 一级入口回调（等价于点那一下）。
+    #[doc(hidden)]
+    pub fn dock_select_for_test(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dock_select(index, window, cx);
+    }
+
+    /// 测试入口：直接走 Dock 二级分页回调（等价于点那个胶囊）。
+    #[doc(hidden)]
+    pub fn dock_tab_select_for_test(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dock_tab_select(index, window, cx);
+    }
+
     /// 测试入口：播放浮窗是否已打开。
     #[doc(hidden)]
     pub fn test_player_open(&self) -> bool {
         self.playing.is_some()
+    }
+
+    /// 测试入口：取播放器实体（断言直播模式 / 播放源用）。
+    #[doc(hidden)]
+    pub fn test_player(&self) -> Option<gpui::Entity<player::PlayerView>> {
+        self.playing.clone()
     }
 
     /// 测试入口：图片查看器是否已打开。
@@ -1646,7 +1730,11 @@ impl AppRoot {
         self.messages_refresh_unread(cx);
         self.refresh_feed_authenticated(cx);
         if self.page == Some(Route::Following) {
-            self.load_following_page(false, false, cx);
+            // 登录后停在哪个分栏就补哪个分栏，避免停在直播分栏却一直空着。
+            match self.following_tab {
+                FollowingTab::Videos => self.load_following_page(false, false, cx),
+                FollowingTab::Live => self.load_following_live(false, false, cx),
+            }
         }
         if self.page == Some(Route::History) {
             self.load_history(cx);
@@ -1898,6 +1986,173 @@ impl AppRoot {
         self.following_offset.clear();
         self.following_has_more = false;
         self.following_generation = self.following_generation.wrapping_add(1);
+        // 直播分栏同样属于账号数据：换账号 / 退出必须一起清掉。
+        self.following_live.reset();
+    }
+
+    // ================= 正在关注：直播分栏 =================
+
+    /// 切到直播分栏 / 进页时按需加载。
+    ///
+    /// 已加载且 60s 内不再请求（切 tab 是视图切换，不是刷新）；
+    /// 超过 60s 保留旧列表做静默刷新 —— 直播时效性强，但也不能每次切都打接口。
+    fn ensure_following_live(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        let state = &self.following_live;
+        if state.loading || state.refreshing {
+            return;
+        }
+        if !state.loaded {
+            self.load_following_live(false, false, cx);
+        } else if state.stale(std::time::Duration::from_secs(60)) {
+            self.load_following_live(false, true, cx);
+        }
+    }
+
+    /// 手动刷新 / 回顶下拉：强制重拉当前分栏，不受 60s 限制。
+    fn reload_following_live(&mut self, cx: &mut Context<Self>) {
+        self.load_following_live(false, true, cx);
+    }
+
+    /// 拉一页关注直播。
+    ///
+    /// `append = true` 接在现有列表后面（按 room_id 去重）；`refresh = true`
+    /// 重拉第一页但不清空旧内容。请求期间用代际号丢弃过期结果。
+    fn load_following_live(&mut self, append: bool, refresh: bool, cx: &mut Context<Self>) {
+        {
+            let state = &self.following_live;
+            if state.loading || state.loading_more || state.refreshing {
+                return;
+            }
+            if append && (!state.has_more || state.page == 0) {
+                return;
+            }
+            if !append && !refresh && state.loaded {
+                return;
+            }
+        }
+        let cookie = self.cookie();
+        if cookie.is_empty() {
+            self.following_live.error = Some("登录后查看正在直播的关注".into());
+            cx.notify();
+            return;
+        }
+
+        self.following_live.generation = self.following_live.generation.wrapping_add(1);
+        let generation = self.following_live.generation;
+        let page = if append {
+            self.following_live.page.max(1)
+        } else {
+            1
+        };
+        if append {
+            self.following_live.loading_more = true;
+        } else if refresh {
+            self.following_live.refreshing = true;
+            self.following_live.error = None;
+        } else {
+            self.following_live.loading = true;
+            self.following_live.error = None;
+        }
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client =
+                        yk_infra::api::client::ReqwestClient::new().map_err(|e| e.to_string())?;
+                    yk_infra::live::fetch_following_lives(&client, &cookie, page)
+                })
+                .await;
+
+            let _ = this.update(cx, |view, cx| {
+                if view.following_live.generation != generation {
+                    return;
+                }
+                view.following_live.loading = false;
+                view.following_live.loading_more = false;
+                view.following_live.refreshing = false;
+                match result {
+                    Ok(page_data) => {
+                        let mut items = page_data.items;
+                        let added;
+                        if append {
+                            items.retain(|room| {
+                                !view
+                                    .following_live
+                                    .items
+                                    .iter()
+                                    .any(|existing| existing.room_id == room.room_id)
+                            });
+                            added = items.len();
+                            view.following_live.items.extend(items);
+                        } else {
+                            added = items.len();
+                            view.following_live.items = items;
+                        }
+                        view.following_live.page = page + 1;
+                        view.following_live.has_more = page_data.has_more && added > 0;
+                        view.following_live.loaded = true;
+                        view.following_live.error = None;
+                        view.following_live.last_ok_at = Some(std::time::Instant::now());
+                        eprintln!(
+                            "[live] 关注直播加载成功：{} 个（page={} has_more={}）",
+                            view.following_live.items.len(),
+                            page,
+                            page_data.has_more
+                        );
+                        if std::env::var("YK_LIVE_DEBUG").is_ok() {
+                            for room in &view.following_live.items {
+                                eprintln!(
+                                    "  room={} uid={} {}（{} 看过 / {}）",
+                                    room.room_id,
+                                    room.uid,
+                                    room.uname,
+                                    room.watched_label(),
+                                    room.area_name
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[live] 关注直播加载失败：{e}");
+                        if append {
+                            // 翻页失败不清空已有内容，只停止继续加载。
+                            view.following_live.has_more = false;
+                            view.following_live.error = Some(e);
+                        } else if refresh && !view.following_live.items.is_empty() {
+                            // 静默刷新失败：保留旧列表，底部轻提示。
+                            view.following_live.error = Some(e);
+                        } else {
+                            view.following_live.error = Some(e);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 关注页二级分栏点击：切 tab、回顶、按需加载。
+    fn following_select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = FollowingTab::from_index(index) else {
+            return;
+        };
+        if self.following_tab == tab {
+            return;
+        }
+        self.following_tab = tab;
+        self.reset_card_hover();
+        self.scroll_content_to_top();
+        if tab == FollowingTab::Live {
+            self.ensure_following_live(cx);
+        }
+        window.refresh();
+        cx.notify();
     }
 
     /// 从个人面板进入设置浮层：账号面板已先播完缩回动画。
@@ -2339,7 +2594,10 @@ impl AppRoot {
                 if self.session.is_none() {
                     return false;
                 }
-                self.load_following_page(false, true, cx);
+                match self.following_tab {
+                    FollowingTab::Videos => self.load_following_page(false, true, cx),
+                    FollowingTab::Live => self.load_following_live(false, true, cx),
+                }
                 true
             }
             Some(Route::History) => {
@@ -2603,7 +2861,12 @@ impl AppRoot {
     fn auto_load_more(&mut self, cx: &mut Context<Self>) {
         match self.page {
             None => self.load_more_feed(cx),
-            Some(Route::Following) => self.load_following_page(true, false, cx),
+            Some(Route::Following) => match self.following_tab {
+                FollowingTab::Videos => self.load_following_page(true, false, cx),
+                // 直播分栏 P0 只做手动「加载更多」：关注量通常 < 100，
+                // 触底自动加载放到 P2 再评估（设计文档 3.5）。
+                FollowingTab::Live => {}
+            },
             Some(Route::Messages) => self.messages_load_more(cx),
             Some(Route::Favorites) => self.load_more_favorites(cx),
             _ => {}
@@ -2901,6 +3164,16 @@ impl AppRoot {
             following_offset: String::new(),
             following_has_more: false,
             following_generation: 0,
+            // 验收用：`YK_FOLLOWING_TAB=live` 启动即停在直播分栏。
+            following_tab: if std::env::var("YK_FOLLOWING_TAB")
+                .map(|value| value.eq_ignore_ascii_case("live"))
+                .unwrap_or(false)
+            {
+                FollowingTab::Live
+            } else {
+                FollowingTab::Videos
+            },
+            following_live: yk_library::following_live::FollowingLiveState::default(),
             history: history_view::HistoryState::new(),
             favorites: favorites_view::FavoritesState::new(),
             rank: rank_view::RankState::new(),
@@ -3027,6 +3300,100 @@ impl yk_library::following::FollowingHost for AppRoot {
     }
 }
 
+impl yk_library::following_live::FollowingLiveHost for AppRoot {
+    fn live_state(&self) -> yk_library::following_live::LiveFeedState<'_> {
+        yk_library::following_live::LiveFeedState {
+            items: &self.following_live.items,
+            loading: self.following_live.loading,
+            loading_more: self.following_live.loading_more,
+            refreshing: self.following_live.refreshing,
+            loaded: self.following_live.loaded,
+            error: self.following_live.error.as_deref(),
+            has_more: self.following_live.has_more,
+            signed_in: self.session.is_some(),
+            hovered: if self.following_tab == FollowingTab::Live {
+                self.hovered_card
+            } else {
+                None
+            },
+            leaving: if self.following_tab == FollowingTab::Live {
+                self.leaving_card
+            } else {
+                None
+            },
+            hover_generation: self.hover_generation,
+            material: yk_infra::settings::current().surface_material,
+        }
+    }
+
+    fn live_refresh(&mut self, cx: &mut Context<Self>) {
+        self.reload_following_live(cx);
+    }
+
+    fn live_load_more(&mut self, cx: &mut Context<Self>) {
+        if !self.following_live.loading_more {
+            self.load_following_live(true, false, cx);
+        }
+    }
+
+    fn live_sign_in(&mut self, cx: &mut Context<Self>) {
+        self.ensure_login(cx);
+    }
+
+    fn live_open_room(
+        &mut self,
+        room: yk_infra::live::LiveRoom,
+        origin: Option<CardOrigin>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        eprintln!(
+            "[live] 打开直播间：room={} title={} entrance={}",
+            room.room_id,
+            room.title,
+            origin.is_some()
+        );
+        // 与动态视频同一套顺序：先建播放器 / 给入场几何，再换源。
+        self.ensure_player(cx);
+        if let Some(player) = self.playing.clone() {
+            if let Some(origin) = origin {
+                let bounds = origin.cover_bounds.unwrap_or(origin.bounds);
+                let source = CoverSource {
+                    bounds,
+                    root_size: origin.root_size,
+                    bvid: String::new(),
+                    title: room.title.clone(),
+                    image_url: room.cover_thumb_url(),
+                    placeholder_color: "#4DB6AC".to_string(),
+                };
+                let _ = player.update(cx, |view, cx| view.set_entrance(source, cx));
+            }
+            let _ = player.update(cx, |view, cx| view.open_live(room, cx));
+        }
+        window.refresh();
+        cx.notify();
+    }
+
+    fn live_show_videos(&mut self, cx: &mut Context<Self>) {
+        self.following_tab = FollowingTab::Videos;
+        self.reset_card_hover();
+        self.scroll_content_to_top();
+        cx.notify();
+    }
+
+    fn live_open_up(
+        &mut self,
+        mid: i64,
+        name: String,
+        face: String,
+        opener: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_up_profile(mid, name, face, opener, window, cx);
+    }
+}
+
 impl yk_library::home::HomeHost for AppRoot {
     fn home_state(&self) -> yk_library::home::HomeState<'_> {
         // 首页网格是虚拟列表：每一行渲染时都会回读这里，而不是用 `grid()` 的入参。
@@ -3124,19 +3491,23 @@ impl AppRoot {
         self.search_panel_open = false;
         self.search_panel_closing = false;
         // 离开页面 / 点别的入口就收起二级分页。会自己展开分页的入口
-        // （2 = 视频排行榜、5 = 消息）自己管开关；「刷新」不算离开页面。
-        if index != 2 && index != 5 && index != 6 {
+        // （1 = 正在关注、2 = 视频排行榜、5 = 消息）自己管开关；「刷新」不算离开页面。
+        if index != 1 && index != 2 && index != 5 && index != 6 {
             self.dock_tabs_open = false;
         }
         match index {
             0..=2 => {
                 let target = DOCK_ENTRIES[index].page;
                 if self.page == target {
-                    // 已经在目标页：有二级分页的（排行榜分区）再点一次是展开 / 收起，
+                    // 已经在目标页：有二级分页的再点一次是展开 / 收起，
                     // 其余页面维持原来的「再点一次刷新」。
                     match target {
-                        Some(Route::Following) if !signed_in => self.ensure_login(cx),
-                        Some(Route::Rank) => self.dock_tabs_open = !self.dock_tabs_open,
+                        Some(Route::Following) | Some(Route::Rank) => {
+                            // 关注页的动态 / 直播与排行榜分区同一套语义：
+                            // 进页不自动展开，已经在页内再点一次入口才展开 / 收起。
+                            // 未登录也允许先把胶囊展开（内容仍是登录卡）。
+                            self.dock_tabs_open = !self.dock_tabs_open;
+                        }
                         _ => {
                             self.refresh_page_manually(cx);
                         }
@@ -3148,7 +3519,10 @@ impl AppRoot {
                 self.dock_tabs_open = false;
                 if target == Some(Route::Following) {
                     if signed_in {
-                        self.ensure_following(cx);
+                        match self.following_tab {
+                            FollowingTab::Videos => self.ensure_following(cx),
+                            FollowingTab::Live => self.ensure_following_live(cx),
+                        }
                     } else {
                         self.ensure_login(cx);
                     }
@@ -3260,6 +3634,7 @@ impl AppRoot {
                 self.reset_card_hover();
             }
             Some(Route::Rank) => self.rank_select_zone(index, cx),
+            Some(Route::Following) => self.following_select_tab(index, window, cx),
             _ => return,
         }
         window.refresh();
@@ -3309,6 +3684,42 @@ impl AppRoot {
                 active: self.rank.zone == index,
                 content: div()
                     .child(if zone.rid == 0 { "全站榜" } else { zone.label })
+                    .into_any_element(),
+            })
+            .collect();
+        yk_shell::dock::DockTabs {
+            open: self.dock_tabs_open,
+            items,
+            max_width,
+        }
+    }
+
+    /// 关注页的二级分页：动态 / 直播。
+    ///
+    /// 直播 tab 有内容时带一个 6px 粉点：用圆点不用数字 —— 数字会随
+    /// 「谁刚下播」快速过期，而 tab 不是实时控件，圆点只承担「有内容」。
+    fn following_dock_tabs(&self, t: &YkTheme, max_width: f32) -> yk_shell::dock::DockTabs {
+        let live_has_items =
+            self.following_live.loaded && !self.following_live.items.is_empty();
+        let items = FollowingTab::ALL
+            .into_iter()
+            .map(|tab| yk_shell::dock::DockTab {
+                index: tab.index(),
+                active: self.following_tab == tab,
+                content: div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .child(tab.label())
+                    .when(tab == FollowingTab::Live && live_has_items, |el| {
+                        el.child(
+                            div()
+                                .w(px(6.))
+                                .h(px(6.))
+                                .rounded_full()
+                                .bg(t.palette.bili_pink),
+                        )
+                    })
                     .into_any_element(),
             })
             .collect();
@@ -3982,6 +4393,29 @@ impl Render for AppRoot {
                                 signed_in: self.session.is_some(),
                                 material,
                             },
+                            self.following_tab,
+                            yk_library::following_live::LiveFeedState {
+                                items: &self.following_live.items,
+                                loading: self.following_live.loading,
+                                loading_more: self.following_live.loading_more,
+                                refreshing: self.following_live.refreshing,
+                                loaded: self.following_live.loaded,
+                                error: self.following_live.error.as_deref(),
+                                has_more: self.following_live.has_more,
+                                signed_in: self.session.is_some(),
+                                hovered: if self.following_tab == FollowingTab::Live {
+                                    self.hovered_card
+                                } else {
+                                    None
+                                },
+                                leaving: if self.following_tab == FollowingTab::Live {
+                                    self.leaving_card
+                                } else {
+                                    None
+                                },
+                                hover_generation: self.hover_generation,
+                                material,
+                            },
                             self.layout_bounds.clone(),
                             self.active_images.clone(),
                             window,
@@ -4018,6 +4452,12 @@ impl Render for AppRoot {
                         if entry.page == Some(Route::Rank) {
                             item.has_secondary = true;
                             item.expandable = self.page == Some(Route::Rank);
+                            item.expanded = self.dock_tabs_open;
+                        }
+                        // 「正在关注」也有二级分页（动态 / 直播）。
+                        if entry.page == Some(Route::Following) {
+                            item.has_secondary = true;
+                            item.expandable = self.page == Some(Route::Following);
                             item.expanded = self.dock_tabs_open;
                         }
                         item
@@ -4068,6 +4508,7 @@ impl Render for AppRoot {
                 let tabs = match self.page {
                     Some(Route::Messages) => Some(self.messages_dock_tabs(t, tabs_width)),
                     Some(Route::Rank) => Some(self.rank_dock_tabs(tabs_width)),
+                    Some(Route::Following) => Some(self.following_dock_tabs(t, tabs_width)),
                     _ => None,
                 };
                 let on_select: DockSelect<AppRoot> =
@@ -4110,6 +4551,7 @@ impl Render for AppRoot {
                     .as_deref()
                     .map(|text| yk_library::search_ui::notice(t, text)),
             )
+            // 动态详情浮层压在页面与播放器之上；点外部缩回原卡片。
             // 历史页的删除确认：盖住内容与 Dock，但仍在播放浮窗之下。
             .children(self.history.confirm.as_ref().map(|kind| {
                 history_view::confirm_overlay(
@@ -4138,11 +4580,11 @@ impl Render for AppRoot {
             )
             // 刷新 / 触底加载的浮层提示
             .children(
-                (self.feed_refreshing || self.following_refreshing)
+                (self.feed_refreshing || self.following_refreshing || self.following_live.refreshing)
                     .then(|| yk_shell::overlay::status_pill(t, "正在刷新当前页面…", true)),
             )
             .children(
-                (self.feed_loading_more || self.following_loading_more)
+                (self.feed_loading_more || self.following_loading_more || self.following_live.loading_more)
                     .then(|| yk_shell::overlay::status_pill(t, "正在加载更多…", false)),
             )
             // ④ 播放浮窗：独立场景，整块压在页面之上。
@@ -4305,6 +4747,8 @@ fn content_area(
     hover_generation: u64,
     scroll_settling: bool,
     following: yk_library::following::FeedState<'_>,
+    following_tab: FollowingTab,
+    following_live: yk_library::following_live::LiveFeedState<'_>,
     layout_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     active_images: Rc<RefCell<ImageResidency>>,
     window: &Window,
@@ -4397,15 +4841,26 @@ fn content_area(
             } else {
                 0.0..window.viewport_size().height.as_f32()
             };
-            yk_library::following::page(
-                t,
-                following,
-                visible_y,
-                active_images.clone(),
-                layout_bounds,
-                window,
-                cx,
-            )
+            match following_tab {
+                FollowingTab::Videos => yk_library::following::page(
+                    t,
+                    following,
+                    visible_y,
+                    active_images.clone(),
+                    layout_bounds,
+                    window,
+                    cx,
+                ),
+                FollowingTab::Live => yk_library::following_live::page(
+                    t,
+                    following_live,
+                    visible_y,
+                    active_images.clone(),
+                    layout_bounds,
+                    window,
+                    cx,
+                ),
+            }
         } else if kind == Route::Search {
             yk_library::search_ui::page(
                 t,

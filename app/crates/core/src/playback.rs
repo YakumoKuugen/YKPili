@@ -129,6 +129,10 @@ pub struct PlaybackSource {
     pub pages: Vec<VideoPage>,
     /// 当前播放的分 P 序号（从 1 开始；0 = 未知）。
     pub current_page: i32,
+    /// 直播源：没有 bvid / aid / cid、没有总时长，不写历史 / 续播。
+    pub is_live: bool,
+    /// 直播间号（0 = 点播）。
+    pub live_room_id: i64,
 }
 
 /// 由画质 id / 分辨率推一个展示文案。
@@ -328,6 +332,8 @@ fn meta_from_info(info: &VideoInfoData, duration_secs: u64, quality: String) -> 
             .find(|p| p.cid == info.cid)
             .map(|p| p.page)
             .unwrap_or(1),
+        is_live: false,
+        live_room_id: 0,
     }
 }
 

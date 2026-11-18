@@ -202,6 +202,79 @@ pub fn following_dynamics(offset: &str, cookie: &str) -> Request {
     }
 }
 
+/// 关注直播列表（`relation/v1/feed/feed_list`）。
+///
+/// 只认 Cookie（需要登录态），请求的是直播域名。这个接口一次就能拿到
+/// 「关注中且正在直播」的房间，不必先拉关注列表再批量查状态。
+pub const LIVE_API_BASE: &str = "https://api.live.bilibili.com";
+
+pub fn live_following(page: u32, page_size: u32, cookie: &str) -> Request {
+    Request {
+        url: format!(
+            "{LIVE_API_BASE}/relation/v1/feed/feed_list?page={page}&page_size={page_size}"
+        ),
+        cookie: cookie.to_string(),
+        name: "live_following",
+    }
+}
+
+/// 直播取流（`xlive/web-room/v2/index/getRoomPlayInfo`）。
+///
+/// `protocol=0,1` 同时要 FLV 与 HLS：优先 FLV（起播快、延迟低），
+/// CDN 不给 FLV 时再退 HLS。`codec=0` 只要 AVC，兼容性最好。
+pub fn live_play_url(room_id: i64, qn: i32, cookie: &str) -> Request {
+    Request {
+        url: format!(
+            "{LIVE_API_BASE}/xlive/web-room/v2/index/getRoomPlayInfo?room_id={room_id}\
+             &protocol=0,1&format=0,1,2&codec=0&qn={qn}&platform=web&ptype=8&dolby=5"
+        ),
+        cookie: cookie.to_string(),
+        name: "live_play_url",
+    }
+}
+
+/// 直播间基础信息（标题 / 主播 / 分区 / 关注数据）。
+///
+/// 取流接口只保证拿到流地址；面板要的标题 / 分区 / 主播资料从这个接口补。
+pub fn live_room_info(room_id: i64, cookie: &str) -> Request {
+    Request {
+        url: format!(
+            "{LIVE_API_BASE}/xlive/web-room/v1/index/getInfoByRoom?room_id={room_id}"
+        ),
+        cookie: cookie.to_string(),
+        name: "live_room_info",
+    }
+}
+
+/// 直播弹幕服务器地址与鉴权 token（`getDanmuInfo`）。
+///
+/// **必须 WBI 签名**：实测同一房间裸请求 / 只带 `web_location` 都回 `-352`，
+/// 带 `w_rid` + `wts` 才 `code=0`（网页端就是签名的）。
+pub fn live_danmu_info(
+    room_id: i64,
+    cookie: &str,
+    img_key: &str,
+    sub_key: &str,
+    wts: u64,
+) -> Request {
+    let params = vec![
+        ("id".to_string(), room_id.to_string()),
+        ("type".to_string(), "0".to_string()),
+        ("web_location".to_string(), "444.8".to_string()),
+    ];
+    Request {
+        url: wbi::signed_url(
+            &format!("{LIVE_API_BASE}/xlive/web-room/v1/index/getDanmuInfo"),
+            &params,
+            img_key,
+            sub_key,
+            wts,
+        ),
+        cookie: cookie.to_string(),
+        name: "live_danmu_info",
+    }
+}
+
 /// 观看历史一页（`GET /x/web-interface/history/cursor`）。
 ///
 /// 只认 Cookie，不需要 WBI 签名。`max` / `view_at` 是第一页响应里
@@ -750,4 +823,24 @@ mod tests {
         assert!(first.url.contains("segment_index=1"));
     }
 
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    #[test]
+    fn live_danmu_info_is_wbi_signed() {
+        // 实测裸请求 -352，只有带 w_rid / wts 才 code=0。
+        let r = live_danmu_info(1016, "SESSDATA=x", "imgkey", "subkey", 1_702_204_169);
+        assert_eq!(r.name, "live_danmu_info");
+        assert!(r.url.starts_with(
+            "https://api.live.bilibili.com/xlive/web-room/v1/index/getDanmuInfo?"
+        ));
+        assert!(r.url.contains("id=1016"));
+        assert!(r.url.contains("type=0"));
+        assert!(r.url.contains("web_location=444.8"));
+        assert!(r.url.contains("wts=1702204169"));
+        assert!(r.url.contains("w_rid="));
+    }
 }

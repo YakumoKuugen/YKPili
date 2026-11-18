@@ -197,7 +197,7 @@ impl ReqwestClient {
             .inner
             .get(&req.url)
             .header("User-Agent", UA)
-            .header("Referer", "https://www.bilibili.com/")
+            .header("Referer", referer_for(&req.url))
             .header("Accept", "text/xml, application/octet-stream, */*");
         if !cookie.is_empty() {
             rb = rb.header("Cookie", &cookie);
@@ -256,7 +256,7 @@ impl HttpClient for ReqwestClient {
             .inner
             .get(&req.url)
             .header("User-Agent", UA)
-            .header("Referer", "https://www.bilibili.com/")
+            .header("Referer", referer_for(&req.url))
             .header("Accept", "application/json, text/plain, */*");
         if !cookie.is_empty() {
             rb = rb.header("Cookie", &cookie);
@@ -273,6 +273,18 @@ impl HttpClient for ReqwestClient {
             return Err(format!("{} 返回 HTTP {status}", req.name));
         }
         Ok(body)
+    }
+}
+
+/// 读请求的 `Referer`：直播域名走 `live.bilibili.com`，其余走主站。
+///
+/// 直播接口（列表 / 取流）用直播站的 Referer 更贴近浏览器；主站接口
+/// 沿用原来的首页 Referer，行为不变。
+fn referer_for(url: &str) -> &'static str {
+    if url.contains("live.bilibili.com") {
+        "https://live.bilibili.com/"
+    } else {
+        "https://www.bilibili.com/"
     }
 }
 
@@ -1865,6 +1877,18 @@ fn check_message_code_value(body: &str, action: &str) -> Result<(), String> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn live_requests_use_live_referer() {
+        assert_eq!(
+            referer_for("https://api.live.bilibili.com/relation/v1/feed/feed_list"),
+            "https://live.bilibili.com/"
+        );
+        assert_eq!(
+            referer_for("https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all"),
+            "https://www.bilibili.com/"
+        );
+    }
 
     #[test]
     fn playurl_voucher_is_not_playable() {

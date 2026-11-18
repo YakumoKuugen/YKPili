@@ -20,23 +20,32 @@ impl PlayerView {
         let source = self
             .source
             .as_ref()
-            .map(|s| (s.video_url.clone(), s.audio_url.clone()));
+            .map(|s| (s.video_url.clone(), s.audio_url.clone(), s.is_live));
         let fallback = if source.is_none() && !self.loading_source && self.model.error().is_none() {
             std::env::var("YK_VIDEO").ok()
         } else {
             None
         };
-        let Some((video, audio)) = source.or_else(|| fallback.map(|v| (v, None))) else {
+        let Some((video, audio, is_live)) = source
+            .or_else(|| fallback.map(|v| (v, None, false)))
+        else {
             return;
         };
         self.tried_worker = true;
-        // 起播位置（续播）：mpv 打开文件时直接定位过去。
+        // 直播 CDN 只认直播站 Referer；沿用点播域名会 403 / 无限转圈。
+        let referer = if is_live {
+            "https://live.bilibili.com/"
+        } else {
+            "https://www.bilibili.com/"
+        };
+        // 起播位置（续播）：mpv 打开文件时直接定位过去；直播固定 0。
         let worker = crate::video_worker::FrameWorker::spawn_with_audio(
             video,
             audio,
             1280,
             720,
-            self.start_position,
+            if is_live { 0.0 } else { self.start_position },
+            referer.to_string(),
         );
         if worker.is_none() {
             // 线程都没起来：这是明确的「无法播放」，必须落错误日志并给出界面提示。

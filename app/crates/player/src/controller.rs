@@ -60,14 +60,11 @@ impl PlayerView {
     ///
     /// `page` 是 B 站网页里的 `?p=`（从 1 开始）；`None` / 1 走默认第一 P。
     /// 深链与用户脚本会把网页参数带进来，否则多 P 视频永远只能播第一集。
-    pub fn open_bvid_at_page(
-        &mut self,
-        bvid: String,
-        page: Option<u32>,
-        seed: Option<f64>,
-        cx: &mut Context<Self>,
-    ) {
-        let page = page.filter(|page| (1..=9_999).contains(page));
+    /// 换源公共复位：点播 / 直播共用，避免两套复位逻辑漂移。
+    ///
+    /// 只复位「与播什么无关的运行时 + 上一条会话的数据」，不设置起播位置、
+    /// 不发起请求；调用方拿到新代际后自己决定取哪个源。
+    pub(crate) fn begin_new_source(&mut self) -> u64 {
         // 换源前先把上一条的关闭上报补掉，否则连续点两个视频时
         // 第一个只留下打开时的 0s 那一拍。
         self.flush_history_report();
@@ -77,6 +74,7 @@ impl PlayerView {
         self.loading_source = true;
         self.model.clear_error();
         self.source = None;
+        self.live = None;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             self.worker = None;
@@ -91,6 +89,7 @@ impl PlayerView {
         self.no_frame_logged = false;
         self.play_time = 0.0;
         self.model.state.position_secs = 0.0;
+        self.model.state.duration_secs = 0.0;
         self.model.state.playing = true;
         // 起播即藏控制栏：画面优先，鼠标一动再浮出来。
         self.model.controls_visible = false;
@@ -103,13 +102,12 @@ impl PlayerView {
         self.escape_hint_generation = self.escape_hint_generation.wrapping_add(1);
         self.finish_handled = false;
         // 续播上下文重置：起播位置要等取流成功（拿到时长）才能定。
-        self.resume_seed = seed;
+        self.resume_seed = None;
         self.link_start_secs = None;
         self.start_position = 0.0;
         self.resume_key = None;
         self.last_resume_save = 0.0;
         // 信息面板数据跟着换源重置：旧视频的标签/评论不能落到新视频上。
-        // 滚动位置也回到顶部，否则新视频一打开就停在旧视频的评论高度。
         self.tags.clear();
         self.comments = CommentState::Idle;
         self.comment_section.reset();
@@ -124,6 +122,7 @@ impl PlayerView {
         self.scrubbing = false;
         self.last_scrub_seek = None;
         self.seek_settle_until = None;
+        self.progress_track_bounds.set(None);
         self.meta_generation = self.meta_generation.wrapping_add(1);
         self.followed = false;
         self.follow_known = false;
@@ -155,6 +154,19 @@ impl PlayerView {
         self.interaction_note = None;
         self.interaction_note_closing = false;
         self.interaction_note_generation = self.interaction_note_generation.wrapping_add(1);
+        generation
+    }
+
+    pub fn open_bvid_at_page(
+        &mut self,
+        bvid: String,
+        page: Option<u32>,
+        seed: Option<f64>,
+        cx: &mut Context<Self>,
+    ) {
+        let page = page.filter(|page| (1..=9_999).contains(page));
+        let generation = self.begin_new_source();
+        self.resume_seed = seed;
         // 本地没有记录、也没有历史页带来的进度时，才去服务端历史里找一次
         // （别的设备 / 别的客户端看过，本地不知道）。
         let need_remote_history =
@@ -1282,7 +1294,8 @@ impl PlayerView {
 
     /// 播到「已加载区间」末尾前 60 秒就预取下一段。
     pub(crate) fn ensure_danmaku_ahead(&mut self, cx: &mut Context<Self>) {
-        if self.danmaku_segment_done || self.danmaku_cid <= 0 {
+        // 直播没有 cid 弹幕分段；显式守卫，不依赖上游一定把 cid 传成 0。
+        if self.is_live() || self.danmaku_segment_done || self.danmaku_cid <= 0 {
             return;
         }
         let loaded_until = self.danmaku_next_segment.saturating_sub(1) as f64
@@ -2311,6 +2324,10 @@ impl PlayerView {
         if self.closing {
             return;
         }
+        // 直播：关闭动画一开始就断开聊天，别让线程继续收包到实体销毁。
+        if let Some(live) = self.live.as_mut() {
+            live.chat.stop();
+        }
         // 全屏关闭不在系统全屏动画里再做缩回：直接请 AppRoot 移除浮窗，
         // 由 AppRoot 在同一拍把窗口退出全屏，避免两层动画叠在一起。
         if self.model.state.fullscreen {
@@ -2370,6 +2387,11 @@ impl PlayerView {
     /// 所以退出动画、历史上报、续播落盘都不会漏。
     /// 设置项关闭时只停在最后一帧并叫出控制栏，交给用户自己关。
     pub(crate) fn on_playback_finished(&mut self, cx: &mut Context<Self>) {
+        // 直播断流 / 下播：绝不自动关窗，改为断流浮层等用户选择。
+        if self.is_live() {
+            self.on_live_finished(cx);
+            return;
+        }
         if self.finish_handled {
             return;
         }
@@ -3089,6 +3111,10 @@ impl PlayerView {
 
     /// 跳到指定秒数。拖动松手、键盘快进、续播都走这里，避免多套 seek 逻辑。
     pub(crate) fn seek(&mut self, position_secs: f64, cx: &mut Context<Self>) {
+        // 直播没有时间轴：左右方向键 / 拖动一律 no-op（设计文档 6.3）。
+        if self.is_live() {
+            return;
+        }
         // 夹到 [0, duration]：键盘连按右方向键很容易冲过片尾，
         // 越过之后 mpv 会直接 EOF，看起来像「一按就关播」。
         let duration = self.model.state.duration_secs;
@@ -3189,8 +3215,15 @@ impl PlayerView {
         if self.source.is_none() {
             return;
         }
+        // 直播换流期间也置灰：连点不同档位只会让后一个结果覆盖前一个。
+        let switching = self.quality_switching
+            || self
+                .live
+                .as_ref()
+                .map(|live| live.quality_switching)
+                .unwrap_or(false);
         let open = !self.quality_popover_open;
-        self.quality_popover_open = open && !self.quality_switching;
+        self.quality_popover_open = open && !switching;
         self.speed_popover_open = false;
         if !self.quality_popover_open {
             self.control_popover_bounds.set(None);
@@ -3245,6 +3278,11 @@ impl PlayerView {
 
     /// 点选某档清晰度：按 qn 重新取流，原位换片并保留播放进度。
     pub(crate) fn select_quality(&mut self, qn: i32, cx: &mut Context<Self>) {
+        // 直播与点播共用「画质菜单」入口，换流方式由模式决定。
+        if self.is_live() {
+            self.select_live_quality(qn, cx);
+            return;
+        }
         if self.quality_switching || self.page_switching {
             return;
         }
@@ -3518,6 +3556,13 @@ impl PlayerView {
         };
         if session.bili_jct.trim().is_empty() {
             self.show_interaction_note("登录会话已失效，请重新登录后再发弹幕".into(), true, cx);
+            return;
+        }
+        // 直播：走 `/msg/send`，发送目标由模式决定；画面弹幕列表不参与。
+        if self.is_live() {
+            if let Some(room_id) = self.live.as_ref().map(|live| live.room_id) {
+                self.send_live_danmaku(room_id, text, session, st, cx);
+            }
             return;
         }
         let Some(source) = self.source.clone() else {

@@ -1021,7 +1021,7 @@ ul.clean li::marker { color: var(--theme-primary); }
 .s12-live-badge { position: absolute; left: var(--space-2); top: var(--space-2);
   display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-0-5) var(--space-2);
   border-radius: var(--badge-radius); font-size: var(--fs-caption); font-weight: var(--fw-semibold);
-  background: var(--status-error); color: var(--text-on-accent); }
+  background: var(--bili-pink); color: var(--text-on-accent); }
 .s12-live-online { position: absolute; left: var(--space-2); bottom: var(--space-2);
   display: inline-flex; align-items: center; gap: var(--space-1); padding: var(--space-0-5) var(--space-2);
   border-radius: var(--badge-radius); font-size: var(--fs-caption);
@@ -2388,4 +2388,208 @@ ul.clean li::marker { color: var(--theme-primary); }
   .s129-float.is-out, .s129-scrim.is-out { animation: s129-fade-out 260ms linear both; }
   @keyframes s129-fade-in { from { opacity: 0; } to { opacity: 1; } }
   @keyframes s129-fade-out { from { opacity: 1; } to { opacity: 0; } }
+}
+
+
+/* ============================================================================
+   12.10 关注页 · 直播分栏与直播播放（2026-11-18）
+   ---------------------------------------------------------------------------
+   两个场景：
+   ① 关注页的「动态 / 直播」二级分栏：Dock 上方一条胶囊 + 直播封面网格；
+   ② 直播播放浮窗：沿用 06 节的 600 高浮窗、88 控制栏、400 面板，
+      只把点播专属件（进度拖动 / 倍速 / 弹幕输入 / 评论 Tab）换掉。
+
+   卡片按首页封面卡口径：208×184，内边距 8，封面 192×108（16:9）。
+   12.4 独立直播页的 208×117（封面铺满卡片）是另一套口径，本页不采用。
+   ========================================================================== */
+:root {
+  --s1210-card-w:   208px;
+  --s1210-card-h:   184px;
+  --s1210-cover-h:  108px;
+  --s1210-tab-h:     30px;
+  --s1210-stage-h:  720px;
+}
+
+/* ---------- 底部 Dock：二级分页 + 一级导航 ---------- */
+.s1210-dock {
+  position: absolute; left: 50%; bottom: 20px; transform: translateX(-50%);
+  z-index: 26; display: flex; flex-direction: column; align-items: center; gap: var(--space-2);
+}
+.s1210-tabs {
+  display: flex; align-items: center; gap: 2px; padding: 3px;
+  border-radius: var(--radius-full);
+  background: var(--surface-elevated-strong);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-glass-elevated);
+}
+.s1210-tab {
+  height: var(--s1210-tab-h); padding: 0 14px; border: 0; cursor: default;
+  display: inline-flex; align-items: center; gap: 6px;
+  border-radius: var(--radius-full); background: transparent;
+  font-family: inherit; font-size: var(--fs-caption); font-weight: var(--fw-medium);
+  color: var(--text-3);
+}
+.s1210-tab.on { background: var(--fill-2); color: var(--theme-primary); font-weight: var(--fw-semibold); }
+.s1210-tab .dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--bili-pink);
+  display: inline-block;
+}
+.s1210-maindock {
+  display: flex; align-items: center; gap: 4px; padding: 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface-elevated-strong);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-glass-elevated);
+}
+.s1210-maindock button {
+  height: 40px; padding: 0 12px; display: flex; align-items: center; gap: 8px;
+  border: 0; border-radius: var(--radius-full); background: transparent;
+  color: var(--text-2); font-family: inherit; font-size: var(--fs-caption);
+  font-weight: var(--fw-medium); white-space: nowrap; cursor: default;
+}
+.s1210-maindock button.on { background: var(--theme-primary); color: #fff; font-weight: var(--fw-semibold); }
+.s1210-maindock .sep { width: 1px; height: 20px; margin: 0 4px; background: var(--border-subtle); }
+.s1210-maindock .unread {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--bili-pink);
+  display: inline-block;
+}
+
+/* ---------- 直播封面卡 ---------- */
+.s1210-grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-4); }
+.s1210-card {
+  width: var(--s1210-card-w); height: var(--s1210-card-h);
+  padding: var(--space-2); border-radius: var(--card-radius);
+  background: var(--surface-content); border: 1px solid var(--border-subtle);
+  display: flex; flex-direction: column;
+}
+.s1210-card:hover { background: var(--surface-content-hover); border-color: var(--border-strong); }
+.s1210-cover {
+  position: relative; width: 100%; height: var(--s1210-cover-h);
+  border-radius: var(--media-radius); overflow: hidden;
+  background: linear-gradient(135deg, #2B3550, #101623);
+}
+.s1210-cover .s12-live-badge { background: var(--bili-pink); z-index: 2; }
+.s1210-cover::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 40px;
+  background: linear-gradient(180deg, rgba(0,0,0,0), rgba(0,0,0,.70));
+}
+.s1210-watched {
+  position: absolute; left: var(--space-2); bottom: 6px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: var(--fs-overlay); color: #fff; font-variant-numeric: tabular-nums;
+  text-shadow: 0 1px 2px rgba(0,0,0,.55);
+}
+.s1210-title {
+  margin-top: var(--space-1); font-size: var(--fs-control); line-height: 1.38;
+  color: var(--text-1); font-weight: var(--fw-medium);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.s1210-byline {
+  margin-top: auto; display: flex; align-items: center; gap: var(--space-1);
+  min-width: 0; font-size: var(--fs-overlay); color: var(--text-4);
+  white-space: nowrap; overflow: hidden;
+}
+.s1210-byline .av {
+  width: 18px; height: 18px; border-radius: 50%; flex: none;
+  background: linear-gradient(135deg, #7BD3F0, #F0A6C0);
+}
+.s1210-byline b {
+  font-weight: var(--fw-medium); color: var(--text-3);
+  overflow: hidden; text-overflow: ellipsis;
+}
+.s1210-byline em { font-style: normal; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- 直播播放器 ---------- */
+.s1210-live-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: var(--badge-radius);
+  background: var(--bili-pink); color: #fff;
+  font-size: var(--fs-overlay); font-weight: var(--fw-semibold); letter-spacing: .02em;
+}
+.s1210-live-tag .icon { color: #fff; }
+.s1210-outage {
+  position: absolute; inset: 0; z-index: 8;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: var(--space-3); text-align: center; padding: var(--space-6);
+  background: rgba(11, 15, 20, .80);
+  color: #fff;
+}
+.s1210-outage .ico {
+  width: 52px; height: 52px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.16);
+  color: rgba(255,255,255,.86);
+}
+.s1210-outage h4 { margin: 0; font-size: var(--fs-title); font-weight: var(--fw-semibold); }
+.s1210-outage p {
+  margin: 0; max-width: 42ch; line-height: 1.7;
+  font-size: var(--fs-caption); color: rgba(255,255,255,.62);
+}
+.s1210-outage .acts { display: flex; gap: var(--space-2); margin-top: var(--space-1); }
+
+
+/* ---------- 12.10.5 直播弹幕（右侧聊天框） ---------- */
+.s1210-chat { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.s1210-chat-head {
+  display: flex; align-items: center; gap: var(--space-1);
+  padding: var(--space-2) var(--space-4); font-size: var(--fs-caption); color: var(--text-4);
+}
+.s1210-chat-head .status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--status-success); }
+.s1210-chat-head .spacer { flex: 1; }
+.s1210-chat-filter {
+  padding: 1px 8px; border-radius: var(--badge-radius);
+  border: 1px solid var(--border-subtle); color: var(--text-3);
+  font-size: var(--fs-overlay);
+}
+.s1210-chat-list {
+  flex: 1; min-height: 0; overflow: hidden;
+  padding: 0 var(--space-4) var(--space-2);
+  display: flex; flex-direction: column; gap: 5px;
+  font-size: var(--fs-control); line-height: 1.5;
+  /* 顶部与底部各留一次淡出，暗示「可以继续滚」 */
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 12px, #000 calc(100% - 24px), transparent 100%);
+          mask-image: linear-gradient(180deg, transparent 0, #000 12px, #000 calc(100% - 24px), transparent 100%);
+}
+.s1210-chat-row { display: flex; gap: 2px; color: var(--text-2); word-break: break-word; }
+.s1210-chat-row .name { flex: none; color: var(--text-3); font-weight: var(--fw-medium); }
+.s1210-chat-row .name.guard { color: var(--bili-pink); }
+.s1210-chat-row .name.admin { color: var(--theme-primary); }
+.s1210-chat-row .colon { flex: none; color: var(--text-4); }
+.s1210-chat-row .text { color: var(--text-2); }
+.s1210-chat-sys { align-self: center; color: var(--text-4); font-size: var(--fs-overlay); }
+.s1210-chat-gift {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-radius: var(--radius-md);
+  background: var(--theme-10); color: var(--theme-primary);
+  font-size: var(--fs-overlay);
+}
+.s1210-chat-gift .icon { color: var(--theme-primary); }
+.s1210-chat-foot { padding: 0 var(--space-4) var(--space-3); display: flex; justify-content: center; }
+.s1210-chat-more {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 10px; border-radius: var(--badge-radius);
+  background: var(--theme-primary); color: #fff;
+  font-size: var(--fs-overlay); font-weight: var(--fw-medium);
+}
+.s1210-tab-count {
+  margin-left: 5px; padding: 0 5px; border-radius: var(--badge-radius);
+  background: var(--fill-2); color: var(--text-3);
+  font-size: var(--fs-micro); font-variant-numeric: tabular-nums;
+}
+.s1210-chat-state {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: var(--fs-overlay); color: rgba(255,255,255,.55);
+}
+.s1210-chat-state i { width: 5px; height: 5px; border-radius: 50%; background: var(--status-success); }
+
+
+/* ---------- 12.10.4 直播面板的收起 / 展开（与 06 节同一套规则） ----------
+   面板宽 400（展开）/ 200（收起），骑边界按钮常驻；收起时内容按 400 排版、右半被裁。
+   直播没有新增控制栏规则：控制栏宽度与视频区一致、不随面板变化（与 06 节相同）。 */
+.pw-live.collapsed .s1210-chat-head .spacer { display: none; }
+.pw-live.collapsed .s1210-chat-list { padding-right: var(--space-3); }
+/* 收起态只露出前 200px，聊天仍按行显示；底部「回到最新」居中于可见区 */
+.pw-live.collapsed .s1210-chat-foot {
+  justify-content: flex-start;
+  padding-left: var(--space-4); padding-right: var(--space-3);
 }

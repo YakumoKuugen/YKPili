@@ -19,6 +19,8 @@ pub mod history;
 pub mod http;
 pub mod image_cache;
 pub mod interaction;
+pub mod live;
+pub mod live_chat;
 pub mod login;
 pub mod media;
 pub mod messages;
@@ -48,6 +50,8 @@ pub use messages::{
     ChatKind, ChatMessage, Conversation, InboxCursor, MessageChannel, MessageEntry, MessageTarget,
     MessageUser, UnreadCounts,
 };
+pub use live::{LivePage, LivePlayback, LiveQuality, LiveRoom, LiveRoomInfo, LIVE_PAGE_SIZE};
+pub use live_chat::{LiveChatEvent, LiveChatHandle, LiveChatKind, LiveChatMessage};
 pub use yk_domain::models::{CoverItem, LoginState, UserSession};
 pub use yk_domain::playback::PlaybackSource;
 pub use yk_domain::player::{PlayerPrefs, PlayerState, RATE_OPTIONS};

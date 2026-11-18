@@ -12,6 +12,10 @@ impl PlayerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // 直播：弹幕 / 直播信息，由 live 模块渲染；外壳与点播共用同一个容器。
+        if self.is_live() {
+            return self.live_tab_content(t, active, cx);
+        }
         match active {
             0 => self.comments_tab(t, window, cx),
             1 => self.danmaku_tab(t),

@@ -172,6 +172,19 @@ impl MpvPlayer {
     /// mpv 会在打开文件时直接定位到该位置 —— 不会先播开头再跳。
     /// `start_secs <= 0` 表示从头播。
     pub fn new_with_start(width: u32, height: u32, start_secs: f64) -> Result<Self, MpvError> {
+        Self::new_with_start_and_referer(width, height, start_secs, "https://www.bilibili.com/")
+    }
+
+    /// 同 [`MpvPlayer::new_with_start`]，但可指定 HTTP `Referer`。
+    ///
+    /// 直播 CDN 认 `live.bilibili.com`：沿用点播域名的 Referer 会被 403 /
+    /// 无限转圈。点播传主站域名，行为与旧实现一致。
+    pub fn new_with_start_and_referer(
+        width: u32,
+        height: u32,
+        start_secs: f64,
+        referer: &str,
+    ) -> Result<Self, MpvError> {
         let lib = Self::load_lib()?;
 
         // 把这个块单独隔离：`Symbol` 借用 `lib`，块结束即释放，
@@ -249,6 +262,7 @@ impl MpvPlayer {
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 \
                  (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
             };
+            let referer_field = format!("Referer: {referer}");
             for (k, v) in [
                 ("vo", "libmpv"), // 用 render API 必须 libmpv，不能 null
                 // 音频交给 mpv 自己播。
@@ -272,7 +286,7 @@ impl MpvPlayer {
                 // B 站 CDN 对 Referer/UA 有要求；直接交给 mpv 的 HTTP 层，
                 // 避免 m4s 请求 403。
                 ("user-agent", default_ua),
-                ("http-header-fields", "Referer: https://www.bilibili.com/"),
+                ("http-header-fields", referer_field.as_str()),
             ] {
                 let ck = CString::new(k).unwrap();
                 let cv = CString::new(v).unwrap();

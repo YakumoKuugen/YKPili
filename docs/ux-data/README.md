@@ -8,7 +8,7 @@
 | 文件 | 内容 |
 | --- | --- |
 | `manifest.js` | 章节清单 + 跨章锚点索引 |
-| `<id>.js` | 单章数据（22 份） |
+| `<id>.js` | 单章数据（24 份） |
 | `previews.js` | 首页三张实景预览的 HTML |
 
 单章数据结构：
@@ -64,7 +64,7 @@ docs/
     doc.css                       原文档全部设计令牌与预览样式（119 KB）
     shell.css                     阅读器外壳样式（11 KB）
     doc.js                        路由 / 懒加载 / 目录 / 搜索（18 KB）
-  ux-data/                        本目录（22 章 + manifest + previews，约 800 KB）
+  ux-data/                        本目录（24 章 + manifest + previews，约 850 KB）
   archive/
     ux-design-preview.full-2026-10-25.html   拆分前的单文件完整版（只读参考）
 ```

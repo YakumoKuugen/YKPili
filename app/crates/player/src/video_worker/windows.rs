@@ -59,7 +59,7 @@ pub struct FrameWorker {
 impl FrameWorker {
     /// 启动渲染线程。失败（找不到 libmpv / 打不开文件）返回 `None`。
     pub fn spawn(video: String, width: u32, height: u32) -> Option<Self> {
-        Self::spawn_with_audio(video, None, width, height, 0.0)
+        Self::spawn_with_audio(video, None, width, height, 0.0, "https://www.bilibili.com/".to_string())
     }
 
     /// 启动渲染线程；DASH 视频把独立音轨一起交给 mpv。
@@ -72,6 +72,8 @@ impl FrameWorker {
         width: u32,
         height: u32,
         start_secs: f64,
+        // HTTP Referer：点播主站域名，直播 live.bilibili.com。
+        referer: String,
     ) -> Option<Self> {
         // 与 macOS 同一条理由：无界队列遇到 UI 卡顿会按 60fps 堆积整帧 BGRA，
         // 1080p 每帧 8 MB，几秒就是几百 MB。容量 2 + try_send，内存恒定。
@@ -86,7 +88,12 @@ impl FrameWorker {
         std::thread::Builder::new()
             .name("yk-video-render".into())
             .spawn(move || {
-                let mut player = match MpvPlayer::new_with_start(width, height, start_secs) {
+                let mut player = match MpvPlayer::new_with_start_and_referer(
+                    width,
+                    height,
+                    start_secs,
+                    &referer,
+                ) {
                     Ok(p) => p,
                     Err(e) => {
                         yk_infra::error_log::error("video", format!("渲染线程启动失败：{e}"));
