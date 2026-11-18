@@ -575,6 +575,12 @@ impl AppRoot {
         self
     }
 
+    /// 测试 / 截图入口：把搜索结果切到指定 Tab。
+    pub fn with_search_tab(mut self, tab: yk_infra::search::SearchTab) -> Self {
+        self.search.tab = tab;
+        self
+    }
+
     /// 测试 / 截图入口：注入联想面板内容。
     pub fn with_search_suggestions(
         mut self,
@@ -3813,6 +3819,29 @@ impl yk_library::search::SearchHost for AppRoot {
 
     fn search_open_video(&mut self, bvid: String, cx: &mut Context<Self>) {
         self.open_search_video(bvid, cx);
+    }
+
+    fn search_open_live(
+        &mut self,
+        room: yk_infra::live::LiveRoom,
+        entrance: Option<CoverSource>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if room.room_id <= 0 {
+            return;
+        }
+        // 与视频结果同一条路径：结果浮窗先让位，再让播放器换到直播源。
+        self.begin_search_panel_close(cx);
+        self.ensure_player(cx);
+        if let Some(player) = self.playing.clone() {
+            if let Some(source) = entrance {
+                let _ = player.update(cx, |view, cx| view.set_entrance(source, cx));
+            }
+            let _ = player.update(cx, |view, cx| view.open_live(room, cx));
+        }
+        window.refresh();
+        cx.notify();
     }
 
 

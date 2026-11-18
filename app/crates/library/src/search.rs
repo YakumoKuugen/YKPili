@@ -732,6 +732,16 @@ pub trait SearchHost: crate::card::CardHost + Sized {
         self.search_state_mut().input = Some(state);
     }
 
+    /// 点直播结果：打开直播间。`entrance` 是封面几何，组装点据它播展开动画。
+    fn search_open_live(
+        &mut self,
+        _room: yk_infra::live::LiveRoom,
+        _entrance: Option<yk_player::CoverSource>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+    }
+
     fn open_search_video(&mut self, bvid: String, cx: &mut gpui::Context<Self>) {
         // 结果浮窗压在播放器之上，里面的投稿格 / 视频结果要照常可点。
         if (self.card_is_playing() && !self.card_above_player())

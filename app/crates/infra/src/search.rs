@@ -261,6 +261,8 @@ impl SearchMedia {
 #[derive(Debug, Clone, Default)]
 pub struct SearchLive {
     pub roomid: i64,
+    /// 主播 mid；搜索结果不一定给，缺省 0（取流成功后会补）。
+    pub uid: i64,
     pub title: String,
     pub uname: String,
     pub cover_url: String,
@@ -813,6 +815,7 @@ fn parse_media(item: &Value, is_film: bool) -> SearchMedia {
 fn parse_live(item: &Value) -> SearchLive {
     SearchLive {
         roomid: num(item, "roomid") as i64,
+        uid: num(item, "uid") as i64,
         title: clean_text(&str_of(item, "title")),
         uname: clean_text(&str_of(item, "uname")),
         cover_url: image_url(&str_of(item, "cover")),
@@ -1142,7 +1145,7 @@ mod tests {
                  "upic":"//i0.hdslb.com/face.jpg","play":"12000",
                  "video_review":30,"favorites":5,"duration":"11:7","pubdate":1790000000,
                  "typename":"游戏","description":"desc"},
-                {"type":"live_room","roomid":555,"title":"直播","uname":"主播",
+                {"type":"live_room","roomid":555,"uid":66,"title":"直播","uname":"主播",
                  "cover":"//i0.hdslb.com/l.jpg","online":88}
               ]},
               {"result_type":"media_ft","data":[
@@ -1185,6 +1188,8 @@ mod tests {
             "https://i0.hdslb.com/face.jpg@96w_96h_1c.webp"
         );
         assert_eq!(page.results.live.len(), 1);
+        assert_eq!(page.results.live[0].roomid, 555);
+        assert_eq!(page.results.live[0].uid, 66);
         assert_eq!(page.results.films.len(), 1);
         assert_eq!(page.results.films[0].score, Some(9.6));
         assert_eq!(page.results.films[0].episodes.len(), 1);

@@ -9,10 +9,12 @@ use gpui::assets::IconName;
 use gpui::component::input::Input;
 use gpui::component::Icon;
 use gpui::prelude::*;
+use gpui::TestSupportExt as _;
 use gpui::*;
 use yk_domain::format;
 use yk_components::status;
 use yk_theme::theme::*;
+use yk_player::CoverSource;
 
 use crate::image::ImageResidency;
 use yk_infra::search::{
@@ -2091,6 +2093,26 @@ pub fn live_grid<V: SearchHost + 'static>(
     let p = &t.palette;
     let mut grid = div().flex().flex_wrap().gap(px(SPACE_4)).w_full();
     for (index, live) in state.results.live.iter().enumerate() {
+        // 搜索结果只带直播卡片需要的最小字段；主播 / 封面细节由取流回填。
+        let room = yk_infra::live::LiveRoom {
+            room_id: live.roomid,
+            uid: live.uid,
+            uname: live.uname.clone(),
+            face: String::new(),
+            title: live.title.clone(),
+            cover: live.cover_url.clone(),
+            area_name: live.area_name.clone(),
+            watched: 0,
+            watched_text: String::new(),
+            watched_full: String::new(),
+            online: live.online,
+            live_status: 1,
+            followed: None,
+            started_at: None,
+        };
+        // 当前帧封面几何：prepaint 写入，点击时拿它当播放器展开起点。
+        let cover_bounds: Rc<Cell<Option<Bounds<Pixels>>>> = Rc::new(Cell::new(None));
+        let cover_bounds_for_prepaint = cover_bounds.clone();
         let cover = if live.cover_url.is_empty() {
             div().w_full().h(px(117.)).bg(s.fill_3).into_any_element()
         } else {
@@ -2104,14 +2126,31 @@ pub fn live_grid<V: SearchHost + 'static>(
         grid = grid.child(
             div()
                 .id(("search-live", index))
+                // 测试里按 id 点直播卡（真实整卡点击），release 构建是空操作。
+                .test_support()
                 .w(px(COVER_CELL_WIDTH))
                 .flex()
                 .flex_col()
                 .gap(px(SPACE_1))
                 .cursor_pointer()
-                .on_click(cx.listener(|view, _: &ClickEvent, _window, cx| {
-                    view.search_notice("直播间播放接口尚未接入".to_string(), cx);
-                    cx.notify();
+                .on_click(cx.listener(move |view, _: &ClickEvent, window, cx| {
+                    if room.room_id <= 0 {
+                        view.search_notice("直播间信息不完整，暂时无法打开".to_string(), cx);
+                        return;
+                    }
+                    let bounds = cover_bounds.get().unwrap_or_else(|| Bounds {
+                        origin: point(px(0.), px(0.)),
+                        size: size(px(COVER_CELL_WIDTH), px(117.)),
+                    });
+                    let entrance = CoverSource {
+                        bounds,
+                        root_size: window.viewport_size(),
+                        bvid: String::new(),
+                        title: room.title.clone(),
+                        image_url: room.cover_thumb_url(),
+                        placeholder_color: "#4DB6AC".to_string(),
+                    };
+                    view.search_open_live(room.clone(), Some(entrance), window, cx);
                 }))
                 .child(
                     div()
@@ -2121,6 +2160,16 @@ pub fn live_grid<V: SearchHost + 'static>(
                         .rounded(px(MEDIA_RADIUS))
                         .overflow_hidden()
                         .child(cover)
+                        .child(
+                            canvas(
+                                move |bounds, _window, _cx| {
+                                    cover_bounds_for_prepaint.set(Some(bounds));
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .inset_0(),
+                        )
                         .child(
                             div()
                                 .absolute()
